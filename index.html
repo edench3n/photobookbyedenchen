@@ -1,0 +1,1647 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>photobook by edenchen</title>
+
+<!-- 🌟 1. 設定瀏覽器分頁圖示 (Favicon) 🌟 -->
+<link rel="icon" href="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/EDEN.png" type="image/png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- 照片放在 Google Drive / Google 圖片 CDN，先建立連線可以讓第一批照片更快開始下載 -->
+<link rel="preconnect" href="https://drive.google.com">
+<link rel="preconnect" href="https://lh3.googleusercontent.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --header-h: 120px;
+    --gap: 18px;
+    --edge: 48px;
+    --header-font-size: clamp(11px, 9.2px + 0.53vw, 15px); /* 桌機滿版 15px、縮到窄螢幕連續按比例縮小 */
+  }
+  *{ box-sizing: border-box; }
+
+  /* ---------- 全站文字/元件不可被選取，行動裝置點擊不出現灰色高亮方塊 ---------- */
+  html, body, *{
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* ---------- CUSTOM CURSOR: solid #66ff74 circle, desktop / mouse only ---------- */
+  *{
+    cursor: none !important;
+  }
+  #custom-cursor{
+    position:fixed;
+    top:0; left:0;
+    width:40px;
+    height:40px;
+    pointer-events:none; /* critical: lets clicks pass straight through to the page */
+    z-index:99999;
+    will-change: transform;
+    opacity:0;
+    transition: opacity .15s ease;
+  }
+  #custom-cursor img{
+    width:100%;
+    height:100%;
+    display:block;
+  }
+  #custom-cursor.show{ opacity:1; }
+
+  /* touch devices: restore the normal cursor, hide the custom circle */
+  @media (pointer: coarse){
+    #custom-cursor{ display:none !important; }
+    *{
+      cursor: auto !important;
+    }
+  }
+  
+  /* 🌟 2. 將網頁滑鼠指標替換為 EDEN.png (支援 32x32 渲染) 🌟 */
+  html, body {
+    margin:0; padding:0;
+    background:#ffffff;
+    color:#000000;
+    font-family:'DM Sans', sans-serif;
+    font-weight:500;
+    -webkit-font-smoothing: antialiased;
+    overflow-x:hidden;
+    touch-action: manipulation; /* allow scrolling + pinch-zoom, block double-tap-zoom */
+  }
+
+  a, button, .grid-item, .header-left, .nav-arrow {
+    font-family:inherit;
+    font-weight:inherit;
+  }
+
+  /* ---------- FIXED HEADER (always on top, always black, never covered) ---------- */
+  /* 原本用 CSS Grid「五等分欄位」排版：header-left / header-preview / header-right
+     各佔固定的 1/5 欄寬。問題是欄寬只跟總寬度成比例，跟文字實際需要多寬完全無關——
+     螢幕變窄到某個程度（大約 700~1000px 之間，並非任何一個明確的 breakpoint），
+     "photobook by edenchen" 這行字會比它所在的欄位還寬，被迫換行，看起來就是
+     「文字忽然跳行」。改成 Flexbox：每個區塊只佔用文字實際需要的寬度
+     （flex-shrink:0 + white-space:nowrap 鎖住 header-left 不被硬擠壓換行），
+     彼此靠 justify-content:space-between 撐開版面。這樣同一套排版可以套用在所有
+     寬度，不需要再切換 grid/flex，也不會再有那個模式切換造成的額外跳動。 */
+  .fixed-header{
+    position:fixed;
+    top:0; left:0; right:0;
+    z-index:1000;
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap: var(--gap);
+    padding: 36px var(--edge) 0 var(--edge);
+    pointer-events:none;
+  }
+  .fixed-header .header-left,
+  .fixed-header .header-preview,
+  .fixed-header .header-right{
+    color:#000000;
+    /* 字級隨螢幕寬度連續、按比例縮小（不是斷點式的一次性跳動）：桌機滿版
+       （≥1100px）維持 15px 不變，窄到手機縮小，中間用 vw 連續內插。line-height
+       維持 unitless 的 1.5 倍率，會自動跟著 font-size 等比例縮放，不用另外
+       處理；letter-spacing 改用 em（相對字級的比例單位）也是同樣道理，字級
+       縮小時會自動等比例縮小，不會維持固定像素值變得不成比例。
+       這樣做主要是為了避免 header-left / header-preview / header-right 三塊文字
+       加起來的總寬度，在窄螢幕下超出螢幕，把 collab 那塊擠出右側畫面。
+       數值抽成 --header-font-size 這個 CSS 變數（定義在 :root），detail-info
+       （點進照片後下面的說明文字）會直接沿用同一個變數，確保兩邊字級/行距
+       永遠一致，不用兩處分別調整、維護。 */
+    font-size: var(--header-font-size);
+    line-height:1.5;
+    pointer-events:auto;
+    white-space:pre-line;
+  }
+  .fixed-header .header-left{
+    letter-spacing:0.014em;
+    white-space:nowrap; /* 這行字沒有預期的換行點，鎖住不換行，避免中等寬度時被硬擠成兩行 */
+    flex-shrink:0;
+    position:relative;
+    left: var(--header-left-nudge, 0px); /* 桌機滿版 5 欄時，JS 會把這個微調成精準對齊 001 照片左邊緣的偏移量，做法跟 header-preview 對齊 002 完全一樣；手機版這個變數固定是 0，位置不受影響 */
+    opacity:0; /* 原因跟 header-preview / header-right 一樣：等 001 圖片載入、
+                  算出精準位置後才顯示，避免進頁面/重新整理時「先跑到錯誤位置
+                  再跳回來」 */
+    transition: opacity .2s ease;
+  }
+  .fixed-header .header-left.positioned{ opacity:1; }
+  .fixed-header .header-preview{
+    letter-spacing:0.014em;
+    white-space:nowrap;
+    flex-shrink:0;
+    position:relative;
+    left: var(--preview-nudge, 0px); /* 桌機滿版 5 欄時，JS 會把這個微調成精準對齊 002 照片左邊緣的偏移量 */
+    opacity:0; /* 進頁面/重新整理的瞬間，precise 對齊還沒算出來（要等 002 圖片載入），
+                  在算出正確位置之前先不顯示，避免使用者看到它先出現在錯誤位置、
+                  再「跳」到正確位置；JS 算完準確位置後會加上 .positioned 類別
+                  才顯示出來（見下面 .positioned 規則） */
+    transition: opacity .2s ease;
+    /* 注意：這裡故意不對 left 加 transition。JS 每一幀都會用
+       getBoundingClientRect() 讀「當下實際渲染出來的位置」回推下一次要設定的
+       nudge 值；如果 left 有 transition，瀏覽器會在動畫過程中間插值，但 JS
+       讀到的 --preview-nudge（CSS 變數）卻是已經設定好的「最終目標值」而不是
+       插值中的當下值，兩者對不上，算出來的新 nudge 就會偏掉，且在連續拖曳、
+       每一幀都重算的情況下持續放大誤差，畫面上就是「左右亂飛」。拿掉 transition
+       後，每次讀到的都是瀏覽器已經套用完成的實際值，才不會有這個誤差累積問題。 */
+  }
+  .fixed-header .header-preview.positioned{ opacity:1; }
+  @media (hover: hover){
+    /* :hover 只在滑鼠這種真的有「懸停」概念的裝置上生效；觸控裝置點擊時
+       瀏覽器常會把 tap 模擬成短暫的 :hover，導致手機上點按鈕會看到變淡一下
+       這個不想要的效果，用 (hover: hover) 把這條規則限制在滑鼠裝置上即可。 */
+    .fixed-header .header-preview.positioned:hover{ opacity:0.5; }
+  }
+  .fixed-header .header-right{
+    text-align:left;
+    letter-spacing:0.014em;
+    flex-shrink:0;
+    position:relative;
+    left: var(--header-right-nudge, 0px); /* 桌機滿版 5 欄時，JS 會把這個微調成精準對齊 004 照片左邊緣的偏移量，做法跟 header-preview 對齊 002 完全一樣 */
+    opacity:0; /* 原因跟 header-preview 一樣：等 004 圖片載入、算出精準位置後
+                  才顯示，避免進頁面/重新整理時「先跑到錯誤位置再跳回來」 */
+    transition: opacity .2s ease;
+  }
+  .fixed-header .header-right.positioned{ opacity:1; }
+
+  /* ---------- GALLERY PAGE ---------- */
+  #galleryPage{
+    position:relative;
+    min-height:100vh;
+    padding: calc(var(--header-h)) var(--edge) 140px var(--edge);
+    transition: opacity .5s ease, filter .5s ease;
+  }
+  .grid{
+    display:grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: var(--gap) var(--gap);
+    row-gap: 56px;
+  }
+  .grid-item{
+    position:relative;
+    touch-action: manipulation;
+  }
+  .grid-item .thumb-wrap{
+    width:100%;
+    aspect-ratio: 1 / 1;
+    overflow:visible;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+  .grid-item img{
+    max-width:52%;
+    max-height:52%;
+    width:auto;
+    height:auto;
+    object-fit:contain;
+    display:block;
+    transform: scale(1);
+    transition: opacity .3s ease, transform .45s cubic-bezier(.16,1,.3,1);
+    will-change: transform;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+    opacity:0; /* hidden (plain white) until fully loaded — no broken-image icon flash */
+  }
+  .grid-item img.loaded{
+    opacity:1;
+  }
+  .grid-item:hover img{
+    transform: scale(1.12);
+  }
+  .grid-item .idx{
+    margin-top:4px;
+    font-size:9px;
+    letter-spacing:0.5px;
+    color:#000;
+    text-align:center;
+  }
+
+  /* 照片欄數：5 欄（桌機滿版）→ 3 欄 → 2 欄。header 現在固定用 Flexbox（見上），
+     不會再跟著這兩個 breakpoint 切換排版模式，兩者互不影響。 */
+  @media (max-width: 1100px){
+    .grid{ grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 640px){
+    .grid{ grid-template-columns: repeat(2, 1fr); }
+    :root{ --header-h: 140px; --edge: 20px; }
+
+    /* 手機版維持橫向一排（跟桌機同一套排版邏輯），只讓 collab 那塊
+       （header-right）可以在自己的欄位裡自然換行，而不是被固定寬度硬撐出
+       螢幕外：拿掉 flex-shrink:0、加上 min-width:0，它就能在空間不夠時
+       正常換行。
+       光這樣還不夠：「edenchenworks@gmail.com」中間沒有空白，瀏覽器預設只會
+       在空白處換行，遇到這種一整串不可斷開的文字，就算容器縮小了，文字本身
+       還是會把容器撐開、超出螢幕——這正是「collab 還是被推擠出去」的真正原因。
+       加上 overflow-wrap / word-break，允許瀏覽器在真的塞不下時，於文字中間
+       斷行，才能確保它一定會被限制在容器寬度內，不會再溢出螢幕。 */
+    .fixed-header .header-right{
+      flex-shrink:1;
+      min-width:0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    /* 用連續、按比例縮放的字級（跟桌機那條 clamp 同樣做法），螢幕越窄字級
+       跟著越小，多一層安全邊界，確保在最窄的手機上也能完整容納。
+       這裡把最大值從 13px 再調小到 12px——原本 13px 時「edenchenworks@gmail.com」
+       换行換到最後一個「m」單獨被擠到下一行，稍微縮小整體字級後，這一行就能
+       完整塞下，不會再有孤字跑到下一行的狀況。改寫成覆蓋 --header-font-size
+       這個變數，detail-info 會自動跟著一起變小，不用另外處理。 */
+    :root{ --header-font-size: clamp(10px, 8px + 0.625vw, 12px); }
+  }
+
+  /* ---------- HOVER PREVIEW ---------- */
+  .hover-preview{
+    position:fixed;
+    z-index:60;
+    width: 45vw;
+    max-width: 650px;
+    pointer-events:none;
+    opacity:0;
+    transition: none;
+  }
+  .hover-preview.show{
+    opacity:1;
+  }
+  .hover-preview img{
+    width:100%;
+    height:auto;
+    display:block;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.18);
+    background:#111;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+  }
+
+  /* ---------- DETAIL PAGE ---------- */
+  .detail-page{
+    position:fixed;
+    inset:0;
+    z-index:50;
+    background:#ffffff;
+    opacity:0;
+    pointer-events:none;
+    /* 注意：這裡故意不對 opacity 加 transition。這片純白背景如果本身也用
+       淡出/淡入動畫，在它還是半透明的那零點幾秒之間，底下的照片格子會透出來，
+       使用者看到的就是「畫面下方閃過一下首頁縮圖」，而不是乾淨地淡入照片——
+       這正是「前幾次點進去會閃過小圖」這個 bug 的成因。改成瞬間出現（不透明、
+       完全蓋住底下的格子），真正的淡入效果交給下面 .detail-image-wrap 自己的
+       0.25s opacity transition 負責（照片本身在純白背景之上淡入），這樣使用者
+       看到的就是乾淨地淡入照片，不會有格子透出來的問題。 */
+    touch-action: pinch-zoom; /* 擋掉單指上下滑動捲動，但保留雙指縮放的手勢 */
+    overflow:hidden;
+  }
+  .detail-page.active{
+    opacity:1;
+    pointer-events:auto;
+  }
+  .detail-image-wrap{
+    position:absolute;
+    transition: opacity .25s ease;
+    opacity:0;
+  }
+  .detail-image-wrap.show{ opacity:1; }
+  .detail-image-wrap img{
+    width:100%;
+    height:100%;
+    object-fit:contain;
+    display:block;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+  }
+
+  .nav-arrow{
+    position:fixed;
+    top:50%;
+    transform: translateY(-50%);
+    background:none;
+    border:none;
+    color:#000;
+    z-index:55;
+    padding:20px;
+    line-height:1;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    transition: opacity .2s ease;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .nav-arrow svg{
+    width:22px;
+    height:22px;
+    display:block;
+  }
+  .nav-left{ left: calc(var(--edge) - 20px); }
+  .nav-right{ right: calc(var(--edge) - 20px); }
+  .nav-left svg{ transform: scaleX(-1); }
+  @media (hover: hover){
+    /* 觸控裝置點擊常被瀏覽器模擬成短暫的 :hover，導致手機上點按鈕會看到
+       變淡一下這個不想要的效果；限制在真正有滑鼠懸停能力的裝置才生效 */
+    .nav-arrow:hover{ opacity:0.5; }
+  }
+
+  .nav-back{
+    position:fixed;
+    top:170px;
+    left: calc(var(--edge) - 20px);
+    transform:none;
+  }
+  .nav-back svg{ transform: rotate(-90deg); }
+  @media (hover: hover){
+    .nav-back:hover{ opacity:0.5; }
+  }
+
+  .detail-info{
+    position:fixed;
+    left: var(--detail-info-left, var(--edge));
+    top: var(--detail-info-top, auto);
+    bottom: 40px; /* fallback before JS computes --detail-info-top; ignored once top is set */
+    z-index:55;
+    text-align:left;
+    /* 字級、行距直接沿用 header 那排標題用的同一個變數/比例，兩邊永遠一致，
+       header 變小（例如手機版）這裡就跟著一起變小，不用兩處分別調整 */
+    font-size: var(--header-font-size);
+    line-height:1.5;
+    /* 手機版 header 是橫向一排、用 space-between 排版，"collab" 常常被推到很
+       靠右的地方，如果 detail-info 從那個 x 座標開始還維持不換行的單行文字，
+       絕大部分內容會直接超出螢幕右側被裁掉、整段看起來就像「不見了」。
+       這裡限制寬度為「從目前這個 left 位置到螢幕右側邊界（扣掉 edge）」剩下的
+       空間，超過就自動換行，確保不管 left 落在螢幕哪個位置，文字都完整留在
+       可視範圍內，同時仍然維持「對齊 collab 左側」這個位置關係。 */
+    max-width: calc(100vw - var(--detail-info-left, var(--edge)) - var(--edge));
+    overflow-wrap: break-word;
+  }
+  .detail-info .detail-number{ color:#000; }
+  .detail-info .detail-title{ color:#000; }
+
+  /* "preview" 標籤現在是 .fixed-header 裡的一般欄位（跟 header-left / header-right
+     用同一套 grid/flex 排版），樣式定義已合併到上面的 .fixed-header 規則，
+     不再需要獨立的 position:fixed + JS 算像素位置 + opacity 淡入技巧 —— 這樣它
+     一定跟另外兩塊文字同時、立刻出現，畫面變窄時也會跟著同一套 grid/flex 換行，
+     不會被推出螢幕外。 */
+
+  /* ---------- PREVIEW PAGE（左右交錯全版跳轉） ---------- */
+  .preview-page{
+    position:fixed;
+    inset:0;
+    z-index:900;
+    display:flex; /* 一律保持 flex 版面，用 opacity+visibility 做淡入淡出，
+                     不再用 display 直接切換（那樣完全沒有轉場、是瞬間跳出來） */
+    opacity:0;
+    visibility:hidden;
+    pointer-events:none;
+    /* 進場：opacity 立刻開始淡入，visibility 也立刻變 visible（delay:0s），
+       不然還沒淡入就先被 visibility 卡住看不到。
+       退場交給 .active 被移除時，下面沒有 .active 的這條規則接手（見下）。 */
+    transition: opacity .15s ease, visibility 0s linear 0s;
+    touch-action:none; /* 這個頁面不能捲動/縮放 */
+  }
+  .preview-page.active{
+    opacity:1;
+    visibility:visible;
+    pointer-events:auto;
+  }
+  .preview-page:not(.active){
+    /* 退場：opacity 淡出的這 0.15s 期間，visibility 還要維持 visible，
+       等淡出動畫真正跑完（transition-delay 跟 opacity 的時長對齊）才切成
+       hidden，不然畫面會在還沒淡完就被 visibility 直接切掉、變成一半淡出
+       一半瞬間消失的怪異效果 */
+    transition: opacity .15s ease, visibility 0s linear .15s;
+  }
+  .preview-col{
+    position:relative;
+    width:50%;
+    height:100%;
+    overflow:hidden;
+    background:#000;
+  }
+  .preview-col img{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover; /* 剛好填滿區域、不留白，也不會過度放大 */
+    display:block;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+  }
+
+  /* 手機：左右兩欄改成上下兩欄。只改排版方向跟每欄的寬高比例，跳轉的時機/節奏
+     （JS 那邊完全沒動）跟每張照片的填滿方式（object-fit:cover）都維持不變。 */
+  @media (max-width: 640px){
+    .preview-page.active{
+      flex-direction: column;
+    }
+    .preview-col{
+      width:100%;
+      height:50%;
+    }
+  }
+
+  /* DVD 螢幕保護程式風格的彈跳圖示：只在手機版的 preview 頁面顯示。用
+     position:absolute + transform 定位（JS 算好 x/y 直接寫 transform，
+     不动 top/left，效能比較好），z-index 拉到最高蓋過頁面裡所有東西
+     （包含左右兩張照片）。
+     pointer-events 預設 none（跟原本一樣，桌機/非手機寬度時它本來就
+     display:none，不會收到任何事件）；只有在手機版 preview 頁面顯示的
+     那條 media query 裡才打開 pointer-events:auto，讓使用者可以用手指抓取、
+     甩動它——其餘情況點在它所在的位置一樣會直接穿透、關閉 preview 頁面。 */
+  .dvd-bounce{
+    position:absolute;
+    top:0; left:0;
+    width:70px;
+    height:auto;
+    z-index:9999;
+    pointer-events:none;
+    display:none;
+    touch-action:none; /* 讓拖曳完全交給 JS 的 Pointer Events 處理，瀏覽器不要自己介入 */
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+    will-change: transform;
+  }
+  @media (max-width: 640px){
+    .preview-page.active .dvd-bounce{
+      display:block;
+      pointer-events:auto;
+    }
+  }
+
+  /* preview 頁開啟時：所有上方標題文字轉純白色、字重改成 DM Sans Regular
+     （平常是 500），並讓點擊直接穿透到底下的 preview-page（由它負責處理
+     「點任何地方都跳回首頁」） */
+  body.preview-active .fixed-header,
+  body.preview-active .fixed-header *{
+    color:#ffffff !important;
+    font-weight:400 !important;
+    pointer-events:none !important;
+  }
+
+  .hidden{ display:none !important; }
+
+  ::selection{ background:#000; color:#fff; }
+</style>
+</head>
+<body>
+
+  <div id="custom-cursor"><img src="data:image/png;base64,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" alt=""></div>
+
+  <header class="fixed-header">
+    <div class="header-left" id="backHome">photobook by edenchen</div>
+    <div class="header-preview" id="previewLabel">preview</div>
+    <div class="header-right">collab at edenchenworks@gmail.com
+@edench3n</div>
+  </header>
+
+  <main id="galleryPage">
+    <div class="grid" id="photoGrid"></div>
+  </main>
+
+  <div class="hover-preview" id="hoverPreview"></div>
+
+  <div class="preview-page" id="previewPage">
+    <div class="preview-col preview-left">
+      <img id="previewLeftImg" alt="" draggable="false">
+    </div>
+    <div class="preview-col preview-right">
+      <img id="previewRightImg" alt="" draggable="false">
+    </div>
+    <img class="dvd-bounce" id="dvdBounce" alt="" draggable="false" src="data:image/png;base64,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">
+  </div>
+
+  <section class="detail-page" id="detailPage">
+    <div class="detail-image-wrap" id="detailImageWrap">
+      <img id="detailImage" src="" alt="" draggable="false">
+    </div>
+    <button class="nav-arrow nav-back" id="backArrowBtn" aria-label="back to gallery">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nav-arrow nav-left" id="prevBtn" aria-label="previous">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nav-arrow nav-right" id="nextBtn" aria-label="next">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="detail-info">
+      <div class="detail-number" id="detailNumber">001</div>
+      <div class="detail-title" id="detailTitle">Title</div>
+    </div>
+  </section>
+
+<script>
+(function(){
+
+  const GOOGLE_DRIVE_FOLDER_ID = '1wQI2MMoORB78XoC8E5GnxKkLLUEZsxPn';
+  const GOOGLE_API_KEY = 'AIzaSyDoTpWEZ-UGEhOm3HScpL2mTlwc7tYiiNg';
+
+  const demoFileNames = [
+    'Akihabara, Tokyo.jpg', 'MJ Studio Visit.jpg', 'FA Laptop Session.jpg',
+    'Gaming Cafe Interior.jpg', 'FA Grid Archive.jpg', 'FA Golf Fit Label.jpg',
+    'Selina Miles Spread.jpg', 'Bruno Portrait Layout.jpg', 'DS Grande Print.jpg',
+    'Golf Fit Rolls.jpg', 'Creative Studio Collage.jpg', 'Desk Setup Detail.jpg',
+    'MJ Business Card.jpg', 'Skaff Deg Medlemskap.jpg', 'FA Phone Case Collab.jpg'
+  ];
+
+  const demoDims = [
+    { w: 900,  h: 1200 }, { w: 1000, h: 1000 }, { w: 1300, h: 900  },
+    { w: 1400, h: 800  }, { w: 1000, h: 1000 }, { w: 900,  h: 1200 },
+    { w: 850,  h: 1300 }, { w: 1300, h: 950  }, { w: 700,  h: 1400 },
+    { w: 850,  h: 1300 }, { w: 1100, h: 1100 }, { w: 1300, h: 900  },
+    { w: 1400, h: 850  }, { w: 900,  h: 1250 }, { w: 850,  h: 1350 }
+  ];
+
+  const demoColors = ['#1a1a1a','#242424','#151515','#2c2c2c','#1e1e1e'];
+
+  function makePlaceholder(w, h, color, label){
+    const fontSize = Math.round(w * 0.08);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`
+      + `<rect width="100%" height="100%" fill="${color}"/>`
+      + `<text x="50%" y="50%" fill="#ffffff" fill-opacity="0.85" font-family="sans-serif" `
+      + `font-size="${fontSize}" text-anchor="middle" dominant-baseline="middle">${label}</text>`
+      + `</svg>`;
+    return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  }
+
+  const demoPhotos = demoFileNames.map((name, i) => {
+    const dims = demoDims[i % demoDims.length];
+    const color = demoColors[i % demoColors.length];
+    const placeholderUrl = makePlaceholder(dims.w, dims.h, color, String(i + 1).padStart(3, '0'));
+    return {
+      title: name.replace(/\.[^/.]+$/, ''),
+      url: placeholderUrl,
+      thumbUrl: placeholderUrl
+    };
+  });
+
+  let photos = [];
+  let currentIndex = 0;
+
+  const grid = document.getElementById('photoGrid');
+  const galleryPage = document.getElementById('galleryPage');
+  const hoverPreview = document.getElementById('hoverPreview');
+  const detailPage = document.getElementById('detailPage');
+  const detailImageWrap = document.getElementById('detailImageWrap');
+  const detailImage = document.getElementById('detailImage');
+  const detailNumber = document.getElementById('detailNumber');
+  const detailTitle = document.getElementById('detailTitle');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const backHome = document.getElementById('backHome');
+  const backArrowBtn = document.getElementById('backArrowBtn');
+  const headerRight = document.querySelector('.fixed-header .header-right');
+  const detailInfo = document.querySelector('.detail-info');
+  const previewLabel = document.getElementById('previewLabel');
+  const previewPage = document.getElementById('previewPage');
+  const previewLeftImg = document.getElementById('previewLeftImg');
+  const previewRightImg = document.getElementById('previewRightImg');
+
+  const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  const supportsTouch = window.matchMedia('(pointer: coarse)').matches;
+
+  function pad3(n){ return String(n).padStart(3, '0'); }
+
+  // 左右箭頭原本用 top:50% + transform:translateY(-50%) 置中，
+  // 這種「百分比 + transform」的組合在手機 Safari 雙指縮放時，
+  // WebKit 不會即時重算百分比位置，導致縮放過程中箭頭跟著漂移。
+  // 改成用 JS 算好的固定像素 top（跟不會漂移的返回鍵按鈕做法一致），
+  // 縮放中就不會有東西需要重新計算，自然不會飄動。
+  function positionNavArrows(){
+    [prevBtn, nextBtn].forEach(btn => {
+      const h = btn.getBoundingClientRect().height || 64;
+      const top = Math.round((window.innerHeight - h) / 2);
+      btn.style.top = top + 'px';
+      btn.style.transform = 'none';
+    });
+  }
+
+  // 同樣道理：detail-info 文字原本用 bottom:40px 定位，改成 JS 算好的
+  // 固定像素 top，跟左邊對齊 header 的邏輯一起做，縮放時就不會飄動。
+  function syncDetailInfoAlignment(){
+    const rect = headerRight.getBoundingClientRect();
+    document.documentElement.style.setProperty('--detail-info-left', rect.left + 'px');
+
+    if(detailInfo){
+      const infoH = detailInfo.getBoundingClientRect().height || 0;
+      const bottomMargin = 40;
+      const top = window.innerHeight - bottomMargin - infoH;
+      document.documentElement.style.setProperty('--detail-info-top', Math.round(top) + 'px');
+    }
+  }
+
+  // "preview" 標籤對齊 002、"collab" 區塊（header-right）對齊 004，做法完全一樣，
+  // 所以抽成同一個函式重複用：對齊下方指定照片實際渲染出來的左邊緣（縮圖是置中
+  // 顯示在格子裡的，跟格子本身的邊緣不一樣，所以格子對齊還不夠準）。
+  //
+  // 在桌機滿版 5 欄範圍內「持續即時追蹤」目標照片實際渲染出來的位置——拖曳寬度
+  // 時，照片的位置本身就是連續、按比例在變化的（欄寬隨容器寬度平滑縮放），
+  // 每一幀都重新量測、對齊，標籤自然就會跟著它一起連續、按比例地滑動，效果
+  // 就是「拉動時自由按比例縮放」。
+  //
+  // （曾經試過「只在最大寬度量一次、之後凍結成固定偏移量疊加在 flex 自然位置
+  // 上」，但 flex 用 justify-content:space-between 算出來的中間項位置，本來就
+  // 跟下面照片格子的欄位邊界是兩套完全無關的邏輯，固定偏移量疊加在跟照片無關的
+  // 位置上，整段拖曳過程都會對不準，不只是斷點那一下——所以改回這個持續追蹤的
+  // 版本，才是真正跟著照片格子按比例移動的做法。）
+  //
+  // 唯一無法避免的：5→3 欄的斷點本身，是照片格子「整數欄數」瞬間切換造成的
+  // 結構性跳動——目標照片自己在那一刻就會被搬到完全不同的欄位寬度（不是連續
+  // 縮放，是離散跳動），不是「拖曳中持續追蹤」這個做法造成的問題；只要還要求
+  // 兩側都精準對齊該照片，這一下跳動就無法用 JS 消除，除非放棄其中一側的精準
+  // 對齊。
+  const DESKTOP_BREAKPOINT = 1100; // 與 CSS 中 .grid 從 5 欄變 3 欄的 media query 門檻一致
+  function syncEdgeAlignment(el, cssVar, targetDataIndex){
+    if(!el || !grid) return;
+
+    if(window.innerWidth <= DESKTOP_BREAKPOINT){
+      document.documentElement.style.setProperty(cssVar, '0px');
+      // 窄螢幕不需要精準對齊照片，目前這個位置（0 偏移）本來就已經是最終位置，
+      // 直接顯示出來，不會有「先跑到錯誤位置」的問題
+      el.classList.add('positioned');
+      return;
+    }
+
+    const targetImg = grid.querySelector(`.grid-item[data-index="${targetDataIndex}"] img`);
+    if(!targetImg) return; // 目標照片還沒渲染出來，先不顯示這個標籤，等它真的渲染出來再算
+    const imgRect = targetImg.getBoundingClientRect();
+    if(!imgRect.width) return; // 圖片還沒渲染出寬度，先不調，等 load 事件再算一次
+
+    // 讀回目前已經套用的偏移量，還原出「沒有微調時」原本的左邊界，再算出新的
+    // 偏移量——因為對應元素的 left 沒有 CSS transition（見 CSS 註解），這裡讀到
+    // 的永遠是瀏覽器已經套用完成的實際值，不會有動畫插值中的數值跟目標值對不上、
+    // 導致越算越偏的問題。
+    const elRect = el.getBoundingClientRect();
+    const currentNudge = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(cssVar)) || 0;
+    const baseLeft = elRect.left - currentNudge;
+    const nudge = Math.round(imgRect.left - baseLeft);
+    document.documentElement.style.setProperty(cssVar, nudge + 'px');
+    // 算出真正精準的位置後才顯示（見 CSS 的 opacity:0 / .positioned 規則），
+    // 這是「進頁面/重新整理時標籤會先跑到錯誤位置再跳回來」這個 bug 的修法：
+    // 與其讓它先出現在錯誤（預設 0 偏移）的位置、算完再跳過去，不如乾脆讓它
+    // 在還沒算出正確位置之前保持隱藏，算完直接在正確位置出現，使用者就不會
+    // 看到那個「跳」的過程。
+    el.classList.add('positioned');
+  }
+  function syncPreviewAlignment(){
+    syncEdgeAlignment(previewLabel, '--preview-nudge', 1); // 002 = data-index "1"
+  }
+  function syncHeaderRightAlignment(){
+    syncEdgeAlignment(headerRight, '--header-right-nudge', 3); // 004 = data-index "3"
+  }
+  function syncHeaderLeftAlignment(){
+    syncEdgeAlignment(backHome, '--header-left-nudge', 0); // 001 = data-index "0"
+  }
+
+  // 統一入口：視窗/版面真正穩定下來時（不是縮放中）才呼叫，
+  // 一次把左右箭頭、detail-info 文字、header-left、preview 標籤、collab 區塊
+  // 都重新定位好。
+  function syncFixedChrome(){
+    syncDetailInfoAlignment();
+    positionNavArrows();
+    syncHeaderLeftAlignment();
+    syncPreviewAlignment();
+    syncHeaderRightAlignment();
+  }
+
+  async function fetchDriveImages(){
+    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
+       !GOOGLE_DRIVE_FOLDER_ID || GOOGLE_DRIVE_FOLDER_ID === 'YOUR_FOLDER_ID'){
+      return demoPhotos;
+    }
+
+    try{
+      const q = encodeURIComponent(`'${GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
+      const fields = encodeURIComponent('files(id,name,createdTime,thumbnailLink)');
+      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=name&key=${GOOGLE_API_KEY}`;
+
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('Drive API request failed: ' + res.status);
+      const data = await res.json();
+
+      if(!data.files || data.files.length === 0) return demoPhotos;
+
+      return data.files
+        .sort((a,b) => a.name.localeCompare(b.name))
+        .map(file => {
+          // thumbnailLink 是 Google 圖片 CDN 產生的、已經縮圖過的版本（速度快、
+          // 全球都有快取節點，也比較不會像 uc?export=view 那樣在檔案較大時
+          // 被擋掉或跳出「無法掃描病毒」的中介頁面）。網格縮圖只是小圖，
+          // 用 800px 的版本畫質完全足夠；點開大圖看細節時才用原始全尺寸檔案，
+          // 畫質不受任何影響。
+          const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
+          return {
+            title: file.name.replace(/\.[^/.]+$/, ''),
+            url: `https://drive.google.com/uc?export=view&id=${file.id}`, // 原始全尺寸檔案：畫質最高，但走 drive.google.com/uc，
+                                                                            // 不是 CDN，檔案大時常常要等好幾秒才回應，甚至偶爾被
+                                                                            // 導去「無法掃描病毒」的中介頁面——這是白屏拖很久的主因
+            // detailUrl：大圖頁真正優先使用的來源。一樣是 thumbnailLink 這個
+            // Google 圖片 CDN（全球節點、速度快很多），只是把尺寸從網格用的
+            // 800px 拉到 2000px——一般螢幕（含 Retina）全螢幕顯示都綽綽有餘，
+            // 肉眼幾乎看不出跟原始檔案的差異，但下載速度是原本 uc?export=view
+            // 的好幾倍快，白屏時間大幅縮短。
+            detailUrl: thumbBase ? (thumbBase + '=s2000') : '',
+            thumbUrl: thumbBase ? (thumbBase + '=s800') : `https://drive.google.com/uc?export=view&id=${file.id}`, // 網格縮圖：小、快
+            fallbackUrl: thumbBase ? (thumbBase + '=s1600') : '' // 縮圖／原圖都失敗時的備援
+          };
+        });
+    }catch(err){
+      return demoPhotos;
+    }
+  }
+
+  function renderGrid(){
+    grid.innerHTML = '';
+    photos.forEach((photo, i) => {
+      const item = document.createElement('div');
+      item.className = 'grid-item';
+      item.dataset.index = i;
+
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'thumb-wrap';
+
+      const img = document.createElement('img');
+      img.alt = photo.title;
+      img.draggable = false;
+      img.decoding = 'async'; // 解碼不卡主執行緒，捲動/縮放更順
+      // 手機沒有 hover 預覽功能，用瀏覽器原生 lazy loading 讓非畫面內的縮圖
+      // 延後下載，省流量、加快第一批可見縮圖出現的速度；桌機保留即時載入，
+      // 確保滑鼠移過去的當下大圖預覽完全不用等。
+      if(supportsTouch) img.loading = 'lazy';
+      img.addEventListener('load', () => img.classList.add('loaded'));
+      if(i === 0){
+        // "photobook by edenchen"（header-left）對齊 001，同樣要等這張圖片真的
+        // 渲染出寬度才能算準
+        img.addEventListener('load', syncHeaderLeftAlignment);
+      }
+      if(i === 1){
+        // "preview" 標籤的精準桌機對齊要用這張圖片實際渲染出來的寬度才能算，
+        // 圖片載入完成（知道真正尺寸）後再嘗試量測一次（如果之前還沒量過）
+        img.addEventListener('load', syncPreviewAlignment);
+      }
+      if(i === 3){
+        // "collab" 區塊（header-right）對齊 004，同樣要等這張圖片真的渲染出
+        // 寬度才能算準
+        img.addEventListener('load', syncHeaderRightAlignment);
+      }
+      img.onerror = () => {
+        // 縮圖失敗 → 換大一點的備援縮圖 → 最後才退回原始全尺寸檔案
+        if(photo.fallbackUrl && img.src !== photo.fallbackUrl){
+          img.src = photo.fallbackUrl;
+        } else if(img.src !== photo.url){
+          img.src = photo.url;
+        }
+      };
+      img.src = photo.thumbUrl || photo.url; // 網格用小圖，快很多；大圖頁另外載入原始檔
+
+      thumbWrap.appendChild(img);
+
+      const idx = document.createElement('div');
+      idx.className = 'idx';
+      idx.textContent = pad3(i + 1);
+
+      item.appendChild(thumbWrap);
+      item.appendChild(idx);
+      grid.appendChild(item);
+
+      item.addEventListener('click', () => openDetail(i));
+      if(supportsHover){
+        img.addEventListener('mouseenter', () => showHoverPreview(photo, img));
+        img.addEventListener('mouseleave', hideHoverPreview);
+      }
+    });
+  }
+
+  function computeSafeRandomPosition(excludeRect, boxW, boxH){
+    const margin = 24;
+    const buffer = 16;
+    const safeExclude = {
+      left: excludeRect.left - buffer,
+      top: excludeRect.top - buffer,
+      right: excludeRect.right + buffer,
+      bottom: excludeRect.bottom + buffer
+    };
+
+    const maxLeft = Math.max(margin, window.innerWidth - boxW - margin);
+    const maxTop = Math.max(margin, window.innerHeight - boxH - margin);
+
+    let best = null;
+
+    for(let attempt = 0; attempt < 40; attempt++){
+      const left = margin + Math.random() * (maxLeft - margin);
+      const top = margin + Math.random() * (maxTop - margin);
+      const rect = { left, top, right: left + boxW, bottom: top + boxH };
+
+      const overlapsCursorArea =
+        rect.left < safeExclude.right && rect.right > safeExclude.left &&
+        rect.top < safeExclude.bottom && rect.bottom > safeExclude.top;
+
+      if(!overlapsCursorArea){
+        best = rect;
+        break;
+      }
+    }
+
+    if(!best){
+      const roomRight = window.innerWidth - safeExclude.right;
+      const roomLeft = safeExclude.left;
+      const roomBottom = window.innerHeight - safeExclude.bottom;
+      const roomTop = safeExclude.top;
+      const maxRoom = Math.max(roomRight, roomLeft, roomBottom, roomTop);
+
+      let left, top;
+      if(maxRoom === roomRight){
+        left = Math.min(window.innerWidth - boxW - margin, safeExclude.right + margin);
+        top = Math.min(Math.max(margin, excludeRect.top), window.innerHeight - boxH - margin);
+      } else if(maxRoom === roomLeft){
+        left = Math.max(margin, safeExclude.left - boxW - margin);
+        top = Math.min(Math.max(margin, excludeRect.top), window.innerHeight - boxH - margin);
+      } else if(maxRoom === roomBottom){
+        top = Math.min(window.innerHeight - boxH - margin, safeExclude.bottom + margin);
+        left = Math.min(Math.max(margin, excludeRect.left), window.innerWidth - boxW - margin);
+      } else {
+        top = Math.max(margin, safeExclude.top - boxH - margin);
+        left = Math.min(Math.max(margin, excludeRect.left), window.innerWidth - boxW - margin);
+      }
+      best = { left: Math.max(margin, left), top: Math.max(margin, top) };
+    }
+
+    return best;
+  }
+
+  function showHoverPreview(photo, itemEl){
+    // guard: on the rare chance this thumbnail hasn't finished loading yet,
+    // wait for it — cloning an incomplete image is what caused the flicker
+    if(!(itemEl.complete && itemEl.naturalWidth)){
+      const onReady = () => {
+        itemEl.removeEventListener('load', onReady);
+        if(itemEl.matches(':hover')) showHoverPreview(photo, itemEl);
+      };
+      itemEl.addEventListener('load', onReady);
+      return;
+    }
+
+    // clone the thumbnail that's already loaded & decoded on screen — this
+    // guarantees the preview shows THIS photo immediately, with no stale
+    // frame from whichever photo was hovered previously
+    hoverPreview.innerHTML = '';
+    const bigImg = itemEl.cloneNode();
+    bigImg.removeAttribute('loading');
+    bigImg.draggable = false;
+    bigImg.onerror = () => { if(photo.fallbackUrl) bigImg.src = photo.fallbackUrl; };
+    hoverPreview.appendChild(bigImg);
+
+    placeAndReveal(itemEl); // itemEl is the on-screen thumbnail, already loaded: no waiting needed
+  }
+
+  function placeAndReveal(itemEl){
+    const boxW = hoverPreview.getBoundingClientRect().width || Math.min(window.innerWidth * 0.45, 650);
+    const ratio = (itemEl.naturalHeight && itemEl.naturalWidth)
+      ? itemEl.naturalHeight / itemEl.naturalWidth
+      : 1;
+    const boxH = boxW * ratio;
+
+    const excludeRect = itemEl.getBoundingClientRect();
+    const pos = computeSafeRandomPosition(excludeRect, boxW, boxH);
+
+    hoverPreview.style.left = pos.left + 'px';
+    hoverPreview.style.top = pos.top + 'px';
+    hoverPreview.classList.add('show');
+  }
+
+  function hideHoverPreview(){
+    hoverPreview.classList.remove('show');
+  }
+
+  let detailToken = 0;
+  let lastNaturalW = 0, lastNaturalH = 0;
+
+  function positionDetailImage(naturalW, naturalH){
+    const ratio = (naturalW && naturalH) ? naturalW / naturalH : 1;
+
+    const isMobile = window.innerWidth <= 640;
+
+    // clear the arrows / back button / bottom-right info on any viewport;
+    // desktop keeps its original clearance, mobile gets a much tighter one
+    // (just enough to clear the arrow buttons) so the photo can go near-max size
+    const horizontalClearance = isMobile ? 130 : 220;
+    const verticalClearance = isMobile ? 190 : 260;
+
+    const availW = Math.max(120, window.innerWidth - horizontalClearance);
+    const availH = Math.max(120, window.innerHeight - verticalClearance);
+
+    let w = availW;
+    let h = w / ratio;
+    if(h > availH){
+      h = availH;
+      w = h * ratio;
+    }
+
+    detailImageWrap.style.width = w + 'px';
+    detailImageWrap.style.height = h + 'px';
+
+    const left = (window.innerWidth - w) / 2;
+    const top = (window.innerHeight - h) / 2;
+
+    detailImageWrap.style.left = left + 'px';
+    detailImageWrap.style.top = top + 'px';
+  }
+
+  function renderDetail(){
+    const token = ++detailToken;
+    const photo = photos[currentIndex];
+
+    detailNumber.textContent = pad3(currentIndex + 1);
+    detailTitle.textContent = photo.title;
+    syncDetailInfoAlignment(); // 標題長度不同，高度可能改變，重新算一次 top
+
+    // fade out immediately — this is the instant visible feedback on click
+    detailImageWrap.classList.remove('show');
+
+    // ---- 先用已經在畫面上、瀏覽器早就快取好的網格縮圖「暖場」----
+    // 這是白屏拖很久的主要對策：與其整段時間都空白，先把網格那張已經解碼完成
+    // 的縮圖（800px，使用者剛剛就是看著它點進來的）立刻放進大圖區顯示出來，
+    // 讓畫面在點擊的瞬間就有內容；等下面真正的高畫質版本載入完成，再無縫換成
+    // 那張圖。縮圖本身畫質不受影響——使用者最終看到的還是高畫質版本，這裡只是
+    // 拿它來墊過渡的空窗期。
+    const gridItemImg = document.querySelector(`.grid-item[data-index="${currentIndex}"] img`);
+    const warmSrc = (gridItemImg && gridItemImg.complete && gridItemImg.naturalWidth) ? gridItemImg.src : (photo.thumbUrl || '');
+    if(warmSrc){
+      const ratio = (gridItemImg && gridItemImg.naturalWidth && gridItemImg.naturalHeight)
+        ? gridItemImg.naturalWidth / gridItemImg.naturalHeight : 1;
+      lastNaturalW = ratio * 1000;
+      lastNaturalH = 1000;
+      positionDetailImage(lastNaturalW, lastNaturalH);
+      detailImage.src = warmSrc;
+      requestAnimationFrame(() => detailImageWrap.classList.add('show'));
+    }
+
+    const loader = new Image();
+
+    const commit = () => {
+      if(token !== detailToken) return;
+      lastNaturalW = loader.naturalWidth || 1;
+      lastNaturalH = loader.naturalHeight || 1;
+      positionDetailImage(lastNaturalW, lastNaturalH);
+      detailImage.src = loader.src;
+      requestAnimationFrame(() => detailImageWrap.classList.add('show'));
+    };
+
+    // 依序嘗試：detailUrl（Google 圖片 CDN、2000px，又快畫質又好，優先用）→
+    // fallbackUrl（同一個 CDN 但 1600px，備援）→ url（原始全尺寸檔案，走
+    // drive.google.com/uc，最慢，留到真的都失敗才用）→ thumbUrl（保底）
+    const sources = [photo.detailUrl, photo.fallbackUrl, photo.url, photo.thumbUrl].filter(Boolean);
+    let srcIdx = 0;
+    function tryNext(){
+      if(srcIdx >= sources.length) return;
+      loader.src = sources[srcIdx++];
+    }
+    loader.onload = commit;
+    loader.onerror = tryNext;
+    tryNext();
+
+    // already cached — 'load' may not fire again, handle synchronously
+    if(loader.complete && loader.naturalWidth){
+      commit();
+    }
+
+    prefetchNeighbors(currentIndex);
+  }
+
+  // 靜默預先下載鄰近的照片（左右各 2 張），這樣按下一張/上一張箭頭時
+  // 圖片幾乎都已經在瀏覽器快取裡，可以立即無延遲切換
+  const prefetchedUrls = new Set();
+  function prefetchOne(url){
+    if(!url || prefetchedUrls.has(url)) return;
+    prefetchedUrls.add(url);
+    const im = new Image();
+    im.src = url;
+  }
+  function prefetchNeighbors(index){
+    const n = photos.length;
+    if(!n) return;
+    for(let d = 1; d <= 2; d++){
+      const next = photos[(index + d) % n];
+      const prev = photos[(index - d + n) % n];
+      prefetchOne(next.detailUrl || next.url);
+      prefetchOne(prev.detailUrl || prev.url);
+    }
+  }
+
+  function openDetail(index){
+    currentIndex = index;
+    hideHoverPreview();
+    detailPage.classList.add('active');
+    document.body.style.overflow = 'hidden';
+    syncFixedChrome();
+    renderDetail();
+  }
+
+  function closeDetail(){
+    detailPage.classList.remove('active');
+    detailImageWrap.classList.remove('show'); // 立刻清空，避免下次打開時先閃一下舊照片
+    document.body.style.overflow = '';
+  }
+
+  /* =========================================================
+     PREVIEW PAGE：左右交錯全版跳轉
+  ========================================================= */
+
+  // 在等待期間先把「下一張」的圖片載入 + 解碼好（不只是下載，是連畫面像素都準備好），
+  // 這樣真正切換的那一刻只是換一個已經解碼完成的 src，瀏覽器可以直接上屏，
+  // 不會因為臨時解碼大圖而卡頓、看起來像是有轉場。
+  //
+  // 這裡同時修正黑屏問題：photo.url 是 Google Drive 的 uc?export=view 連結，
+  // 在某些情況下（例如檔案較大時 Google 會回傳「無法掃描病毒」的中介頁面，
+  // 而不是圖片本身）會直接載入失敗；原本失敗後沒有任何備援，img 就一直是空的，
+  // 底下 .preview-col 的黑色背景就會整片露出來。現在依序嘗試
+  // 原始大圖 → 高解析度縮圖(fallbackUrl) → 一般縮圖(thumbUrl)，
+  // 只要任何一個能載入成功就使用它。
+  function loadWithFallback(photo){
+    return new Promise((resolve) => {
+      const candidates = [photo && photo.detailUrl, photo && photo.fallbackUrl, photo && photo.url, photo && photo.thumbUrl].filter(Boolean);
+      if(!candidates.length){ resolve(''); return; }
+
+      let i = 0;
+      const img = new Image();
+
+      function finish(url){
+        if(img.decode){
+          img.decode().then(() => resolve(url)).catch(() => resolve(url));
+        } else {
+          resolve(url);
+        }
+      }
+
+      function tryNext(){
+        if(i >= candidates.length){ resolve(''); return; }
+        const url = candidates[i++];
+        img.onload = () => finish(url);
+        img.onerror = tryNext;
+        img.src = url;
+      }
+
+      tryNext();
+    });
+  }
+
+  // ---- 序列與起始張：
+  // 右側＝單數編號（001, 003, 005...），從最前面第一張開始，往後遞增播放
+  // 左側＝雙數編號（002, 004, 006...），從最後一張開始，往前遞減播放
+  // 這樣左右像是「從兩端往中間跑」，方向剛好相反、不會混在一起
+  let previewOddPhotos = [];   // 右側序列
+  let previewEvenPhotos = [];  // 左側序列
+  let previewLeftIdx = 0;
+  let previewRightIdx = 0;
+  let previewActive = false;
+  let previewTurn = 'left';
+  let previewTimer = null;
+  const previewResolvedLeft = [];
+  const previewResolvedRight = [];
+
+  function resolvePreviewImage(photo, cache, idx){
+    if(cache[idx]) return cache[idx];
+    const p = loadWithFallback(photo);
+    cache[idx] = p;
+    return p;
+  }
+
+  // 把當前這一側該顯示的那張圖，重新（提早）暖機一次：
+  // 先觸發載入 + decode，讓瀏覽器準備好像素，之後真正要顯示時幾乎是瞬間的
+  //
+  // 注意：這裡故意「不」清空 previewResolvedLeft / previewResolvedRight 快取。
+  // 每次點進 preview 頁面的起始索引永遠是同一組固定值（左：最後一張／右：
+  // 第一張），如果每次都把快取清空重來，等於把 preparePreviewSequences() 在
+  // 網頁一開始就先做好的預熱結果整個丟掉，使用者點進來時又要重新等一次載入，
+  // 這正是「剛點進去偶爾全黑」的原因。保留快取，resolvePreviewImage() 內建的
+  // `if(cache[idx]) return cache[idx];` 判斷就會直接沿用已經載入好（或正在
+  // 載入中）的同一個 promise，不會重複下載、也不會重新等待。
+  function warmPreviewStart(){
+    previewLeftIdx = previewEvenPhotos.length ? previewEvenPhotos.length - 1 : 0; // 左側：最後一張
+    previewRightIdx = 0; // 右側：第一張
+    if(previewEvenPhotos.length) resolvePreviewImage(previewEvenPhotos[previewLeftIdx], previewResolvedLeft, previewLeftIdx);
+    if(previewOddPhotos.length) resolvePreviewImage(previewOddPhotos[previewRightIdx], previewResolvedRight, previewRightIdx);
+
+    // 同時把「進頁面後第一次切換」會用到的下一張也先預熱。原本只暖機起始畫面，
+    // 下一張要等真正切換到那一刻（stepPreviewSide 觸發時）才開始下載——如果
+    // 那時候使用者剛好進頁面沒多久、圖片還在載入中，第一輪的切換就會等圖片
+    // 載完才真正換畫面，使得開頭幾次切換的間隔時間長短不一（不規則跳動），
+    // 要等這個「提前一步」的暖機追上進度後才會穩定成固定的 0.5 秒節奏。
+    // 這裡提前暖機，讓它從使用者一點進頁面（甚至更早，preparePreviewSequences
+    // 在照片清單一到手就會呼叫這個函式）就開始下載，通常會有遠超過 0.5 秒的
+    // 提前量，等真正切換到它時多半早就已經載完。
+    if(previewEvenPhotos.length > 1){
+      const nextLeftIdx = (previewLeftIdx - 1 + previewEvenPhotos.length) % previewEvenPhotos.length;
+      resolvePreviewImage(previewEvenPhotos[nextLeftIdx], previewResolvedLeft, nextLeftIdx);
+    }
+    if(previewOddPhotos.length > 1){
+      const nextRightIdx = (previewRightIdx + 1) % previewOddPhotos.length;
+      resolvePreviewImage(previewOddPhotos[nextRightIdx], previewResolvedRight, nextRightIdx);
+    }
+  }
+
+  // 照片清單一到手就準備好 preview 用的兩組序列，並且立刻開始暖機第一張，
+  // 這樣不管使用者何時點下 preview，兩張起始畫面大機率早就載入/解碼完成，
+  // 點進去馬上就能看到照片，不會有黑屏的空檔
+  function preparePreviewSequences(){
+    previewOddPhotos = photos.filter((_, i) => i % 2 === 0);
+    previewEvenPhotos = photos.filter((_, i) => i % 2 === 1);
+    warmPreviewStart();
+  }
+
+  async function applyPreviewSide(side){
+    const seq = side === 'left' ? previewEvenPhotos : previewOddPhotos;
+    const cache = side === 'left' ? previewResolvedLeft : previewResolvedRight;
+    const imgEl = side === 'left' ? previewLeftImg : previewRightImg;
+    if(!seq.length) return;
+    const idx = side === 'left' ? previewLeftIdx : previewRightIdx;
+    const url = await resolvePreviewImage(seq[idx], cache, idx);
+    if(!previewActive) return;
+    const stillCurrent = (side === 'left' ? previewLeftIdx : previewRightIdx) === idx;
+    if(stillCurrent && url) imgEl.src = url;
+  }
+
+  function stepPreviewSide(side){
+    if(side === 'left'){
+      if(!previewEvenPhotos.length) return;
+      previewLeftIdx = (previewLeftIdx - 1 + previewEvenPhotos.length) % previewEvenPhotos.length; // 左側往前遞減
+    } else {
+      if(!previewOddPhotos.length) return;
+      previewRightIdx = (previewRightIdx + 1) % previewOddPhotos.length; // 右側往後遞增
+    }
+    // 順便預先暖機下一輪那一側會用到的圖片
+    const nextSeq = side === 'left' ? previewEvenPhotos : previewOddPhotos;
+    const nextCache = side === 'left' ? previewResolvedLeft : previewResolvedRight;
+    const nextIdx = side === 'left'
+      ? (previewLeftIdx - 1 + previewEvenPhotos.length) % previewEvenPhotos.length
+      : (previewRightIdx + 1) % previewOddPhotos.length;
+    if(nextSeq.length) resolvePreviewImage(nextSeq[nextIdx], nextCache, nextIdx);
+    applyPreviewSide(side);
+  }
+
+  // 左右交錯的單一計時器：固定每 0.5 秒切換一次，輪流換左邊、換右邊，
+  // 第一次一定先換左邊，之後左右交替，順序永遠不會亂掉
+  function schedulePreviewStep(){
+    previewTimer = setTimeout(() => {
+      if(!previewActive) return;
+      stepPreviewSide(previewTurn);
+      previewTurn = (previewTurn === 'left') ? 'right' : 'left';
+      schedulePreviewStep();
+    }, 500);
+  }
+
+  function startPreviewCycle(){
+    previewActive = true;
+    previewTurn = 'left'; // 下一次（0.5 秒後）換的是左邊，符合「左側先跳轉」
+    clearTimeout(previewTimer);
+
+    // 起始畫面（暖機過的那張）先顯示出來，等兩張都真的顯示完成後，才開始排程
+    // 0.5 秒後的第一次切換——如果不等，計時器可能在圖片還沒載入完成前就先到，
+    // 把索引往前推進，導致原本那次載入完成時比對「已經不是目前這張」而被跳過，
+    // 畫面看起來就是一開始亂跳、要等載入追上進度後才恢復正常節奏。
+    Promise.all([ applyPreviewSide('left'), applyPreviewSide('right') ]).then(() => {
+      if(!previewActive) return; // 等待載入的過程中，使用者可能已經把 preview 頁面關掉了
+      schedulePreviewStep();
+    });
+  }
+
+  function stopPreviewCycle(){
+    previewActive = false;
+    clearTimeout(previewTimer);
+  }
+
+  // pushHistory=false 用在「因為網址本來就是 #preview（例如重新整理、上一頁/下一頁）
+  // 才開啟這個頁面」的情境，這種情況不需要再往歷史紀錄多推一筆，否則會造成
+  // 網址狀態跟瀏覽器上一頁/下一頁按鈕的行為對不起來。
+  // ---------- DVD 彈跳圖示（只在手機版 preview 頁面顯示） ----------
+  const dvdBounce = document.getElementById('dvdBounce');
+  const DVD_SIZE = 70; // 要跟 CSS 裡 .dvd-bounce 的寬度一致，用來算反彈邊界
+  const DVD_SPEED = 210; // px/秒，平常巡迴的固定速度，也是甩出去之後最終會回穩到的速度
+  const DVD_DECAY_MS = 4000; // 撞牆後，從當下的高速「慢慢地」線性衰減回 210 要花多久——這段
+                              // 才是使用者要拉長的部分；維持在高速不變的那段時間不是這個變數
+                              // 控制的，是由「甩出去後多久撞到第一面牆」這個物理碰撞決定的
+  let dvdRAF = null;
+  let dvdLastTime = null;
+  let dvdX = 0, dvdY = 0;
+  // 用「方向（單位向量）＋速度純量」拆開存，而不是直接存 dx/dy：撞牆只需要翻轉
+  // 方向、甩出去的衰減只需要調整速度純量，兩件事互相獨立、不會打架
+  let dvdDirX = 1, dvdDirY = 0;
+  let dvdSpeed = DVD_SPEED;
+  let dvdOverspeedActive = false; // 這次甩出去的速度是否高於 210（要等下一次撞牆才開始衰減）
+  let dvdDecaying = false;
+  let dvdDecayStartTime = 0;
+  let dvdDecayStartSpeed = DVD_SPEED;
+
+  function isMobileDvdActive(){
+    return window.innerWidth <= 640 && previewPage.classList.contains('active');
+  }
+
+  function setDvdDirection(angle){
+    dvdDirX = Math.cos(angle);
+    dvdDirY = Math.sin(angle);
+    // 避免角度太接近純水平/純垂直，看起來會像卡在一條線上來回
+    if(Math.abs(dvdDirX) < 0.25) dvdDirX = dvdDirX < 0 ? -0.25 : 0.25;
+    if(Math.abs(dvdDirY) < 0.25) dvdDirY = dvdDirY < 0 ? -0.25 : 0.25;
+    const len = Math.hypot(dvdDirX, dvdDirY);
+    dvdDirX /= len; dvdDirY /= len;
+  }
+
+  function resetDvdBounce(){
+    const maxX = Math.max(1, window.innerWidth - DVD_SIZE);
+    const maxY = Math.max(1, window.innerHeight - DVD_SIZE);
+    dvdX = Math.random() * maxX;
+    dvdY = Math.random() * maxY;
+    setDvdDirection(Math.random() * Math.PI * 2); // 隨機挑一個方向出發，360 度都有機會
+    dvdSpeed = DVD_SPEED;
+    dvdOverspeedActive = false;
+    dvdDecaying = false;
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+  }
+
+  function stepDvdBounce(timestamp){
+    if(!isMobileDvdActive() || dvdDragging){
+      dvdRAF = null;
+      dvdLastTime = null;
+      return;
+    }
+    if(dvdLastTime === null) dvdLastTime = timestamp;
+    // 限制單幀最大時間差，避免分頁切到背景、幾秒後切回來時，圖示瞬間跳一大段
+    const dt = Math.min(48, timestamp - dvdLastTime) / 1000;
+    dvdLastTime = timestamp;
+
+    // 甩出去的速度如果高於 210，撞到第一次牆之前維持原速度不變；真正的「慢慢
+    // 衰減」是撞牆那一刻才開始計時（見下面 collided 判斷），這裡只是持續套用
+    // 目前已經在衰減中的進度
+    if(dvdDecaying){
+      const progress = Math.min(1, (timestamp - dvdDecayStartTime) / DVD_DECAY_MS);
+      dvdSpeed = dvdDecayStartSpeed + (DVD_SPEED - dvdDecayStartSpeed) * progress;
+      if(progress >= 1){ dvdSpeed = DVD_SPEED; dvdDecaying = false; }
+    }
+
+    const maxX = window.innerWidth - DVD_SIZE;
+    const maxY = window.innerHeight - DVD_SIZE;
+
+    dvdX += dvdDirX * dvdSpeed * dt;
+    dvdY += dvdDirY * dvdSpeed * dt;
+
+    // 撞到邊緣就反彈：把座標夾回邊界內、水平或垂直方向的分量直接翻轉方向
+    let collided = false;
+    if(dvdX <= 0){ dvdX = 0; dvdDirX = Math.abs(dvdDirX); collided = true; }
+    else if(dvdX >= maxX){ dvdX = maxX; dvdDirX = -Math.abs(dvdDirX); collided = true; }
+    if(dvdY <= 0){ dvdY = 0; dvdDirY = Math.abs(dvdDirY); collided = true; }
+    else if(dvdY >= maxY){ dvdY = maxY; dvdDirY = -Math.abs(dvdDirY); collided = true; }
+
+    // 高於 210 甩出去的這次，撞到第一面牆之後才開始「慢慢地」衰減回 210，
+    // 一旦開始衰減就不會被之後的其他撞牆重新觸發（用 dvdOverspeedActive 當開關）
+    if(collided && dvdOverspeedActive){
+      dvdOverspeedActive = false;
+      dvdDecaying = true;
+      dvdDecayStartTime = timestamp;
+      dvdDecayStartSpeed = dvdSpeed;
+    }
+
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+    dvdRAF = requestAnimationFrame(stepDvdBounce);
+  }
+
+  function startDvdBounce(){
+    if(dvdRAF || dvdDragging) return; // 已經在跑了，或正被手指抓著（放開再接手）
+    if(!isMobileDvdActive()) return; // 不是手機版或頁面沒開，不啟動
+    resetDvdBounce();
+    dvdLastTime = null;
+    dvdRAF = requestAnimationFrame(stepDvdBounce);
+  }
+
+  function stopDvdBounce(){
+    if(dvdRAF){ cancelAnimationFrame(dvdRAF); dvdRAF = null; }
+    dvdLastTime = null;
+  }
+
+  // ---------- 手指抓取 / 甩出去 ----------
+  // 用 Pointer Events（觸控、滑鼠通用）：手指按下＝抓取（暫停自動彈跳、圖示
+  // 跟著手指跑），放開＝根據放開前最近一小段時間的移動速度計算「甩出去」的
+  // 方向跟速度，再接回原本的彈跳邏輯繼續跑。
+  let dvdDragging = false;
+  let dvdPointerId = null;
+  let dvdGrabOffsetX = 0, dvdGrabOffsetY = 0; // 抓取當下，手指位置跟圖示左上角的距離，維持抓取點不跳動
+  let dvdMoveSamples = []; // 最近的 {t, x, y} 取樣，放開時用來算「甩動當下」的瞬時速度
+
+  function clampDvd(v, max){ return v < 0 ? 0 : (v > max ? max : v); }
+
+  function dvdPointerDown(e){
+    if(!isMobileDvdActive()) return;
+    e.preventDefault();
+    stopDvdBounce();
+    dvdDragging = true;
+    dvdPointerId = e.pointerId;
+    try{ dvdBounce.setPointerCapture(e.pointerId); }catch(err){}
+
+    const rect = dvdBounce.getBoundingClientRect();
+    dvdGrabOffsetX = e.clientX - rect.left;
+    dvdGrabOffsetY = e.clientY - rect.top;
+    dvdX = rect.left;
+    dvdY = rect.top;
+    dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+  }
+
+  function dvdPointerMove(e){
+    if(!dvdDragging || e.pointerId !== dvdPointerId) return;
+    e.preventDefault();
+    const maxX = window.innerWidth - DVD_SIZE;
+    const maxY = window.innerHeight - DVD_SIZE;
+    dvdX = clampDvd(e.clientX - dvdGrabOffsetX, maxX);
+    dvdY = clampDvd(e.clientY - dvdGrabOffsetY, maxY);
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+
+    const now = performance.now();
+    dvdMoveSamples.push({ t: now, x: dvdX, y: dvdY });
+    // 只留最近 ~100ms 的取樣，讓算出來的是「放開前那一瞬間甩動」的速度，
+    // 不會被拖曳一開始比較慢的移動拉低平均值
+    while(dvdMoveSamples.length > 2 && now - dvdMoveSamples[0].t > 100){
+      dvdMoveSamples.shift();
+    }
+  }
+
+  function dvdPointerUp(e){
+    if(!dvdDragging || e.pointerId !== dvdPointerId) return;
+    dvdDragging = false;
+    try{ dvdBounce.releasePointerCapture(e.pointerId); }catch(err){}
+
+    const now = performance.now();
+    const first = dvdMoveSamples[0];
+    const last = dvdMoveSamples[dvdMoveSamples.length - 1];
+    const dt = Math.max(16, now - first.t) / 1000;
+    let vx = (last.x - first.x) / dt;
+    let vy = (last.y - first.y) / dt;
+    let flingSpeed = Math.hypot(vx, vy);
+
+    // 有偵測到方向才更新方向；幾乎沒有移動（flingSpeed 趨近 0）就維持原本
+    // 抓取前的方向不變，反正接下來速度也趨近 0，方向本來就看不太出來
+    if(flingSpeed > 0.5) setDvdDirection(Math.atan2(vy, vx));
+
+    // 完全依偵測到的甩動速度決定之後的跑動速度，不再有最低 210px/秒的下限：
+    // 甩得越輕就跑得越慢，幾乎沒移動、放開後就直接停在原地不動也可以
+    dvdSpeed = flingSpeed;
+    if(flingSpeed > DVD_SPEED){
+      dvdOverspeedActive = true; // 高於 210，等下一次撞牆才開始慢慢衰減回 210
+    } else {
+      dvdOverspeedActive = false; // 210 以下（含靜止）不會自動變化，維持原速度
+    }
+    dvdDecaying = false;
+
+    dvdLastTime = null;
+    if(!dvdRAF) dvdRAF = requestAnimationFrame(stepDvdBounce);
+  }
+
+  dvdBounce.addEventListener('pointerdown', dvdPointerDown);
+  dvdBounce.addEventListener('pointermove', dvdPointerMove);
+  dvdBounce.addEventListener('pointerup', dvdPointerUp);
+  dvdBounce.addEventListener('pointercancel', dvdPointerUp);
+  // 不管是單純點一下、還是抓住甩出去，放開後瀏覽器都會在圖示上補一個 click
+  // 事件，這個事件預設會往上冒泡到 previewPage、觸發「點擊畫面關閉」的邏輯，
+  // 導致抓著圖示甩一甩放開，人卻被跳回首頁。點在圖示上不該有這個效果，
+  // 只有點在圖示以外的地方才要關閉頁面，所以在這裡把冒泡擋掉。
+  dvdBounce.addEventListener('click', (e) => e.stopPropagation());
+
+  // 螢幕寬度跨過手機／桌機的斷點時（例如手機轉橫向、或桌機瀏覽器拖曳寬度），
+  // 即時開始或停止彈跳，不用等使用者重新進出 preview 頁面
+  window.addEventListener('resize', () => {
+    if(isMobileDvdActive()) startDvdBounce(); else stopDvdBounce();
+  });
+
+  function openPreviewPage(pushHistory){
+    if(pushHistory === undefined) pushHistory = true;
+    if(!previewOddPhotos.length || !previewEvenPhotos.length) return;
+
+    if(detailPage.classList.contains('active')) closeDetail();
+    hideHoverPreview();
+
+    document.body.classList.add('preview-active');
+    document.body.style.overflow = 'hidden';
+    previewPage.classList.add('active');
+
+    // 把目前網址記錄成 #preview，這樣重新整理頁面時才知道要留在這頁，
+    // 而不是每次都跳回首頁
+    if(pushHistory && location.hash !== '#preview'){
+      history.pushState({ page: 'preview' }, '', '#preview');
+    }
+
+    // 每次重新進入都從固定的起始張重新開始（左：最後一張／右：第一張），
+    // 並確保起始畫面已經暖機好，這裡如果先前已經暖過就直接沿用快取，幾乎不用等
+    warmPreviewStart();
+    startPreviewCycle();
+
+    // 每次重新進來都強制重新開始 DVD 圖示，不管上一次是怎麼結束的——包括抓著
+    // 圖示甩到一半、手指還沒放開頁面就被關掉這種極端情況（某些手機瀏覽器在
+    // 這種情況下不一定會確實觸發 pointerup/pointercancel，導致 dvdDragging
+    // 卡在 true，afterwards startDvdBounce() 的保護判斷就一直誤判成「還在
+    // 拖曳中」而拒絕重新啟動——這正是「第二次進來圖示就不動了」的成因）。
+    // 這裡先強制歸零拖曳狀態、停掉任何殘留的動畫迴圈，再重新開始，
+    // 確保一定是乾淨的初始狀態，以 210 px/秒重新起跑。
+    dvdDragging = false;
+    stopDvdBounce();
+    startDvdBounce();
+  }
+
+  function closePreviewPage(pushHistory){
+    if(pushHistory === undefined) pushHistory = true;
+    previewPage.classList.remove('active');
+    document.body.classList.remove('preview-active');
+    document.body.style.overflow = '';
+    stopPreviewCycle();
+    dvdDragging = false; // 保險：萬一頁面在拖曳圖示的過程中被關掉，確保狀態不會卡住
+    stopDvdBounce();
+
+    if(pushHistory && location.hash === '#preview'){
+      history.pushState({ page: 'home' }, '', location.pathname + location.search);
+    }
+  }
+
+  previewLabel.addEventListener('click', () => openPreviewPage());
+  // 這個頁面點任何地方都直接跳回首頁；頁面開啟時 header 會把 pointer-events
+  // 關掉，讓點擊直接穿透到這裡，所以點在標題文字上也一樣會回首頁
+  previewPage.addEventListener('click', () => closePreviewPage());
+  // overflow:hidden 已經擋住捲動了，這裡再擋一次滾輪事件保險
+  previewPage.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+  // detail-page（點進去單張照片的頁面）同樣道理：body overflow:hidden + CSS
+  // touch-action:none 已經擋住大部分捲動，這裡再擋一次滑鼠滾輪事件保險，
+  // 確保電腦上滾輪也不會把底下的頁面捲動
+  detailPage.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+
+  // 支援瀏覽器「上一頁 / 下一頁」按鈕，跟網址列的 #preview 狀態保持同步
+  window.addEventListener('popstate', () => {
+    if(location.hash === '#preview'){
+      openPreviewPage(false);
+    } else if(previewPage.classList.contains('active')){
+      closePreviewPage(false);
+    }
+  });
+
+  function nextPhoto(){
+    currentIndex = (currentIndex + 1) % photos.length;
+    renderDetail();
+  }
+  function prevPhoto(){
+    currentIndex = (currentIndex - 1 + photos.length) % photos.length;
+    renderDetail();
+  }
+
+  prevBtn.addEventListener('click', prevPhoto);
+  nextBtn.addEventListener('click', nextPhoto);
+  backHome.addEventListener('click', closeDetail);
+  backArrowBtn.addEventListener('click', closeDetail);
+
+  document.addEventListener('keydown', (e) => {
+    if(!detailPage.classList.contains('active')) return;
+    if(e.key === 'ArrowRight') nextPhoto();
+    if(e.key === 'ArrowLeft') prevPhoto();
+    if(e.key === 'Escape') closeDetail();
+  });
+
+  // 縮放（pinch-zoom）在某些行動瀏覽器上會連帶觸發 resize 事件，
+  // 但此時 window.innerWidth/innerHeight 可能回報的是「縮放後」的數值，
+  // 若照樣重新定位，大圖就會瞬間跳位、變得極小。
+  //
+  // 原本的做法：resize 事件「一觸發當下」先判斷是否還在縮放，沒有縮放才排一個
+  // 120ms 後執行的 timeout。問題是使用者放開兩指後，縮放比例通常還會再微調
+  // 好幾次才真正穩定到 1，這些微調也會觸發 resize；如果剛好某一次判斷時 scale
+  // 已經很接近 1（但還沒完全穩定），就會排入 timeout，等 120ms 後才執行——但那時
+  // 版面可能還沒真正定案，所以會先用「還沒穩定」的尺寸重新定位一次（歸到偏掉的
+  // 位置），等下一次 resize 事件抓到真正穩定的狀態才又修正一次，看起來就是
+  // 「先跳到錯誤位置、才瞬間修正」。
+  //
+  // 修正方式：判斷「是否還在縮放」要放在 timeout 真正執行的當下重新檢查一次，
+  // 而不是相信事件剛觸發時的舊狀態；還沒穩定就直接跳過，等下一次 resize 事件
+  // 再重新排一次，這樣只有在真正確定縮放已經結束時才會定位，不會有中途跳動。
+  let viewportSettleDebounce = null;
+  function scheduleViewportSettle(){
+    clearTimeout(viewportSettleDebounce);
+    viewportSettleDebounce = setTimeout(() => {
+      const stillZoomed = window.visualViewport && Math.abs(window.visualViewport.scale - 1) > 0.01;
+      if(stillZoomed) return; // 縮放還沒穩定，先不動，等下一次 resize 事件再判斷
+
+      if(detailPage.classList.contains('active')){
+        positionDetailImage(lastNaturalW, lastNaturalH);
+      }
+      // 縮放期間 syncFixedChromeLive 全程跳過沒有更新（見下方），縮放真正結束、
+      // 穩定下來的這一刻，順便補一次正確的重新定位，不用等使用者手動觸發
+      // 下一次 resize 事件才修正回來
+      syncFixedChrome();
+    }, 150);
+  }
+
+  // syncFixedChrome()（header 的 preview 對齊 / detail-info / 左右箭頭定位）原本
+  // 認為只用 getBoundingClientRect() 讀「當下實際渲染位置」，不像 positionDetailImage
+  // 依賴 innerWidth/innerHeight，所以不需要等縮放穩定——但這個假設漏算了一種情況：
+  // detail-info 的直式定位（syncDetailInfoAlignment）本身就有用到 window.innerHeight
+  // 去算 top，雙指縮放中途這個值一樣不可靠，算出來的位置可能整個飛出畫面外，
+  // 而且因為縮放結束後沒有任何後續事件會再重新校正它（不像 resize 那樣持續觸發），
+  // 這個錯誤的偏移量會一直卡住，直到重新整理頁面、CSS 變數被重置才會消失——
+  // 這正是「雙指縮放後 001 那排字飛不見，切換照片、不重整都救不回來」的成因。
+  // 修法：縮放進行中（scale 明顯不是 1）就直接跳過整次 live 更新，等縮放真的
+  // 結束（下一次 resize/visualViewport resize 事件時 scale 已經穩定）才繼續算。
+  let fixedChromeRAF = null;
+  function syncFixedChromeLive(){
+    if(fixedChromeRAF) return;
+    fixedChromeRAF = requestAnimationFrame(() => {
+      fixedChromeRAF = null;
+      const stillZoomed = window.visualViewport && Math.abs(window.visualViewport.scale - 1) > 0.01;
+      if(stillZoomed) return; // 縮放中途座標不可靠，先不要算，避免把 detail-info 之類的定位帶偏
+      syncFixedChrome();
+    });
+  }
+
+  window.addEventListener('resize', scheduleViewportSettle);
+  window.addEventListener('resize', syncFixedChromeLive);
+  // visualViewport 的 resize 事件在雙指縮放時觸發得比 window resize 更即時、更頻繁，
+  // 一起監聽可以更快抓到「縮放剛結束」的那個時間點。
+  if(window.visualViewport){
+    window.visualViewport.addEventListener('resize', scheduleViewportSettle);
+    window.visualViewport.addEventListener('resize', syncFixedChromeLive);
+  }
+
+  async function init(){
+    syncFixedChrome();
+    photos = await fetchDriveImages();
+    renderGrid();
+    prefetchAllInBackground();
+
+    // 照片一到手就準備好 preview 頁要用的兩組序列並暖機起始畫面，
+    // 這樣不管使用者多快點下 preview，第一眼幾乎都是照片，不會先黑一下
+    preparePreviewSequences();
+
+    if(location.hash === '#preview'){
+      openPreviewPage(false);
+    }
+  }
+
+  // 禁止右鍵選單、禁止拖曳圖片（防止另存新檔 / 長按儲存）
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+  document.addEventListener('dragstart', (e) => {
+    if(e.target.tagName === 'IMG') e.preventDefault();
+  });
+
+  // 只擋雙擊縮放，不影響雙指縮放（pinch-zoom 保持可用）
+  // 用 isMultiTouch 標記排除「雙指放開手指」被誤判成雙擊的狀況
+  let lastTouchEnd = 0;
+  let isMultiTouch = false;
+  document.addEventListener('touchstart', (e) => {
+    if(e.touches.length > 1) isMultiTouch = true;
+  }, { passive: true });
+  document.addEventListener('touchend', (e) => {
+    if(e.touches.length > 0) return; // 還有手指沒放開，先不判斷
+    if(isMultiTouch){
+      isMultiTouch = false;
+      lastTouchEnd = Date.now();
+      return; // 這是縮放手勢放開，不是雙擊，不攔截
+    }
+    const now = Date.now();
+    if(now - lastTouchEnd <= 300) e.preventDefault(); // 300ms 內連續兩次點擊視為雙擊，擋掉
+    lastTouchEnd = now;
+  }, { passive: false });
+
+  // 背景慢慢把所有照片都預先下載一次（不搶主要資源），
+  // 這樣使用者不管點開哪一張、往哪個方向連續切換，都大機率已經有快取
+  function prefetchAllInBackground(){
+    let i = 0;
+    function step(){
+      if(i >= photos.length) return;
+      prefetchOne(photos[i].detailUrl || photos[i].url);
+      i++;
+      if('requestIdleCallback' in window){
+        requestIdleCallback(step, { timeout: 800 });
+      } else {
+        setTimeout(step, 120);
+      }
+    }
+    step();
+  }
+
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(syncFixedChrome);
+  }
+
+  init();
+
+  /* =========================================================
+     自訂圓形滑鼠（只在支援 hover 的滑鼠裝置上啟用）
+  ========================================================= */
+  if(supportsHover){
+    const cursorEl = document.getElementById('custom-cursor');
+    window.addEventListener('mousemove', (e) => {
+      const x = e.clientX - cursorEl.offsetWidth / 2;
+      const y = e.clientY - cursorEl.offsetHeight / 2;
+      cursorEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      cursorEl.classList.add('show');
+    });
+    document.addEventListener('mouseleave', () => cursorEl.classList.remove('show'));
+  }
+
+})();
+</script>
+</body>
+</html>
