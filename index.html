@@ -9,10 +9,12 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="edenchen">
 <meta property="og:title" content="edenchen">
+<meta property="og:description" content="edenchen">
 <meta property="og:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png">
 <meta property="og:url" content="https://www.edench3n.com/">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="edenchen">
+<meta name="twitter:description" content="edenchen">
 <meta name="twitter:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png">
 
 <!-- 🌟 1. 設定瀏覽器分頁圖示 (Favicon) 🌟 -->
@@ -63,6 +65,15 @@
     display:block;
   }
   #custom-cursor.show{ opacity:1; }
+  /* 進入 preview 頁面（桌機版）的那一刻要立刻消失，不能照平常 opacity
+     的 .15s transition 慢慢淡出——那樣會讓使用者在切換頁面的瞬間，看到
+     游標圖示（跟 dvd-bounce 那顆一樣是「E」的造型）跟 dvd-bounce 的 E
+     同時並存了一小段時間，感覺像「兩個 E」。這個 class 用 !important 蓋掉
+     transition，opacity 直接跳 0，做到真正的「按下去那秒就消失」。 */
+  #custom-cursor.preview-hidden{
+    opacity:0 !important;
+    transition:none !important;
+  }
 
   /* touch devices: restore the normal cursor, hide the custom circle */
   @media (pointer: coarse){
@@ -520,6 +531,18 @@
       pointer-events:auto;
     }
   }
+  /* 桌機／滑鼠版：同一顆圖示、同一套彈跳物理與撞牆邊界，但操作方式改成
+     「滑鼠整體控制」而不是「按在圖示本體上才抓得到」——這裡刻意維持
+     pointer-events:none，滑鼠事件全部穿透它，改由 JS 監聽整個視窗的
+     mousemove 來決定圖示位置（見下方 JS 的「桌機：滑鼠控制」區塊）。
+     用 (min-width:641px) 跟上面手機版的 (max-width:640px) 錯開，避免同一個
+     視窗寬度同時命中兩條規則、pointer-events 互相打架。 */
+  @media (hover: hover) and (pointer: fine) and (min-width: 641px){
+    .preview-page.active .dvd-bounce{
+      display:block;
+      pointer-events:none;
+    }
+  }
 
   /* preview 頁開啟時：所有上方標題文字轉純白色、字重改成 DM Sans Regular
      （平常是 500），並讓點擊直接穿透到底下的 preview-page（由它負責處理
@@ -650,6 +673,9 @@
   const previewRightImg = document.getElementById('previewRightImg');
 
   const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  // 自訂圓形滑鼠的 DOM 節點：提早拿到參照，讓 openPreviewPage() 也能在
+  // 「一切換頁面」的當下就直接把它藏起來，不用等第一次 mousemove 事件
+  const cursorEl = document.getElementById('custom-cursor');
   const supportsTouch = window.matchMedia('(pointer: coarse)').matches;
 
   function pad3(n){ return String(n).padStart(3, '0'); }
@@ -1496,6 +1522,17 @@
   function isMobileDvdActive(){
     return window.innerWidth <= 640 && previewPage.classList.contains('active');
   }
+  // 桌機／滑鼠版是否該啟動：要有滑鼠（supportsHover）、寬度在桌機斷點以上
+  // （跟上面 CSS 的 min-width:641px 對齊），而且 preview 頁面是開著的
+  function isDesktopDvdActive(){
+    return supportsHover && window.innerWidth > 640 && previewPage.classList.contains('active');
+  }
+  // 不管手機版還是桌機版，只要其中一種該啟動，彈跳迴圈（stepDvdBounce）
+  // 就該繼續跑；兩邊只有「怎麼被抓取／甩出去」的操作方式不同，彈跳物理、
+  // 撞牆邊界完全共用同一套
+  function isDvdActive(){
+    return isMobileDvdActive() || isDesktopDvdActive();
+  }
 
   function setDvdDirection(angle){
     dvdDirX = Math.cos(angle);
@@ -1521,11 +1558,18 @@
   }
 
   function stepDvdBounce(timestamp){
-    if(!isMobileDvdActive() || dvdDragging){
+    // dvdDragging 在手機觸控拖曳（Pointer Events）、以及桌機長按抓取
+    // （dvdMouseGrabbed）時都會是 true——這兩種情況圖示位置都是直接被
+    // 對應的滑鼠/觸控移動事件寫 transform 控制，物理迴圈本來就該整個
+    // 暫停，抓住的當下已經呼叫過 stopDvdBounce()，這裡多一層 guard只是
+    // 保險，避免任何殘留的動畫影格繼續套用物理位移。放開的那一刻
+    // （dvdDesktopPressEnd / dvdPointerUp）才會重新把 RAF 排回來。
+    if(!isDvdActive() || dvdDragging){
       dvdRAF = null;
       dvdLastTime = null;
       return;
     }
+
     if(dvdLastTime === null) dvdLastTime = timestamp;
     // 限制單幀最大時間差，避免分頁切到背景、幾秒後切回來時，圖示瞬間跳一大段
     const dt = Math.min(48, timestamp - dvdLastTime) / 1000;
@@ -1567,8 +1611,8 @@
   }
 
   function startDvdBounce(){
-    if(dvdRAF || dvdDragging) return; // 已經在跑了，或正被手指抓著（放開再接手）
-    if(!isMobileDvdActive()) return; // 不是手機版或頁面沒開，不啟動
+    if(dvdRAF || dvdDragging) return; // 已經在跑了，或正被抓著（放開/停止移動再接手）
+    if(!isDvdActive()) return; // 手機版、桌機版都不該啟動，或頁面沒開，不啟動
     resetDvdBounce();
     dvdLastTime = null;
     dvdRAF = requestAnimationFrame(stepDvdBounce);
@@ -1666,10 +1710,150 @@
   // 只有點在圖示以外的地方才要關閉頁面，所以在這裡把冒泡擋掉。
   dvdBounce.addEventListener('click', (e) => e.stopPropagation());
 
+  // ---------- 桌機：滑鼠控制 ----------
+  // 圖示預設是自己自動彈跳（跟手機版、剛進頁面時一樣），滑鼠單純移動不會
+  // 影響它。只有「長按」滑鼠（按住不放超過 DVD_LONG_PRESS_MS）才會抓住
+  // 圖示，圖示改成跟著滑鼠跑；放開滑鼠當下，立刻依照放開前最近一小段
+  // （很短、很即時，見 DVD_DESKTOP_FLING_WINDOW_MS）的移動算出方向跟速度，
+  // 馬上甩出去接回原本的彈跳邏輯——不用等滑鼠「停住」，放開那一刻就是
+  // 甩出去的那一刻，感覺上是「一放手就飛出去」。
+  // 如果只是單純按一下就放開（沒有撐過長按門檻），就不會觸發抓取，維持
+  // 原本「點一下畫面關閉 preview」的功能。
+  const DVD_LONG_PRESS_MS = 200; // 按住超過這個時間才算長按、才抓住圖示
+  const DVD_DESKTOP_FLING_WINDOW_MS = 50; // 只看放開前這麼短的時間內的移動來算甩出去的速度，抓最後那一下的手感，不被前面較慢的拖曳拉低
+  let dvdMouseGrabbed = false; // 目前是否正被長按抓著
+  let dvdMouseOffsetX = 0, dvdMouseOffsetY = 0; // 抓取當下，滑鼠位置跟圖示左上角的相對位移
+  let dvdLongPressTimer = null;
+  let dvdLongPressPending = false; // 已經按下滑鼠、還在等長按門檻的時間到
+  let dvdSuppressNextClick = false; // 長按拖曳放開後，接下來瀏覽器補的那個 click 事件要擋掉，避免被當成「點擊關閉」
+
+  // 隨時記住滑鼠目前的位置（不管 preview 頁面有沒有開），這樣切換到 preview
+  // 頁面「當下」就能立刻知道要把圖示貼去哪裡，不用等使用者先動一下滑鼠、
+  // 靠 mousemove 事件才第一次知道座標
+  let dvdLastKnownMouseX = null, dvdLastKnownMouseY = null;
+  window.addEventListener('mousemove', (e) => {
+    dvdLastKnownMouseX = e.clientX;
+    dvdLastKnownMouseY = e.clientY;
+  });
+
+  // 把圖示「貼」到指定座標：圖示視覺本體正中央對齊該座標（而不是像拖曳中
+  // 那樣維持抓取時的相對位移）——用在頁面剛切換過去、圖示第一次貼上滑鼠
+  // 的那一瞬間，讓它直接出現在滑鼠所在位置，符合「一進頁面就在滑鼠這裡」
+  // 的預期
+  function snapDesktopDvdToMouse(x, y){
+    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
+    const maxX = dvdBoundMaxX(), maxY = dvdBoundMaxY();
+    dvdX = clampDvd(x - DVD_HIT_PAD - DVD_VISUAL_SIZE / 2, minX, maxX);
+    dvdY = clampDvd(y - DVD_HIT_PAD - DVD_VISUAL_SIZE / 2, minY, maxY);
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+  }
+
+  // 根據最近取樣到的拖曳軌跡（見 dvdMoveSamples），算出「放開當下」該接上
+  // 的方向與速度。
+  function computeFlingFromSamples(){
+    const now = performance.now();
+    const first = dvdMoveSamples[0];
+    const last = dvdMoveSamples[dvdMoveSamples.length - 1];
+    const dt = Math.max(16, now - first.t) / 1000;
+    const vx = (last.x - first.x) / dt;
+    const vy = (last.y - first.y) / dt;
+    const flingSpeed = Math.hypot(vx, vy);
+
+    if(flingSpeed > 0.5) setDvdDirection(Math.atan2(vy, vx));
+    dvdSpeed = flingSpeed;
+    dvdOverspeedActive = flingSpeed > DVD_SPEED;
+    dvdDecaying = false;
+  }
+
+  // 滑鼠按下：先不急著抓，開一個計時器，撐過 DVD_LONG_PRESS_MS 才視為
+  // 長按、才抓住圖示；如果撐不到門檻就放開，代表這是單純點一下，交給
+  // previewPage 原本的 click 監聽器處理「點擊關閉」。
+  function dvdDesktopPressStart(e){
+    if(!isDesktopDvdActive() || e.button !== 0) return;
+    dvdLongPressPending = true;
+    clearTimeout(dvdLongPressTimer);
+    dvdLongPressTimer = setTimeout(() => {
+      if(!dvdLongPressPending || !isDesktopDvdActive()) return;
+      dvdLongPressPending = false;
+
+      // 長按門檻到了：正式抓住圖示，記住圖示「當下位置」跟滑鼠的相對位移，
+      // 維持抓取點不跳動，而不是讓圖示瞬間跳到游標正中央
+      stopDvdBounce();
+      dvdMouseGrabbed = true;
+      dvdDragging = true;
+      const mx = dvdLastKnownMouseX !== null ? dvdLastKnownMouseX : e.clientX;
+      const my = dvdLastKnownMouseY !== null ? dvdLastKnownMouseY : e.clientY;
+      dvdMouseOffsetX = dvdX - mx;
+      dvdMouseOffsetY = dvdY - my;
+      dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
+    }, DVD_LONG_PRESS_MS);
+  }
+
+  // 滑鼠移動：只有在已經抓住圖示（長按門檻已過）的狀態下，圖示才跟著滑鼠跑；
+  // 長按門檻還沒到、或根本沒按著滑鼠的一般移動，完全不影響圖示。
+  function dvdDesktopPressMove(e){
+    if(!dvdMouseGrabbed) return;
+    if(!isDesktopDvdActive()) return;
+
+    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
+    const maxX = dvdBoundMaxX(), maxY = dvdBoundMaxY();
+
+    dvdX = clampDvd(e.clientX + dvdMouseOffsetX, minX, maxX);
+    dvdY = clampDvd(e.clientY + dvdMouseOffsetY, minY, maxY);
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+
+    const now = performance.now();
+    dvdMoveSamples.push({ t: now, x: dvdX, y: dvdY });
+    // 只留最近 ~50ms 的取樣，讓算出來的是「放開前那一瞬間甩動」的速度，
+    // 不會被拖曳一開始比較慢的移動拉低平均值——比手機版的取樣窗口更短，
+    // 抓得更即時
+    while(dvdMoveSamples.length > 2 && now - dvdMoveSamples[0].t > DVD_DESKTOP_FLING_WINDOW_MS){
+      dvdMoveSamples.shift();
+    }
+  }
+
+  // 滑鼠放開：如果正抓著圖示（長按拖曳中），放開當下立刻算出甩出去的方向
+  // 跟速度、馬上接回彈跳邏輯，不需要等滑鼠停住——放開的瞬間就是丟出去的
+  // 瞬間。同時標記接下來那個 click 事件要被擋掉，避免被誤判成「點擊關閉」。
+  // 如果根本沒撐過長按門檻（單純點一下就放開），這裡什麼都不用做，讓
+  // 瀏覽器補的 click 事件照原本邏輯關閉 preview 頁面。
+  function dvdDesktopPressEnd(e){
+    if(e.button !== 0) return;
+    clearTimeout(dvdLongPressTimer);
+    dvdLongPressPending = false;
+
+    if(dvdMouseGrabbed){
+      dvdMouseGrabbed = false;
+      dvdDragging = false;
+      computeFlingFromSamples();
+      dvdLastTime = null;
+      if(!dvdRAF) dvdRAF = requestAnimationFrame(stepDvdBounce);
+      dvdSuppressNextClick = true;
+    }
+  }
+
+  window.addEventListener('mousedown', dvdDesktopPressStart);
+  window.addEventListener('mousemove', dvdDesktopPressMove);
+  window.addEventListener('mouseup', dvdDesktopPressEnd);
+  // 滑鼠離開視窗（切到別的視窗、跑到瀏覽器工具列上）不會再收到 mouseup，
+  // 直接視為放開，避免圖示卡在「還抓著」的狀態飛不出去
+  document.addEventListener('mouseleave', () => {
+    clearTimeout(dvdLongPressTimer);
+    dvdLongPressPending = false;
+    if(!dvdMouseGrabbed) return;
+    dvdMouseGrabbed = false;
+    dvdDragging = false;
+    computeFlingFromSamples();
+    dvdLastTime = null;
+    if(!dvdRAF) dvdRAF = requestAnimationFrame(stepDvdBounce);
+    dvdSuppressNextClick = true;
+  });
+
+
   // 螢幕寬度跨過手機／桌機的斷點時（例如手機轉橫向、或桌機瀏覽器拖曳寬度），
   // 即時開始或停止彈跳，不用等使用者重新進出 preview 頁面
   window.addEventListener('resize', () => {
-    if(isMobileDvdActive()) startDvdBounce(); else stopDvdBounce();
+    if(isDvdActive()) startDvdBounce(); else stopDvdBounce();
   });
 
   function openPreviewPage(pushHistory){
@@ -1682,6 +1866,16 @@
     document.body.classList.add('preview-active');
     document.body.style.overflow = 'hidden';
     previewPage.classList.add('active');
+
+    // 立刻、無條件地把自訂圓形游標藏起來——不受 supportsHover / 視窗寬度判斷
+    // 影響，觸發點固定是「按下 preview 按鍵、進入這個函式的當下」，不需要
+    // 等使用者之後在 preview 頁面移動滑鼠才第一次觸發隱藏。直接寫 inline
+    // style（優先權最高，不受任何 CSS 特異度或宣告順序影響）搭配
+    // transition:none，確保這一步一定是瞬間消失、不會有淡出動畫。
+    cursorEl.style.transition = 'none';
+    cursorEl.style.opacity = '0';
+    cursorEl.classList.add('preview-hidden');
+    cursorEl.classList.remove('show');
 
     // 把目前網址記錄成 #preview，這樣重新整理頁面時才知道要留在這頁，
     // 而不是每次都跳回首頁
@@ -1702,8 +1896,29 @@
     // 這裡先強制歸零拖曳狀態、停掉任何殘留的動畫迴圈，再重新開始，
     // 確保一定是乾淨的初始狀態，以 210 px/秒重新起跑。
     dvdDragging = false;
+    dvdMouseGrabbed = false; // 保險：萬一上一次是桌機版長按抓著的狀態下被關掉又重開
+    dvdLongPressPending = false;
+    dvdSuppressNextClick = false;
+    clearTimeout(dvdLongPressTimer);
     stopDvdBounce();
-    startDvdBounce();
+
+    if(supportsHover && window.innerWidth > 640){
+      // 游標隱藏已經在函式最上面無條件處理過了（見上方）。圖示預設維持
+      // 自動彈跳（要靠長按才會被抓住，見下面的「桌機：滑鼠控制」那段），
+      // 只是這裡讓它從使用者滑鼠目前所在的位置開始起跑，符合「一進頁面
+      // 就在滑鼠這裡」的預期，而不是又出現在畫面隨機一角。
+      const mx = dvdLastKnownMouseX !== null ? dvdLastKnownMouseX : window.innerWidth / 2;
+      const my = dvdLastKnownMouseY !== null ? dvdLastKnownMouseY : window.innerHeight / 2;
+      snapDesktopDvdToMouse(mx, my);
+      setDvdDirection(Math.random() * Math.PI * 2); // 隨機挑一個方向出發，360 度都有機會
+      dvdSpeed = DVD_SPEED;
+      dvdOverspeedActive = false;
+      dvdDecaying = false;
+      dvdLastTime = null;
+      dvdRAF = requestAnimationFrame(stepDvdBounce);
+    } else {
+      startDvdBounce();
+    }
   }
 
   function closePreviewPage(pushHistory){
@@ -1713,7 +1928,17 @@
     document.body.style.overflow = '';
     stopPreviewCycle();
     dvdDragging = false; // 保險：萬一頁面在拖曳圖示的過程中被關掉，確保狀態不會卡住
+    dvdMouseGrabbed = false; // 同上，桌機版長按抓取狀態也一起歸零
+    dvdLongPressPending = false;
+    dvdSuppressNextClick = false;
+    clearTimeout(dvdLongPressTimer);
     stopDvdBounce();
+    cursorEl.classList.remove('preview-hidden'); // 離開頁面，恢復游標可以正常淡入顯示
+    // 進入頁面時用 inline style 強制蓋掉的 opacity/transition，離開時要一併
+    // 清掉，不然 inline style 的優先權比 .show 這個 class 還高，會讓游標卡在
+    // opacity:0，之後回到首頁動滑鼠也不會再顯示出來
+    cursorEl.style.opacity = '';
+    cursorEl.style.transition = '';
 
     if(pushHistory && location.hash === '#preview'){
       history.pushState({ page: 'home' }, '', location.pathname + location.search);
@@ -1722,8 +1947,17 @@
 
   previewLabel.addEventListener('click', () => openPreviewPage());
   // 這個頁面點任何地方都直接跳回首頁；頁面開啟時 header 會把 pointer-events
-  // 關掉，讓點擊直接穿透到這裡，所以點在標題文字上也一樣會回首頁
-  previewPage.addEventListener('click', () => closePreviewPage());
+  // 關掉，讓點擊直接穿透到這裡，所以點在標題文字上也一樣會回首頁。
+  // 但如果剛剛是「長按抓住圖示、拖曳後放開丟出去」，放開後瀏覽器一樣會補一個
+  // click 事件，這裡要把它擋掉，不然長按甩圖示會被誤判成單按、把人送回首頁；
+  // 真正單純點一下（沒有撐過長按門檻）才會維持原本回首頁的功能。
+  previewPage.addEventListener('click', () => {
+    if(dvdSuppressNextClick){
+      dvdSuppressNextClick = false;
+      return;
+    }
+    closePreviewPage();
+  });
   // overflow:hidden 已經擋住捲動了，這裡再擋一次滾輪事件保險
   previewPage.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
   // detail-page（點進去單張照片的頁面）同樣道理：body overflow:hidden + CSS
@@ -1930,8 +2164,15 @@
      自訂圓形滑鼠（只在支援 hover 的滑鼠裝置上啟用）
   ========================================================= */
   if(supportsHover){
-    const cursorEl = document.getElementById('custom-cursor');
     window.addEventListener('mousemove', (e) => {
+      // preview 頁面開著時（桌機版），滑鼠改成用來控制那顆飛來飛去的 E，
+      // 系統/自訂游標都藏起來，讓使用者專心看著 E 被自己「牽著」跑，
+      // 不會有兩顆游標同時疊在畫面上
+      if(document.body.classList.contains('preview-active')){
+        cursorEl.classList.add('preview-hidden');
+        cursorEl.classList.remove('show');
+        return;
+      }
       const x = e.clientX - cursorEl.offsetWidth / 2;
       const y = e.clientY - cursorEl.offsetHeight / 2;
       cursorEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
