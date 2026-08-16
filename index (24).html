@@ -1,0 +1,2442 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light only">
+<title>photobook by edenchen</title>
+
+<!-- 🌟 分享預覽（LINE / Facebook / Threads 等）用的 Open Graph 標籤 🌟 -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="edenchen">
+<meta property="og:title" content="edenchen">
+<meta property="og:description" content="edenchen">
+<meta property="og:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png">
+<!-- 給爬蟲的尺寸提示：數值故意設小（正方形、200x200），大部分平台（包含 LINE）
+     在圖片本身是正方形且尺寸不大時，會把它當「小縮圖／小 icon」排版，
+     而不是撐滿版面的橫幅大圖。這兩個數值務必跟 og-image.png 實際檔案的
+     長寬「同比例」，否則有些爬蟲會直接忽略這個 hint、改抓實際檔案尺寸來排版。 -->
+<meta property="og:image:width" content="200">
+<meta property="og:image:height" content="200">
+<meta property="og:url" content="https://www.edench3n.com/">
+<!-- 🌟 改成 summary（不是 summary_large_image）：summary_large_image 是 Twitter/X
+     指定的「大圖橫幅」卡片樣式，把 og-image.png 撐到滿版顯示；summary 才是
+     「小縮圖 + 文字」的樣式，圖片會像小 logo 一樣顯示在旁邊，這正是你要的效果。
+     這個標籤主要影響 Twitter/X 的預覽，LINE 則是靠圖片本身的長寬比例（見下方
+     og-image.png 的說明）來決定顯示大小。 🌟 -->
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="edenchen">
+<meta name="twitter:description" content="edenchen">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png">
+
+<!-- 🌟 1. 設定瀏覽器分頁圖示 (Favicon) 🌟 -->
+<link rel="icon" href="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/EDEN.png" type="image/png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- 照片放在 Google Drive / Google 圖片 CDN，先建立連線可以讓第一批照片更快開始下載 -->
+<link rel="preconnect" href="https://drive.google.com">
+<link rel="preconnect" href="https://lh3.googleusercontent.com" crossorigin>
+<!-- 照片清單本身（誰有哪些照片、網址是什麼）要先打一次 Google Drive API
+     才會知道，這是整個頁面「第一張照片出現前」最前面、會卡住後面所有事情
+     的一個網路請求；先建好連線，能省下這個關鍵請求的 TCP/TLS 交握時間。 -->
+<link rel="preconnect" href="https://www.googleapis.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --header-h: 120px;
+    --gap: 18px;
+    --edge: 48px;
+    --header-font-size: clamp(11px, 9.2px + 0.53vw, 15px); /* 桌機滿版 15px、縮到窄螢幕連續按比例縮小 */
+    color-scheme: light only; /* 避免手機在深色模式下，頁面自己的 CSS/JS 生效之前，
+                                  瀏覽器先用系統預設的深色底色渲染，造成一瞬間的黑色閃爍 */
+  }
+  *{ box-sizing: border-box; }
+
+  /* ---------- 全站文字/元件不可被選取，行動裝置點擊不出現灰色高亮方塊 ---------- */
+  html, body, *{
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html, body {
+    margin:0; padding:0;
+    background:#ffffff;
+    color:#000000;
+    font-family:'DM Sans', sans-serif;
+    font-weight:500;
+    -webkit-font-smoothing: antialiased;
+    overflow-x:hidden;
+    touch-action: manipulation; /* allow scrolling + pinch-zoom, block double-tap-zoom */
+  }
+
+  a, button, .grid-item, .header-left, .nav-arrow {
+    font-family:inherit;
+    font-weight:inherit;
+  }
+
+  /* ---------- FIXED HEADER (always on top, always black, never covered) ---------- */
+  /* 原本用 CSS Grid「五等分欄位」排版：header-left / header-preview / header-right
+     各佔固定的 1/5 欄寬。問題是欄寬只跟總寬度成比例，跟文字實際需要多寬完全無關——
+     螢幕變窄到某個程度（大約 700~1000px 之間，並非任何一個明確的 breakpoint），
+     "photobook by edenchen" 這行字會比它所在的欄位還寬，被迫換行，看起來就是
+     「文字忽然跳行」。改成 Flexbox：每個區塊只佔用文字實際需要的寬度
+     （flex-shrink:0 + white-space:nowrap 鎖住 header-left 不被硬擠壓換行），
+     彼此靠 justify-content:space-between 撐開版面。這樣同一套排版可以套用在所有
+     寬度，不需要再切換 grid/flex，也不會再有那個模式切換造成的額外跳動。 */
+  .fixed-header{
+    position:fixed;
+    top:0; left:0; right:0;
+    z-index:1000;
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap: var(--gap);
+    padding: 36px var(--edge) 0 var(--edge);
+    pointer-events:none;
+  }
+  .fixed-header .header-left,
+  .fixed-header .header-preview,
+  .fixed-header .header-right{
+    color:#000000;
+    /* 字級隨螢幕寬度連續、按比例縮小（不是斷點式的一次性跳動）：桌機滿版
+       （≥1100px）維持 15px 不變，窄到手機縮小，中間用 vw 連續內插。line-height
+       維持 unitless 的 1.5 倍率，會自動跟著 font-size 等比例縮放，不用另外
+       處理；letter-spacing 改用 em（相對字級的比例單位）也是同樣道理，字級
+       縮小時會自動等比例縮小，不會維持固定像素值變得不成比例。
+       這樣做主要是為了避免 header-left / header-preview / header-right 三塊文字
+       加起來的總寬度，在窄螢幕下超出螢幕，把 collab 那塊擠出右側畫面。
+       數值抽成 --header-font-size 這個 CSS 變數（定義在 :root），detail-info
+       （點進照片後下面的說明文字）會直接沿用同一個變數，確保兩邊字級/行距
+       永遠一致，不用兩處分別調整、維護。 */
+    font-size: var(--header-font-size);
+    line-height:1.5;
+    pointer-events:auto;
+    white-space:pre-line;
+  }
+  .fixed-header .header-left{
+    letter-spacing:0.014em;
+    white-space:nowrap; /* 這行字沒有預期的換行點，鎖住不換行，避免中等寬度時被硬擠成兩行 */
+    flex-shrink:0;
+    position:relative;
+    left: var(--header-left-nudge, 0px); /* 桌機滿版 5 欄時，JS 會把這個微調成精準對齊 001 照片左邊緣的偏移量，做法跟 header-preview 對齊 002 完全一樣；手機版這個變數固定是 0，位置不受影響 */
+    opacity:0; /* 原因跟 header-preview / header-right 一樣：等 001 圖片載入、
+                  算出精準位置後才顯示，避免進頁面/重新整理時「先跑到錯誤位置
+                  再跳回來」 */
+    transition: opacity .2s ease;
+  }
+  .fixed-header .header-left.positioned{ opacity:1; }
+  .fixed-header .header-preview{
+    letter-spacing:0.014em;
+    white-space:nowrap;
+    flex-shrink:0;
+    position:relative;
+    left: var(--preview-nudge, 0px); /* 桌機滿版 5 欄時，JS 會把這個微調成精準對齊 002 照片左邊緣的偏移量 */
+    opacity:0; /* 進頁面/重新整理的瞬間，precise 對齊還沒算出來（要等 002 圖片載入），
+                  在算出正確位置之前先不顯示，避免使用者看到它先出現在錯誤位置、
+                  再「跳」到正確位置；JS 算完準確位置後會加上 .positioned 類別
+                  才顯示出來（見下面 .positioned 規則） */
+    transition: opacity .2s ease;
+    /* 注意：這裡故意不對 left 加 transition。JS 每一幀都會用
+       getBoundingClientRect() 讀「當下實際渲染出來的位置」回推下一次要設定的
+       nudge 值；如果 left 有 transition，瀏覽器會在動畫過程中間插值，但 JS
+       讀到的 --preview-nudge（CSS 變數）卻是已經設定好的「最終目標值」而不是
+       插值中的當下值，兩者對不上，算出來的新 nudge 就會偏掉，且在連續拖曳、
+       每一幀都重算的情況下持續放大誤差，畫面上就是「左右亂飛」。拿掉 transition
+       後，每次讀到的都是瀏覽器已經套用完成的實際值，才不會有這個誤差累積問題。 */
+  }
+  .fixed-header .header-preview.positioned{ opacity:1; }
+  @media (hover: hover){
+    /* :hover 只在滑鼠這種真的有「懸停」概念的裝置上生效；觸控裝置點擊時
+       瀏覽器常會把 tap 模擬成短暫的 :hover，導致手機上點按鈕會看到變淡一下
+       這個不想要的效果，用 (hover: hover) 把這條規則限制在滑鼠裝置上即可。 */
+    .fixed-header .header-preview.positioned:hover{ opacity:0.5; }
+  }
+  .fixed-header .header-right{
+    text-align:left;
+    letter-spacing:0.014em;
+    flex-shrink:0;
+    position:relative;
+    left: var(--header-right-nudge, 0px); /* 桌機滿版 5 欄時，JS 會把這個微調成精準對齊 004 照片左邊緣的偏移量，做法跟 header-preview 對齊 002 完全一樣 */
+    opacity:0; /* 原因跟 header-preview 一樣：等 004 圖片載入、算出精準位置後
+                  才顯示，避免進頁面/重新整理時「先跑到錯誤位置再跳回來」 */
+    transition: opacity .2s ease;
+  }
+  .fixed-header .header-right.positioned{ opacity:1; }
+
+  /* ---------- GALLERY PAGE ---------- */
+  #galleryPage{
+    position:relative;
+    min-height:100vh;
+    padding: calc(var(--header-h)) var(--edge) 140px var(--edge);
+    transition: opacity .5s ease, filter .5s ease;
+  }
+  .grid{
+    display:grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: var(--gap) var(--gap);
+    row-gap: 56px;
+  }
+  .grid-item{
+    position:relative;
+    touch-action: manipulation;
+  }
+  .grid-item .thumb-wrap{
+    width:100%;
+    aspect-ratio: 1 / 1;
+    overflow:visible;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+  .grid-item img{
+    max-width:52%;
+    max-height:52%;
+    width:auto;
+    height:auto;
+    object-fit:contain;
+    display:block;
+    transform: scale(1);
+    transition: opacity .3s ease, transform .45s cubic-bezier(.16,1,.3,1);
+    will-change: transform;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+    opacity:0; /* hidden (plain white) until fully loaded — no broken-image icon flash */
+  }
+  .grid-item img.loaded{
+    opacity:1;
+  }
+  .grid-item:hover img{
+    transform: scale(1.12);
+  }
+  .grid-item .idx{
+    margin-top:4px;
+    font-size:9px;
+    letter-spacing:0.5px;
+    color:#000;
+    text-align:center;
+  }
+
+  /* 照片欄數：5 欄（桌機滿版）→ 3 欄 → 2 欄。header 現在固定用 Flexbox（見上），
+     不會再跟著這兩個 breakpoint 切換排版模式，兩者互不影響。 */
+  @media (max-width: 1100px){
+    .grid{ grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 640px){
+    .grid{ grid-template-columns: repeat(2, 1fr); }
+    :root{ --header-h: 140px; --edge: 20px; }
+
+    /* 手機版維持橫向一排（跟桌機同一套排版邏輯），只讓 collab 那塊
+       （header-right）可以在自己的欄位裡自然換行，而不是被固定寬度硬撐出
+       螢幕外：拿掉 flex-shrink:0、加上 min-width:0，它就能在空間不夠時
+       正常換行。
+       光這樣還不夠：「edenchenworks@gmail.com」中間沒有空白，瀏覽器預設只會
+       在空白處換行，遇到這種一整串不可斷開的文字，就算容器縮小了，文字本身
+       還是會把容器撐開、超出螢幕——這正是「collab 還是被推擠出去」的真正原因。
+       加上 overflow-wrap / word-break，允許瀏覽器在真的塞不下時，於文字中間
+       斷行，才能確保它一定會被限制在容器寬度內，不會再溢出螢幕。 */
+    .fixed-header .header-right{
+      flex-shrink:1;
+      min-width:0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    /* 用連續、按比例縮放的字級（跟桌機那條 clamp 同樣做法），螢幕越窄字級
+       跟著越小，多一層安全邊界，確保在最窄的手機上也能完整容納。
+       這裡把最大值從 13px 再調小到 12px——原本 13px 時「edenchenworks@gmail.com」
+       换行換到最後一個「m」單獨被擠到下一行，稍微縮小整體字級後，這一行就能
+       完整塞下，不會再有孤字跑到下一行的狀況。改寫成覆蓋 --header-font-size
+       這個變數，detail-info 會自動跟著一起變小，不用另外處理。 */
+    :root{ --header-font-size: clamp(10px, 8px + 0.625vw, 12px); }
+  }
+
+  /* ---------- HOVER PREVIEW ---------- */
+  .hover-preview{
+    position:fixed;
+    z-index:60;
+    width: 45vw;
+    max-width: 650px;
+    pointer-events:none;
+    opacity:0;
+    transition: none;
+  }
+  .hover-preview.show{
+    opacity:1;
+  }
+  .hover-preview img{
+    width:100%;
+    height:auto;
+    display:block;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.18);
+    background:#111;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+  }
+
+  /* ---------- DETAIL PAGE ---------- */
+  .detail-page{
+    position:fixed;
+    inset:0;
+    z-index:50;
+    background:#ffffff;
+    opacity:0;
+    pointer-events:none;
+    /* 注意：這裡故意不對 opacity 加 transition。這片純白背景如果本身也用
+       淡出/淡入動畫，在它還是半透明的那零點幾秒之間，底下的照片格子會透出來，
+       使用者看到的就是「畫面下方閃過一下首頁縮圖」，而不是乾淨地淡入照片——
+       這正是「前幾次點進去會閃過小圖」這個 bug 的成因。改成瞬間出現（不透明、
+       完全蓋住底下的格子），真正的淡入效果交給下面 .detail-image-wrap 自己的
+       0.25s opacity transition 負責（照片本身在純白背景之上淡入），這樣使用者
+       看到的就是乾淨地淡入照片，不會有格子透出來的問題。 */
+    touch-action: pinch-zoom; /* 擋掉單指上下滑動捲動，但保留雙指縮放的手勢 */
+    overflow:hidden;
+  }
+  .detail-page.active{
+    opacity:1;
+    pointer-events:auto;
+  }
+  .detail-image-wrap{
+    position:absolute;
+    transition: opacity .25s ease;
+    opacity:0;
+  }
+  .detail-image-wrap.show{ opacity:1; }
+  .detail-image-wrap img{
+    width:100%;
+    height:100%;
+    object-fit:contain;
+    display:block;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+  }
+
+  .nav-arrow{
+    position:fixed;
+    top:50%;
+    transform: translateY(-50%);
+    background:none;
+    border:none;
+    color:#000;
+    z-index:55;
+    padding:20px;
+    line-height:1;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    transition: opacity .2s ease;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .nav-arrow svg{
+    width:22px;
+    height:22px;
+    display:block;
+  }
+  .nav-left{ left: calc(var(--edge) - 20px); }
+  .nav-right{ right: calc(var(--edge) - 20px); }
+  .nav-left svg{ transform: scaleX(-1); }
+  @media (hover: hover){
+    /* 觸控裝置點擊常被瀏覽器模擬成短暫的 :hover，導致手機上點按鈕會看到
+       變淡一下這個不想要的效果；限制在真正有滑鼠懸停能力的裝置才生效 */
+    .nav-arrow:hover{ opacity:0.5; }
+  }
+
+  .nav-back{
+    position:fixed;
+    top:170px;
+    left: calc(var(--edge) - 20px);
+    transform:none;
+  }
+  .nav-back svg{ transform: rotate(-90deg); }
+  @media (hover: hover){
+    .nav-back:hover{ opacity:0.5; }
+  }
+
+  .detail-info{
+    position:fixed;
+    left: var(--detail-info-left, var(--edge));
+    top: var(--detail-info-top, auto);
+    /* 注意：這裡故意不設 bottom。如果同時設 top（JS 算好的 px 值）又設
+       bottom，在沒有指定 height 的 position:fixed 元素上，瀏覽器不會把
+       bottom「忽略」掉，而是會把方塊撐高到 top～bottom 之間的整段距離——
+       這樣一來，下面 JS 用 getBoundingClientRect().height 量到的就不是
+       文字實際內容的高度，而是「上一次撐出來的高度」，導致每次重新定位
+       都拿不準的高度去算下一個不準的 top，多次觸發（切換照片、縮放、
+       字型載入完成…）後誤差會慢慢疊加，這正是「文字偶爾往上飄到照片上」
+       這個 bug 的成因。拿掉 bottom 後，高度永遠由內容自然決定，量測才會
+       準；JS 一定會在畫面顯示前就把 --detail-info-top 算好，所以拿掉
+       bottom 不會有「JS 還沒算完先閃一下」的問題。 */
+    z-index:55;
+    text-align:left;
+    /* 字級、行距直接沿用 header 那排標題用的同一個變數/比例，兩邊永遠一致，
+       header 變小（例如手機版）這裡就跟著一起變小，不用兩處分別調整 */
+    font-size: var(--header-font-size);
+    line-height:1.5;
+    /* 手機版 header 是橫向一排、用 space-between 排版，"collab" 常常被推到很
+       靠右的地方，如果 detail-info 從那個 x 座標開始還維持不換行的單行文字，
+       絕大部分內容會直接超出螢幕右側被裁掉、整段看起來就像「不見了」。
+       這裡限制寬度為「從目前這個 left 位置到螢幕右側邊界（扣掉 edge）」剩下的
+       空間，超過就自動換行，確保不管 left 落在螢幕哪個位置，文字都完整留在
+       可視範圍內，同時仍然維持「對齊 collab 左側」這個位置關係。 */
+    max-width: calc(100vw - var(--detail-info-left, var(--edge)) - var(--edge));
+    overflow-wrap: break-word;
+  }
+  .detail-info .detail-number{ color:#000; }
+  .detail-info .detail-title{ color:#000; }
+
+  /* "preview" 標籤現在是 .fixed-header 裡的一般欄位（跟 header-left / header-right
+     用同一套 grid/flex 排版），樣式定義已合併到上面的 .fixed-header 規則，
+     不再需要獨立的 position:fixed + JS 算像素位置 + opacity 淡入技巧 —— 這樣它
+     一定跟另外兩塊文字同時、立刻出現，畫面變窄時也會跟著同一套 grid/flex 換行，
+     不會被推出螢幕外。 */
+
+  /* ---------- PREVIEW PAGE（左右交錯全版跳轉） ---------- */
+  .preview-page{
+    position:fixed;
+    inset:0;
+    z-index:900;
+    overflow:hidden; /* 配合下面 .preview-col 故意做出的重疊，超出邊界的部分直接裁掉 */
+    display:flex; /* 一律保持 flex 版面，用 opacity+visibility 做淡入淡出，
+                     不再用 display 直接切換（那樣完全沒有轉場、是瞬間跳出來） */
+    opacity:0;
+    visibility:hidden;
+    pointer-events:none;
+    background:#fff; /* 桌機版左右兩欄各佔 50% 寬，理論上剛好拼滿，但螢幕寬度
+                         不是整數、或瀏覽器算 50% 時的次像素捨入，偶爾會在正
+                         中間留下不到 1px 的縫；這條縫原本會直接透出後面（半
+                         透明疊在網格頁上）的內容，變成一條不固定顏色、看起來
+                         像細黑線的縫。整個 preview-page 先鋪一層白色底色，
+                         這條縫不管什麼時候出現，透出來的都是白色，不會再看到
+                         奇怪的線。 */
+    /* 進場：opacity 立刻開始淡入，visibility 也立刻變 visible（delay:0s），
+       不然還沒淡入就先被 visibility 卡住看不到。
+       退場交給 .active 被移除時，下面沒有 .active 的這條規則接手（見下）。 */
+    transition: opacity .15s ease, visibility 0s linear 0s;
+    touch-action:none; /* 這個頁面不能捲動/縮放 */
+  }
+  .preview-page.active{
+    opacity:1;
+    visibility:visible;
+    pointer-events:auto;
+  }
+  .preview-page.no-fade{
+    /* 進站當下第一次自動打開 preview 頁專用：跳過 0.15s 的淡入動畫，
+       直接瞬間變成完全不透明。原因是這段淡入期間 preview-page 本身
+       （包含它的白色底色）也在跟著淡入，opacity 還沒到 1 之前，底下
+       已經渲染好的首頁網格（001 002...等數字是不等圖片就會馬上出現的）
+       會透過這段還沒淡完的透明度被看到，造成「preview 圖片還沒出來，
+       首頁數字先跑出來」的畫面。只有這個進站瞬間需要瞬間切換，使用者
+       之後手動點擊 preview 標籤 / 點擊畫面關閉，都還是走原本平滑的
+       0.15s 淡入淡出，不受影響。 */
+    transition:none !important;
+  }
+  .preview-page:not(.active){
+    /* 退場：opacity 淡出的這 0.15s 期間，visibility 還要維持 visible，
+       等淡出動畫真正跑完（transition-delay 跟 opacity 的時長對齊）才切成
+       hidden，不然畫面會在還沒淡完就被 visibility 直接切掉、變成一半淡出
+       一半瞬間消失的怪異效果 */
+    transition: opacity .15s ease, visibility 0s linear .15s;
+  }
+  .preview-col{
+    position:relative;
+    /* 桌機/平板是左右兩欄各佔 50% 寬，理論上剛好拼滿，但螢幕寬度不是整數、
+       或瀏覽器算 50% 時的次像素捨入，偶爾會在正中間留下不到 1px 的縫——
+       這條縫不管 preview-page / preview-col 背景設多白都沒用，因為那其實
+       不是「背景透出來」，而是兩個各自獨立的渲染圖層中間真的有一絲空隙，
+       瀏覽器（尤其是手機 Safari）在那條空隙上有時會合成出一條看起來像
+       黑色的細線。修法跟下面手機版「上下兩欄」用的是同一招：兩欄都故意
+       「多蓋出」2px（遠大於任何次像素捨入誤差），右欄再往左拉 2px 貼上去，
+       兩張圖片保證重疊 2px，那條縫就不可能再露出來；多出來的 2px 由上面
+       .preview-page 的 overflow:hidden 裁掉，不影響版面寬度。 */
+    width: calc(50% + 2px);
+    height:100%;
+    overflow:hidden;
+    background:#fff; /* 原本是 #000（黑幕）；圖片還沒載出來之前的空檔容易被
+                         使用者感知成「當機」，改成跟全站底色一致的白色，
+                         視覺上比較不突兀，也跟白色背景銜接得更自然。 */
+  }
+  .preview-right{
+    margin-left: -2px; /* 往左貼上去跟左欄重疊 2px，後渲染的右欄會蓋掉重疊區域，縫隙不會露出來 */
+  }
+  .preview-col img{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover; /* 剛好填滿區域、不留白，也不會過度放大 */
+    display:block;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+    /* 明確禁止任何轉場效果：暖場縮圖（thumbUrl）換成高畫質版本時，兩者都是
+       直接指定 src、瞬間切換，本來就不會自動觸發淡入淡出——這裡還是明講
+       transition:none，避免以後不小心加了其他共用規則（例如改成套用某個
+       全站 img 的 transition class）意外讓這裡也淡入淡出，確保永遠是完全
+       無縫的瞬間跳接。 */
+    transition:none !important;
+  }
+
+  /* 手機：左右兩欄改成上下兩欄。只改排版方向跟每欄的寬高比例，跳轉的時機/節奏
+     （JS 那邊完全沒動）跟每張照片的填滿方式（object-fit:cover）都維持不變。 */
+  @media (max-width: 640px){
+    .preview-page.active{
+      flex-direction: column;
+      overflow:hidden; /* 配合下面刻意重疊的 2px，多出來的部分直接裁掉，
+                           不會往下多推出一截或跑出捲軸 */
+    }
+    /* 上下兩欄用 height:50% 各分一半時，手機瀏覽器（尤其動態網址列造成
+       視窗高度不是整數，或算 50% 時本身就有次像素捨入）常常會在兩欄交界
+       處留下不到 1px 的空隙，因為背景是白色、又剛好貼著白色的
+       body/preview-page 底色，看起來就是一條很細的白線。
+       修法：讓兩欄都刻意「多蓋出」2px（遠大於任何次像素捨入誤差），
+       下面那欄再往上拉 2px，兩張照片一定會重疊個 1~2px，白線就不可能
+       再露出來；多出來的 2px 由上面 .preview-page.active 的
+       overflow:hidden 裁掉，不影響版面高度。 */
+    .preview-col{
+      width:100%;
+      height: calc(50% + 2px);
+    }
+    .preview-right{
+      margin-left: 0; /* 手機是上下欄，取消桌機版左右重疊用的 margin-left，改用下面的 margin-top 做上下重疊 */
+      margin-top: -2px;
+    }
+  }
+
+  /* ---------- 貫穿全站、蓋在所有頁面之上的飄動英文字 ----------
+     不再只在手機版 preview 頁面顯示、也不再區分手機/桌機兩種操作方式：
+     用 position:fixed（相對視窗，不是相對捲動位置）+ transform 定位
+     （JS 算好 x/y 直接寫 transform，不動 top/left，效能比較好）。這個
+     元素是 <body> 的直接子節點，不屬於 galleryPage / previewPage /
+     detailPage 任何一個頁面容器，所以切換頁面（顯示/隱藏、加減 class）
+     完全不會影響到它、不會有任何跳動或重新定位。z-index 拉到最高，
+     蓋過頁面裡所有文字、圖片。手機、桌機都用同一套 Pointer Events
+     直接抓取拖曳，放開後依甩動速度飛出去，撞到視窗邊緣就反彈。 */
+  .dvd-bounce{
+    position:fixed;
+    top:0; left:0;
+    box-sizing:border-box;
+    z-index:99999;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    padding:0; /* 拿掉原本的按鍵熱區 padding，讓這個容器的邊界=圖片實際邊緣，撞牆判斷才會精準貼合圖形 */
+    pointer-events:auto;
+    touch-action:none; /* 讓拖曳完全交給 JS 的 Pointer Events 處理，瀏覽器不要自己介入 */
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+    will-change: transform;
+    cursor: grab;
+  }
+  .dvd-bounce:active{ cursor: grabbing; }
+  .dvd-bounce-img{
+    display:block;
+    height: clamp(40.5px, 9.72vw, 118.8px); /* 沿用原本文字版的高度區間，再整體放大 1.35 倍 */
+    width:auto;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+    pointer-events:none; /* 拖曳事件交給外層 .dvd-bounce 處理，圖片本身不用再接收事件 */
+  }
+  @media (max-width: 640px){
+    /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間 */
+    .dvd-bounce-img{
+      height: clamp(64.8px, 15.552vw, 190.08px);
+    }
+  }
+  /* 平板縮小成桌機版的 0.85 倍。原本用「寬度介於 641~1100px 之間」來判斷
+     平板，但這只適用於平板螢幕小到會切到 3 欄版面的情況；螢幕夠大（或
+     橫放）的平板，寬度會超過 1100px、跟桌機一樣顯示 5 欄版面，寬度上完全
+     看不出跟桌機的差別，這個縮小規則就套用不到——這正是「我的平板也是
+     五欄位版本」這個回報的成因。
+     改用 (hover: none) and (pointer: coarse) 判斷：這抓的是「主要輸入裝置
+     是觸控、且沒有滑鼠懸停能力」這個特性本身，不管平板當下顯示 3 欄還是
+     5 欄、螢幕多寬多窄都一樣抓得到；再加上 min-width:641px 排除掉手機
+     （手機已經有自己上面那條規則），確保跟手機版互不衝突。桌機/筆電因為
+     有滑鼠（hover:hover、pointer:fine）完全不會命中這個規則，維持原本大小
+     不變。 */
+  @media (hover: none) and (pointer: coarse) and (min-width: 641px){
+    .dvd-bounce-img{
+      height: clamp(34.425px, 8.262vw, 100.98px);
+    }
+  }
+
+  /* preview 頁開啟時：所有上方標題文字轉純白色、字重改成 DM Sans Regular
+     （平常是 500），並讓點擊直接穿透到底下的 preview-page（由它負責處理
+     「點任何地方都跳回首頁」） */
+  body.preview-active .fixed-header,
+  body.preview-active .fixed-header *{
+    color:#ffffff !important;
+    font-weight:400 !important;
+    pointer-events:none !important;
+  }
+
+  .hidden{ display:none !important; }
+
+  ::selection{ background:#000; color:#fff; }
+</style>
+</head>
+<body>
+
+  <div class="dvd-bounce" id="dvdBounce" draggable="false"><img class="dvd-bounce-img" src="data:image/png;base64,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" alt="EDEN" draggable="false"></div>
+
+  <header class="fixed-header">
+    <div class="header-left" id="backHome">photobook by edenchen</div>
+    <div class="header-preview" id="previewLabel">preview</div>
+    <div class="header-right">collab at edenchenworks@gmail.com
+@edench3n</div>
+  </header>
+
+  <main id="galleryPage">
+    <div class="grid" id="photoGrid"></div>
+  </main>
+
+  <div class="hover-preview" id="hoverPreview"></div>
+
+  <div class="preview-page" id="previewPage">
+    <div class="preview-col preview-left">
+      <img id="previewLeftImg" alt="" draggable="false">
+    </div>
+    <div class="preview-col preview-right">
+      <img id="previewRightImg" alt="" draggable="false">
+    </div>
+  </div>
+
+  <section class="detail-page" id="detailPage">
+    <div class="detail-image-wrap" id="detailImageWrap">
+      <img id="detailImage" src="" alt="" draggable="false">
+    </div>
+    <button class="nav-arrow nav-back" id="backArrowBtn" aria-label="back to gallery">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nav-arrow nav-left" id="prevBtn" aria-label="previous">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nav-arrow nav-right" id="nextBtn" aria-label="next">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="detail-info">
+      <div class="detail-number" id="detailNumber">001</div>
+      <div class="detail-title" id="detailTitle">Title</div>
+    </div>
+  </section>
+
+<script>
+(function(){
+
+  const GOOGLE_DRIVE_FOLDER_ID = '1wQI2MMoORB78XoC8E5GnxKkLLUEZsxPn';
+  const GOOGLE_API_KEY = 'AIzaSyDoTpWEZ-UGEhOm3HScpL2mTlwc7tYiiNg';
+
+  const demoFileNames = [
+    'Akihabara, Tokyo.jpg', 'MJ Studio Visit.jpg', 'FA Laptop Session.jpg',
+    'Gaming Cafe Interior.jpg', 'FA Grid Archive.jpg', 'FA Golf Fit Label.jpg',
+    'Selina Miles Spread.jpg', 'Bruno Portrait Layout.jpg', 'DS Grande Print.jpg',
+    'Golf Fit Rolls.jpg', 'Creative Studio Collage.jpg', 'Desk Setup Detail.jpg',
+    'MJ Business Card.jpg', 'Skaff Deg Medlemskap.jpg', 'FA Phone Case Collab.jpg'
+  ];
+
+  const demoDims = [
+    { w: 900,  h: 1200 }, { w: 1000, h: 1000 }, { w: 1300, h: 900  },
+    { w: 1400, h: 800  }, { w: 1000, h: 1000 }, { w: 900,  h: 1200 },
+    { w: 850,  h: 1300 }, { w: 1300, h: 950  }, { w: 700,  h: 1400 },
+    { w: 850,  h: 1300 }, { w: 1100, h: 1100 }, { w: 1300, h: 900  },
+    { w: 1400, h: 850  }, { w: 900,  h: 1250 }, { w: 850,  h: 1350 }
+  ];
+
+  const demoColors = ['#1a1a1a','#242424','#151515','#2c2c2c','#1e1e1e'];
+
+  function makePlaceholder(w, h, color, label){
+    const fontSize = Math.round(w * 0.08);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`
+      + `<rect width="100%" height="100%" fill="${color}"/>`
+      + `<text x="50%" y="50%" fill="#ffffff" fill-opacity="0.85" font-family="sans-serif" `
+      + `font-size="${fontSize}" text-anchor="middle" dominant-baseline="middle">${label}</text>`
+      + `</svg>`;
+    return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  }
+
+  const demoPhotos = demoFileNames.map((name, i) => {
+    const dims = demoDims[i % demoDims.length];
+    const color = demoColors[i % demoColors.length];
+    const placeholderUrl = makePlaceholder(dims.w, dims.h, color, String(i + 1).padStart(3, '0'));
+    return {
+      title: name.replace(/\.[^/.]+$/, ''),
+      url: placeholderUrl,
+      thumbUrl: placeholderUrl,
+      tinyUrl: placeholderUrl // demo 用的本來就是很小的 SVG data URI，直接沿用即可
+    };
+  });
+
+  let photos = [];
+  let currentIndex = 0;
+
+  const grid = document.getElementById('photoGrid');
+  const galleryPage = document.getElementById('galleryPage');
+  const hoverPreview = document.getElementById('hoverPreview');
+  const detailPage = document.getElementById('detailPage');
+  const detailImageWrap = document.getElementById('detailImageWrap');
+  const detailImage = document.getElementById('detailImage');
+  const detailNumber = document.getElementById('detailNumber');
+  const detailTitle = document.getElementById('detailTitle');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const backHome = document.getElementById('backHome');
+  const backArrowBtn = document.getElementById('backArrowBtn');
+  const headerRight = document.querySelector('.fixed-header .header-right');
+  const detailInfo = document.querySelector('.detail-info');
+  const previewLabel = document.getElementById('previewLabel');
+  const previewPage = document.getElementById('previewPage');
+  const previewLeftImg = document.getElementById('previewLeftImg');
+  const previewRightImg = document.getElementById('previewRightImg');
+
+  const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  const supportsTouch = window.matchMedia('(pointer: coarse)').matches;
+
+  function pad3(n){ return String(n).padStart(3, '0'); }
+
+  // 左右箭頭原本用 top:50% + transform:translateY(-50%) 置中，
+  // 這種「百分比 + transform」的組合在手機 Safari 雙指縮放時，
+  // WebKit 不會即時重算百分比位置，導致縮放過程中箭頭跟著漂移。
+  // 改成用 JS 算好的固定像素 top（跟不會漂移的返回鍵按鈕做法一致），
+  // 縮放中就不會有東西需要重新計算，自然不會飄動。
+  function positionNavArrows(){
+    [prevBtn, nextBtn].forEach(btn => {
+      const h = btn.getBoundingClientRect().height || 64;
+      const top = Math.round((window.innerHeight - h) / 2);
+      btn.style.top = top + 'px';
+      btn.style.transform = 'none';
+    });
+  }
+
+  // 返回鍵（左上角「上一頁」箭頭）原本直接寫死 CSS top:170px，這個數字是照著
+  // 手機直式（header 較高、螢幕夠高）調出來的，在桌機滿版（螢幕本來就夠高）
+  // 剛好也還過得去，所以之前沒發現問題；但手機橫放時螢幕高度會大幅變矮
+  // （例如只剩 3~400px 左右），170px 這個寫死的數字沒有跟著縮小，按鈕就會
+  // 相對畫面「跑掉」（偏低、甚至貼近或超出畫面下緣，看起來位置不對）。
+  // 修法：跟 nav-left / nav-right（positionNavArrows）、detail-info 等元素
+  // 同一套做法——不要用寫死的像素值，改成每次都用 JS 即時量測 header 實際
+  // 渲染出來的下緣，並確保按鈕永遠留在畫面可視範圍內：
+  //   - 下限：一定要留在 header 文字下方一段安全間距，不會疊到 header 文字
+  //   - 上限：一定要留在畫面高度以內，不會被裁掉或跑出螢幕
+  //   - 平常（螢幕夠高，例如手機直式、桌機）維持原本設計想要的 170px 高度
+  // 這樣不管是直式、橫式、桌機哪一種畫面比例，都會即時算出當下正確的位置，
+  // 而不是套用一個只在特定畫面比例下剛好正確的固定數字。
+  function positionBackButton(){
+    if(!backArrowBtn) return;
+    const headerEl = document.querySelector('.fixed-header');
+    if(!headerEl) return;
+    const headerBottom = headerEl.getBoundingClientRect().bottom;
+    const btnH = backArrowBtn.getBoundingClientRect().height || 64;
+    const gapBelowHeader = 40; // header 下緣到按鈕之間至少留的安全間距
+    const desiredTop = 170; // 畫面夠高時（直式手機、桌機）維持原本的設計高度
+    const bottomSafety = 24; // 距離畫面底部至少留的安全間距，避免貼底或超出
+
+    const minTop = headerBottom + gapBelowHeader;
+    const maxTop = window.innerHeight - btnH - bottomSafety;
+
+    // 畫面矮到連「minTop」都放不下（極端窄的橫式視窗）時，優先保證不會被
+    // 裁到畫面外，寧可稍微貼近 header 也不要跑出可視範圍
+    const top = maxTop < minTop
+      ? Math.max(bottomSafety, maxTop)
+      : Math.min(desiredTop, maxTop);
+
+    backArrowBtn.style.top = Math.round(Math.max(top, 0)) + 'px';
+    backArrowBtn.style.transform = 'none';
+  }
+
+  // 同樣道理：detail-info 文字原本用 bottom:40px 定位，改成 JS 算好的
+  // 固定像素 top，跟左邊對齊 header 的邏輯一起做，縮放時就不會飄動。
+  function syncDetailInfoAlignment(){
+    const rect = headerRight.getBoundingClientRect();
+    document.documentElement.style.setProperty('--detail-info-left', rect.left + 'px');
+
+    if(detailInfo){
+      const infoH = detailInfo.getBoundingClientRect().height || 0;
+      const bottomMargin = 40;
+      const top = window.innerHeight - bottomMargin - infoH;
+      document.documentElement.style.setProperty('--detail-info-top', Math.round(top) + 'px');
+    }
+  }
+
+  // "preview" 標籤對齊 002、"collab" 區塊（header-right）對齊 004，做法完全一樣，
+  // 所以抽成同一個函式重複用：對齊下方指定照片實際渲染出來的左邊緣（縮圖是置中
+  // 顯示在格子裡的，跟格子本身的邊緣不一樣，所以格子對齊還不夠準）。
+  //
+  // 在桌機滿版 5 欄範圍內「持續即時追蹤」目標照片實際渲染出來的位置——拖曳寬度
+  // 時，照片的位置本身就是連續、按比例在變化的（欄寬隨容器寬度平滑縮放），
+  // 每一幀都重新量測、對齊，標籤自然就會跟著它一起連續、按比例地滑動，效果
+  // 就是「拉動時自由按比例縮放」。
+  //
+  // （曾經試過「只在最大寬度量一次、之後凍結成固定偏移量疊加在 flex 自然位置
+  // 上」，但 flex 用 justify-content:space-between 算出來的中間項位置，本來就
+  // 跟下面照片格子的欄位邊界是兩套完全無關的邏輯，固定偏移量疊加在跟照片無關的
+  // 位置上，整段拖曳過程都會對不準，不只是斷點那一下——所以改回這個持續追蹤的
+  // 版本，才是真正跟著照片格子按比例移動的做法。）
+  //
+  // 唯一無法避免的：5→3 欄的斷點本身，是照片格子「整數欄數」瞬間切換造成的
+  // 結構性跳動——目標照片自己在那一刻就會被搬到完全不同的欄位寬度（不是連續
+  // 縮放，是離散跳動），不是「拖曳中持續追蹤」這個做法造成的問題；只要還要求
+  // 兩側都精準對齊該照片，這一下跳動就無法用 JS 消除，除非放棄其中一側的精準
+  // 對齊。
+  const DESKTOP_BREAKPOINT = 1100; // 與 CSS 中 .grid 從 5 欄變 3 欄的 media query 門檻一致
+  function syncEdgeAlignment(el, cssVar, targetDataIndex){
+    if(!el || !grid) return;
+
+    if(window.innerWidth <= DESKTOP_BREAKPOINT){
+      document.documentElement.style.setProperty(cssVar, '0px');
+      // 窄螢幕不需要精準對齊照片，目前這個位置（0 偏移）本來就已經是最終位置，
+      // 直接顯示出來，不會有「先跑到錯誤位置」的問題
+      el.classList.add('positioned');
+      return;
+    }
+
+    const targetImg = grid.querySelector(`.grid-item[data-index="${targetDataIndex}"] img`);
+    if(!targetImg) return; // 目標照片還沒渲染出來，先不顯示這個標籤，等它真的渲染出來再算
+    const imgRect = targetImg.getBoundingClientRect();
+    if(!imgRect.width) return; // 圖片還沒渲染出寬度，先不調，等 load 事件再算一次
+
+    // 讀回目前已經套用的偏移量，還原出「沒有微調時」原本的左邊界，再算出新的
+    // 偏移量——因為對應元素的 left 沒有 CSS transition（見 CSS 註解），這裡讀到
+    // 的永遠是瀏覽器已經套用完成的實際值，不會有動畫插值中的數值跟目標值對不上、
+    // 導致越算越偏的問題。
+    const elRect = el.getBoundingClientRect();
+    const currentNudge = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(cssVar)) || 0;
+    const baseLeft = elRect.left - currentNudge;
+    const nudge = Math.round(imgRect.left - baseLeft);
+    document.documentElement.style.setProperty(cssVar, nudge + 'px');
+    // 算出真正精準的位置後才顯示（見 CSS 的 opacity:0 / .positioned 規則），
+    // 這是「進頁面/重新整理時標籤會先跑到錯誤位置再跳回來」這個 bug 的修法：
+    // 與其讓它先出現在錯誤（預設 0 偏移）的位置、算完再跳過去，不如乾脆讓它
+    // 在還沒算出正確位置之前保持隱藏，算完直接在正確位置出現，使用者就不會
+    // 看到那個「跳」的過程。
+    el.classList.add('positioned');
+  }
+  function syncPreviewAlignment(){
+    syncEdgeAlignment(previewLabel, '--preview-nudge', 1); // 002 = data-index "1"
+  }
+  function syncHeaderRightAlignment(){
+    syncEdgeAlignment(headerRight, '--header-right-nudge', 3); // 004 = data-index "3"
+  }
+  function syncHeaderLeftAlignment(){
+    syncEdgeAlignment(backHome, '--header-left-nudge', 0); // 001 = data-index "0"
+  }
+
+  // 左上角「↑」返回鍵、「←」上一張箭頭，原本用寫死的 CSS
+  // left: calc(var(--edge) - 20px)，也就是直接貼齊頁面基礎留白 --edge。
+  // 但桌機滿版時，「photobook by edenchen」這排字（header-left）並不是貼在
+  // --edge，而是被上面 syncHeaderLeftAlignment() 精準微調過，對齊的是
+  // 001 照片實際渲染出來的左邊緣（縮圖是置中顯示在格子裡的，比格子本身的
+  // 留白要再往右一些）——這正是螢幕截圖裡箭頭明顯落在文字左邊、對不齊的
+  // 原因：箭頭用的是「頁面留白」，文字用的是「照片邊緣」，兩者本來就是
+  // 不同的基準線。
+  // 修法：改成箭頭也用同一個基準——直接讀 header-left 這一刻真正渲染出來的
+  // 左邊緣，再扣掉按鈕本身的 20px padding（讓箭頭「圖示」本身、不是按鈕的
+  // 透明熱區，對齊到文字左邊緣）。右側箭頭則依對稱性，套用同一個內縮值、
+  // 從畫面右邊界往內推，讓左右留白維持對稱（不是分別各算各的）。
+  // 手機／平板（DESKTOP_BREAKPOINT 以下）header-left 本來就沒有精準對齊
+  // 微調（nudge 固定是 0px），這裡算出來的值會自然跟原本 var(--edge)-20px
+  // 一致，所以這個改動不影響手機版的既有位置。
+  function positionNavHorizontal(){
+    if(!backHome) return;
+    const rect = backHome.getBoundingClientRect();
+    if(!rect.width && !rect.height) return; // header-left 還沒渲染出實際位置，先不調，等下一次 sync 再算
+    const navLeft = Math.round(rect.left - 20);
+    [prevBtn, backArrowBtn].forEach(btn => {
+      if(!btn) return;
+      btn.style.left = navLeft + 'px';
+      btn.style.right = 'auto';
+    });
+    if(nextBtn){
+      nextBtn.style.right = navLeft + 'px';
+      nextBtn.style.left = 'auto';
+    }
+  }
+
+  // 統一入口：視窗/版面真正穩定下來時（不是縮放中）才呼叫，
+  // 一次把左右箭頭、detail-info 文字、header-left、preview 標籤、collab 區塊
+  // 都重新定位好。
+  function syncFixedChrome(){
+    syncDetailInfoAlignment();
+    positionNavArrows();
+    positionBackButton();
+    syncHeaderLeftAlignment();
+    positionNavHorizontal(); // 必須排在 syncHeaderLeftAlignment() 之後，才能讀到這一輪算好的最新位置
+    syncPreviewAlignment();
+    syncHeaderRightAlignment();
+  }
+
+  async function fetchDriveImages(){
+    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
+       !GOOGLE_DRIVE_FOLDER_ID || GOOGLE_DRIVE_FOLDER_ID === 'YOUR_FOLDER_ID'){
+      return demoPhotos;
+    }
+
+    try{
+      const q = encodeURIComponent(`'${GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
+      const fields = encodeURIComponent('files(id,name,createdTime,thumbnailLink)');
+      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=name&key=${GOOGLE_API_KEY}`;
+
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('Drive API request failed: ' + res.status);
+      const data = await res.json();
+
+      if(!data.files || data.files.length === 0) return demoPhotos;
+
+      return data.files
+        .sort((a,b) => a.name.localeCompare(b.name))
+        .map(file => {
+          // thumbnailLink 是 Google 圖片 CDN 產生的、已經縮圖過的版本（速度快、
+          // 全球都有快取節點，也比較不會像 uc?export=view 那樣在檔案較大時
+          // 被擋掉或跳出「無法掃描病毒」的中介頁面）。網格縮圖只是小圖，
+          // 用 800px 的版本畫質完全足夠；點開大圖看細節時才用原始全尺寸檔案，
+          // 畫質不受任何影響。
+          const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
+          return {
+            title: file.name.replace(/\.[^/.]+$/, ''),
+            url: `https://drive.google.com/uc?export=view&id=${file.id}`, // 原始全尺寸檔案：畫質最高，但走 drive.google.com/uc，
+                                                                            // 不是 CDN，檔案大時常常要等好幾秒才回應，甚至偶爾被
+                                                                            // 導去「無法掃描病毒」的中介頁面——這是白屏拖很久的主因
+            // detailUrl：大圖頁真正優先使用的來源。一樣是 thumbnailLink 這個
+            // Google 圖片 CDN（全球節點、速度快很多），只是把尺寸從網格用的
+            // 800px 拉到 2000px——一般螢幕（含 Retina）全螢幕顯示都綽綽有餘，
+            // 肉眼幾乎看不出跟原始檔案的差異，但下載速度是原本 uc?export=view
+            // 的好幾倍快，白屏時間大幅縮短。
+            detailUrl: thumbBase ? (thumbBase + '=s2000') : '',
+            // detailUrlMobile：只給手機版大圖頁用的縮小版本。手機螢幕的可視
+            // 寬度（扣掉左右箭頭留白後）通常落在 250~300px 左右，就算是
+            // Retina/3x 螢幕，實際需要的像素寬度也大概落在 900px 上下，
+            // 2000px 對手機來說是遠超過肉眼看得出差異的大小，卻要多花好幾倍
+            // 的下載時間。改用 1200px：畫質在手機螢幕上跟 2000px 幾乎沒有
+            // 分別，但檔案小很多、下載快很多，這樣切換照片時大機率能直接
+            // 一次到位顯示正確畫面，不需要再靠縮圖墊場、事後校正這些額外的
+            // 過場處理。只在觸控裝置套用，桌機版不受影響，仍然用 2000px。
+            detailUrlMobile: (supportsTouch && thumbBase) ? (thumbBase + '=s1200') : '',
+            thumbUrl: thumbBase ? (thumbBase + '=s800') : `https://drive.google.com/uc?export=view&id=${file.id}`, // hover 大圖預覽專用：畫質保持不變
+            // gridUrl：首頁網格縮圖實際顯示用的尺寸。網格每張圖片最終渲染出來
+            // 頂多幾十到一百多 px 寬（.grid-item img { max-width:52% } 疊在
+            // 本來就不大的欄位裡），用 800px 明顯是殺雞用牛刀，檔案大小是真正
+            // 需要的好幾倍，這正是「首頁小圖載入速度太慢」的主因。改用 400px，
+            // 即使是 Retina 螢幕也綽綽有餘，肉眼幾乎看不出差異，但檔案大小明顯
+            // 縮小、下載更快。注意：hover 滑鼠跳出來的大圖預覽刻意還是用上面
+            // 那個沒被縮小的 thumbUrl（s800），不會被這次調整影響到。
+            gridUrl: thumbBase ? (thumbBase + '=s400') : `https://drive.google.com/uc?export=view&id=${file.id}`,
+            fallbackUrl: thumbBase ? (thumbBase + '=s1600') : '', // 縮圖／原圖都失敗時的備援
+            // tinyUrl：專門給 preview 頁「飄動的 e 撞到上/下邊界」觸發跳轉、但撞擊
+            // 太快或連續撞擊時使用的備援圖。原本是 60px，檔案極小、瞬間就能
+            // 顯示，但撞太快時整個畫面幾乎全是這張圖，60px 拉滿半個螢幕肉眼
+            // 一看就是馬賽克，畫質完全不能看。改成 320px：檔案仍然很小（整條
+            // 序列在照片清單一到手就已經全部預先暖機過，見下方
+            // preparePreviewSequences，所以顯示當下一樣是瞬間、不會變慢），
+            // 但清晰度大幅提升，撞太快時看到的也是一張還算能辨識內容的照片，
+            // 不是純粹的色塊。
+            tinyUrl: thumbBase ? (thumbBase + '=s320') : `https://drive.google.com/uc?export=view&id=${file.id}`,
+            // previewUrl：只給手機版的 preview 跳轉頁用。跳轉頁每 0.5 秒就換一張，
+            // 畫面停留時間很短、肉眼幾乎來不及看清細節，卻要求跟大圖頁一樣載 2000px
+            // 原圖，在手機網路下載這麼大的檔案本來就慢，這正是「下方區域黑一陣子
+            // 照片才跳出來」的主因之一。這裡再從 900px 降到 650px：因為畫面每
+            // 0.5 秒就換下一張，加上照片是用 object-fit:cover 塞滿半個手機螢幕
+            // （不是給人放大細看），650px 在肉眼可辨識的程度上跟 900px 幾乎沒有
+            // 差異，但檔案大小可以再省下不少，白幕/黑幕出現的機率跟時間都會更短。
+            // 只在觸控裝置（supportsTouch）套用，桌機版不受影響，仍然用原本的 2000px。
+            // 原本是 650px，在一般手機螢幕上還算夠用，但在高密度（3x Retina）
+            // 大螢幕手機上，object-fit:cover 撐滿半個螢幕寬度時 650px 已經不太
+            // 夠銳利，肉眼看得出偏軟。調到 900px：檔案仍然遠比 2000px 小很多、
+            // 下載跟解碼都很快，但清晰度在大多數手機上已經跟看原圖沒有明顯差異。
+            previewUrl: (supportsTouch && thumbBase) ? (thumbBase + '=s900') : ''
+          };
+        });
+    }catch(err){
+      return demoPhotos;
+    }
+  }
+
+  // 首頁網格最前面這幾張縮圖，不管手機螢幕多高，幾乎都是「一打開就看得到」
+  // 的第一畫面內容；原本手機版（supportsTouch）不分青紅皂白全部縮圖都套用
+  // loading="lazy"，包括這些明明馬上就要顯示的圖片——lazy 是設計給「捲動
+  // 到才需要看到」的內容用的，套在第一畫面內容上，瀏覽器不會把它們當成
+  // 高優先度資源，反而會延後、降低它們的下載優先順序，這正是「一開始都
+  // 還是全白幕」的主因之一。這裡改成：前面這幾張明確給 eager + 高優先度，
+  // 讓瀏覽器把頻寬優先用在使用者馬上就會看到的圖片上；再往後（真的要捲動
+  // 才會看到）的縮圖才繼續用 lazy，省流量、不影響第一畫面出現的速度。
+  // 10 張足夠涵蓋手機 2 欄、平板 3 欄、桌機 5 欄各種版面下的第一畫面，
+  // 多留一點餘裕也不會造成明顯負擔（縮圖檔案本身已經很小)。
+  const GRID_EAGER_COUNT = 10;
+
+  function renderGrid(){
+    grid.innerHTML = '';
+    photos.forEach((photo, i) => {
+      const item = document.createElement('div');
+      item.className = 'grid-item';
+      item.dataset.index = i;
+
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'thumb-wrap';
+
+      const img = document.createElement('img');
+      img.alt = photo.title;
+      img.draggable = false;
+      img.decoding = 'async'; // 解碼不卡主執行緒，捲動/縮放更順
+      // 手機沒有 hover 預覽功能，用瀏覽器原生 lazy loading 讓非畫面內的縮圖
+      // 延後下載，省流量、加快第一批可見縮圖出現的速度；桌機保留即時載入，
+      // 確保滑鼠移過去的當下大圖預覽完全不用等。
+      // 但前 GRID_EAGER_COUNT 張是「一打開就看得到」的第一畫面內容，不管
+      // 手機還是桌機都明確設成 eager + 高優先度，不要被當成可以延後的資源。
+      if(i < GRID_EAGER_COUNT){
+        img.loading = 'eager';
+        try { img.fetchPriority = 'high'; } catch(e){} // 不支援的瀏覽器就當作沒設定，不影響原本行為
+      } else if(supportsTouch){
+        img.loading = 'lazy';
+      }
+      img.addEventListener('load', () => img.classList.add('loaded'));
+      if(i === 0){
+        // "photobook by edenchen"（header-left）對齊 001，同樣要等這張圖片真的
+        // 渲染出寬度才能算準；左側箭頭／返回鍵是照著這排字的位置對齊的，
+        // 這裡也要跟著重算一次，不然文字對齊了、箭頭卻還停在算之前的舊位置
+        img.addEventListener('load', () => { syncHeaderLeftAlignment(); positionNavHorizontal(); });
+      }
+      if(i === 1){
+        // "preview" 標籤的精準桌機對齊要用這張圖片實際渲染出來的寬度才能算，
+        // 圖片載入完成（知道真正尺寸）後再嘗試量測一次（如果之前還沒量過）
+        img.addEventListener('load', syncPreviewAlignment);
+      }
+      if(i === 3){
+        // "collab" 區塊（header-right）對齊 004，同樣要等這張圖片真的渲染出
+        // 寬度才能算準
+        img.addEventListener('load', syncHeaderRightAlignment);
+      }
+      img.onerror = () => {
+        // 縮圖失敗 → 換大一點的備援縮圖 → 最後才退回原始全尺寸檔案
+        if(photo.gridUrl && img.src !== photo.gridUrl){
+          // 理論上不會走到這裡（第一次就是設成 gridUrl），保留只是防呆
+          img.src = photo.gridUrl;
+        } else if(photo.thumbUrl && img.src !== photo.thumbUrl){
+          img.src = photo.thumbUrl;
+        } else if(photo.fallbackUrl && img.src !== photo.fallbackUrl){
+          img.src = photo.fallbackUrl;
+        } else if(img.src !== photo.url){
+          img.src = photo.url;
+        }
+      };
+      img.src = photo.gridUrl || photo.thumbUrl || photo.url; // 網格用最小的縮圖，快很多；大圖頁另外載入原始檔
+
+      thumbWrap.appendChild(img);
+
+      const idx = document.createElement('div');
+      idx.className = 'idx';
+      idx.textContent = pad3(i + 1);
+
+      item.appendChild(thumbWrap);
+      item.appendChild(idx);
+      grid.appendChild(item);
+
+      item.addEventListener('click', () => openDetail(i));
+      if(supportsHover){
+        img.addEventListener('mouseenter', () => showHoverPreview(photo, img));
+        img.addEventListener('mouseleave', hideHoverPreview);
+      }
+    });
+  }
+
+  function computeSafeRandomPosition(excludeRect, boxW, boxH){
+    const margin = 24;
+    const buffer = 16;
+    const safeExclude = {
+      left: excludeRect.left - buffer,
+      top: excludeRect.top - buffer,
+      right: excludeRect.right + buffer,
+      bottom: excludeRect.bottom + buffer
+    };
+
+    const maxLeft = Math.max(margin, window.innerWidth - boxW - margin);
+    const maxTop = Math.max(margin, window.innerHeight - boxH - margin);
+
+    let best = null;
+
+    for(let attempt = 0; attempt < 40; attempt++){
+      const left = margin + Math.random() * (maxLeft - margin);
+      const top = margin + Math.random() * (maxTop - margin);
+      const rect = { left, top, right: left + boxW, bottom: top + boxH };
+
+      const overlapsCursorArea =
+        rect.left < safeExclude.right && rect.right > safeExclude.left &&
+        rect.top < safeExclude.bottom && rect.bottom > safeExclude.top;
+
+      if(!overlapsCursorArea){
+        best = rect;
+        break;
+      }
+    }
+
+    if(!best){
+      const roomRight = window.innerWidth - safeExclude.right;
+      const roomLeft = safeExclude.left;
+      const roomBottom = window.innerHeight - safeExclude.bottom;
+      const roomTop = safeExclude.top;
+      const maxRoom = Math.max(roomRight, roomLeft, roomBottom, roomTop);
+
+      let left, top;
+      if(maxRoom === roomRight){
+        left = Math.min(window.innerWidth - boxW - margin, safeExclude.right + margin);
+        top = Math.min(Math.max(margin, excludeRect.top), window.innerHeight - boxH - margin);
+      } else if(maxRoom === roomLeft){
+        left = Math.max(margin, safeExclude.left - boxW - margin);
+        top = Math.min(Math.max(margin, excludeRect.top), window.innerHeight - boxH - margin);
+      } else if(maxRoom === roomBottom){
+        top = Math.min(window.innerHeight - boxH - margin, safeExclude.bottom + margin);
+        left = Math.min(Math.max(margin, excludeRect.left), window.innerWidth - boxW - margin);
+      } else {
+        top = Math.max(margin, safeExclude.top - boxH - margin);
+        left = Math.min(Math.max(margin, excludeRect.left), window.innerWidth - boxW - margin);
+      }
+      best = { left: Math.max(margin, left), top: Math.max(margin, top) };
+    }
+
+    return best;
+  }
+
+  // hover 大圖預覽要用的快取：key 是 photo.thumbUrl，value 是已經 decode 完成、
+  // 保證可以立即顯示的 <img> 元素。桌機一進頁面就會在背景把所有照片的
+  // thumbUrl 都預先跑過一輪（見 prefetchHoverThumbsInBackground），
+  // 所以使用者實際 hover 到的當下，這裡幾乎都已經有現成的了。
+  const hoverPreviewCache = new Map();
+
+  function showHoverPreview(photo, itemEl){
+    if(!photo || !photo.thumbUrl){
+      // 沒有 hover 專用的縮圖網址（極端情況，例如 demo 資料不完整），
+      // 退回原本「複製網格縮圖」的舊行為，至少還有東西可以看
+      if(itemEl.complete && itemEl.naturalWidth){
+        hoverPreview.innerHTML = '';
+        const bigImg = itemEl.cloneNode();
+        bigImg.removeAttribute('loading');
+        bigImg.draggable = false;
+        hoverPreview.appendChild(bigImg);
+        placeAndReveal(itemEl);
+      }
+      return;
+    }
+
+    const cached = hoverPreviewCache.get(photo.thumbUrl);
+    // guard: 這張 hover 用的圖片還沒載完＋解碼完成，就先等，不要把還沒完整
+    // 的畫面塞進去（跟先前修 preview 頁「兩段式」黑幕是同一個道理：一定要
+    // 整張圖都準備好了才顯示，不會有半張的中間態）
+    if(!cached){
+      const loader = new Image();
+      loader.src = photo.thumbUrl;
+      const onReady = () => {
+        const finish = () => {
+          hoverPreviewCache.set(photo.thumbUrl, loader);
+          if(itemEl.matches(':hover')) showHoverPreview(photo, itemEl);
+        };
+        if(loader.decode){ loader.decode().then(finish).catch(finish); } else { finish(); }
+      };
+      if(loader.complete && loader.naturalWidth) onReady();
+      else loader.onload = onReady;
+      return;
+    }
+
+    // 已經預先載好＋解碼完成，直接顯示，不會閃爍、也不會有中間態
+    hoverPreview.innerHTML = '';
+    const bigImg = cached.cloneNode();
+    bigImg.removeAttribute('loading');
+    bigImg.draggable = false;
+    bigImg.onerror = () => { if(photo.fallbackUrl) bigImg.src = photo.fallbackUrl; };
+    hoverPreview.appendChild(bigImg);
+
+    placeAndReveal(itemEl);
+  }
+
+  function placeAndReveal(itemEl){
+    const boxW = hoverPreview.getBoundingClientRect().width || Math.min(window.innerWidth * 0.45, 650);
+    const ratio = (itemEl.naturalHeight && itemEl.naturalWidth)
+      ? itemEl.naturalHeight / itemEl.naturalWidth
+      : 1;
+    const boxH = boxW * ratio;
+
+    const excludeRect = itemEl.getBoundingClientRect();
+    const pos = computeSafeRandomPosition(excludeRect, boxW, boxH);
+
+    hoverPreview.style.left = pos.left + 'px';
+    hoverPreview.style.top = pos.top + 'px';
+    hoverPreview.classList.add('show');
+  }
+
+  function hideHoverPreview(){
+    hoverPreview.classList.remove('show');
+  }
+
+  let detailToken = 0;
+  let lastNaturalW = 0, lastNaturalH = 0;
+
+  function positionDetailImage(naturalW, naturalH){
+    const ratio = (naturalW && naturalH) ? naturalW / naturalH : 1;
+
+    const isMobile = window.innerWidth <= 640;
+
+    // clear the arrows / back button / bottom-right info on any viewport;
+    // desktop keeps its original clearance, mobile gets a much tighter one
+    // (just enough to clear the arrow buttons) so the photo can go near-max size
+    const horizontalClearance = isMobile ? 130 : 220;
+    const verticalClearance = isMobile ? 190 : 260;
+
+    const availW = Math.max(120, window.innerWidth - horizontalClearance);
+    const availH = Math.max(120, window.innerHeight - verticalClearance);
+
+    let w = availW;
+    let h = w / ratio;
+    if(h > availH){
+      h = availH;
+      w = h * ratio;
+    }
+
+    detailImageWrap.style.width = w + 'px';
+    detailImageWrap.style.height = h + 'px';
+
+    const left = (window.innerWidth - w) / 2;
+    const top = (window.innerHeight - h) / 2;
+
+    detailImageWrap.style.left = left + 'px';
+    detailImageWrap.style.top = top + 'px';
+  }
+
+  function renderDetail(){
+    const token = ++detailToken;
+    const photo = photos[currentIndex];
+
+    detailNumber.textContent = pad3(currentIndex + 1);
+    detailTitle.textContent = photo.title;
+    syncDetailInfoAlignment(); // 標題長度不同，高度可能改變，重新算一次 top
+
+    // ---- 先用已經在畫面上、瀏覽器早就快取好的網格縮圖「暖場」----
+    // 這是白屏拖很久的主要對策：與其整段時間都空白，先把網格那張已經解碼完成
+    // 的縮圖（800px，使用者剛剛就是看著它點進來的）立刻放進大圖區顯示出來，
+    // 讓畫面在點擊的瞬間就有內容；等下面真正的高畫質版本載入完成，再無縫換成
+    // 那張圖。縮圖本身畫質不受影響——使用者最終看到的還是高畫質版本，這裡只是
+    // 拿它來墊過渡的空窗期。
+    //
+    // 注意：這裡只有在「網格縮圖真的已經載入完成」（gridReady）時才會拿它
+    // 暖場——這時候縮圖的寬高比就是這張照片真正的比例，用它定位容器完全準確，
+    // 不會有任何跳動。手機版網格用原生 lazy-loading（見 renderGrid 裡
+    // `if(supportsTouch) img.loading = 'lazy'`），左右切換切到的下一張很可能
+    // 根本沒捲到過、縮圖還沒載入——這種「不知道真正比例」的情況，故意不再
+    // 猜一個比例（不管是硬套正方形，還是拿上一張的比例頂著）來暫時顯示，
+    // 因為不管猜的是什麼，只要跟真正的比例不同，之後修正時終究會跳動一次。
+    // 既然要簡單、要求的是「直接跳轉」，就不猜、不墊、不用過場動畫校正，
+    // 單純保留目前畫面（上一張照片，或空白），一路等到下面真正要顯示的
+    // 這張照片本身載入＋解碼完成，用它真正的尺寸一次到位、直接跳出來。
+    const gridItemImg = document.querySelector(`.grid-item[data-index="${currentIndex}"] img`);
+    const gridReady = gridItemImg && gridItemImg.complete && gridItemImg.naturalWidth && gridItemImg.naturalHeight;
+
+    if(gridReady){
+      // 有暖場縮圖可以馬上顯示的情況下，wrap 全程保持「show」，不要 remove 再
+      // add——這正是「白幕淡出淡入」的成因：只要 class 被 remove 一次，CSS 的
+      // opacity transition 就會把 wrap 淡到 0（露出底下純白背景），再淡回 1，
+      // 使用者看到的就是一閃白幕。既然已經有東西可以馬上顯示，就不需要這段
+      // 淡出再淡入，直接讓 wrap 保持可見、只換 <img> 的內容即可。
+      const ratio = gridItemImg.naturalWidth / gridItemImg.naturalHeight;
+      lastNaturalW = ratio * 1000;
+      lastNaturalH = 1000;
+      positionDetailImage(lastNaturalW, lastNaturalH);
+      detailImage.src = gridItemImg.src;
+      detailImageWrap.classList.add('show'); // 直接顯示，不經過淡出/淡入
+    }
+    // gridReady 為 false 時什麼都不做：保留目前畫面（不管是上一張照片還是
+    // 空白），一路等到下面 commit() 真正拿到這張照片的正確尺寸，才顯示出來。
+
+    const loader = new Image();
+
+    // commit 只在「真正的高畫質版本」完全解碼完成（不只是下載完，是連畫面
+    // 像素都準備好）之後才把它換上 <img>——這樣瀏覽器可以一次到位地把新畫面
+    // 畫出來，不會因為臨時解碼大圖而卡一格空白幀（那格空白幀疊在純白背景上，
+    // 看起來就像「又閃了一下白幕」）。已經有暖場圖在顯示的情況下，這裡只換
+    // src，完全不動 opacity/class，銜接是無縫的；沒有暖場圖的情況下，這裡
+    // 就是這張照片第一次、也是唯一一次直接跳出來，尺寸從一開始就是對的。
+    const commit = () => {
+      if(token !== detailToken) return;
+      lastNaturalW = loader.naturalWidth || 1;
+      lastNaturalH = loader.naturalHeight || 1;
+      const swap = () => {
+        if(token !== detailToken) return;
+        positionDetailImage(lastNaturalW, lastNaturalH);
+        detailImage.src = loader.src;
+        detailImageWrap.classList.add('show');
+      };
+      if(loader.decode){
+        loader.decode().then(swap).catch(swap);
+      } else {
+        swap();
+      }
+    };
+
+    // 依序嘗試：detailUrlMobile（手機版專用的縮小版本，畫質在手機螢幕上跟
+    // 2000px 沒有分別，但檔案小很多、下載快很多，桌機版沒有這個欄位，直接
+    // 跳過）→ detailUrl（Google 圖片 CDN、2000px，又快畫質又好）→
+    // fallbackUrl（同一個 CDN 但 1600px，備援）→ url（原始全尺寸檔案，走
+    // drive.google.com/uc，最慢，留到真的都失敗才用）→ thumbUrl（保底）
+    const sources = [photo.detailUrlMobile, photo.detailUrl, photo.fallbackUrl, photo.url, photo.thumbUrl].filter(Boolean);
+    let srcIdx = 0;
+    function tryNext(){
+      if(srcIdx >= sources.length) return;
+      loader.src = sources[srcIdx++];
+    }
+    loader.onload = commit;
+    loader.onerror = tryNext;
+    tryNext();
+
+    // already cached — 'load' may not fire again, handle synchronously
+    if(loader.complete && loader.naturalWidth){
+      commit();
+    }
+
+    prefetchNeighbors(currentIndex);
+  }
+
+  // 靜默預先下載鄰近的照片（左右各 2 張），這樣按下一張/上一張箭頭時
+  // 圖片幾乎都已經在瀏覽器快取裡，可以立即無延遲切換
+  const prefetchedUrls = new Set();
+  function prefetchOne(url, lowPriority){
+    if(!url || prefetchedUrls.has(url)) return;
+    prefetchedUrls.add(url);
+    const im = new Image();
+    // lowPriority 只給「整個相簿慢慢背景預抓」這種完全不急、什麼時候載完
+    // 都無所謂的情境用（見 prefetchAllInBackground）；detail 頁瀏覽時
+    // 「馬上要用到」的鄰近照片預抓（prefetchNeighbors）維持原本優先度，
+    // 不受影響。
+    if(lowPriority){ try { im.fetchPriority = 'low'; } catch(e){} }
+    im.src = url;
+  }
+  function prefetchNeighbors(index){
+    const n = photos.length;
+    if(!n) return;
+    for(let d = 1; d <= 2; d++){
+      const next = photos[(index + d) % n];
+      const prev = photos[(index - d + n) % n];
+      // 跟 renderDetail() 實際使用的來源順序保持一致（手機版優先用
+      // detailUrlMobile 這個縮小版本），這樣預先下載的才是真的會用到的
+      // 那個檔案，切換到鄰近照片時才能確實命中快取、直接跳轉。
+      prefetchOne(next.detailUrlMobile || next.detailUrl || next.url);
+      prefetchOne(prev.detailUrlMobile || prev.detailUrl || prev.url);
+    }
+  }
+
+  function openDetail(index){
+    currentIndex = index;
+    hideHoverPreview();
+    detailPage.classList.add('active');
+    document.body.style.overflow = 'hidden';
+    syncFixedChrome();
+    renderDetail();
+  }
+
+  function closeDetail(){
+    detailPage.classList.remove('active');
+    detailImageWrap.classList.remove('show'); // 立刻清空，避免下次打開時先閃一下舊照片
+    document.body.style.overflow = '';
+  }
+
+  /* =========================================================
+     PREVIEW PAGE：左右交錯全版跳轉
+  ========================================================= */
+
+  // 在等待期間先把「下一張」的圖片載入 + 解碼好（不只是下載，是連畫面像素都準備好），
+  // 這樣真正切換的那一刻只是換一個已經解碼完成的 src，瀏覽器可以直接上屏，
+  // 不會因為臨時解碼大圖而卡頓、看起來像是有轉場。
+  //
+  // 這裡同時修正黑屏問題：photo.url 是 Google Drive 的 uc?export=view 連結，
+  // 在某些情況下（例如檔案較大時 Google 會回傳「無法掃描病毒」的中介頁面，
+  // 而不是圖片本身）會直接載入失敗；原本失敗後沒有任何備援，img 就一直是空的，
+  // 底下 .preview-col 的黑色背景就會整片露出來。現在依序嘗試
+  // 原始大圖 → 高解析度縮圖(fallbackUrl) → 一般縮圖(thumbUrl)，
+  // 只要任何一個能載入成功就使用它。
+  function loadWithFallback(photo){
+    return new Promise((resolve) => {
+      const candidates = [photo && photo.previewUrl, photo && photo.detailUrl, photo && photo.fallbackUrl, photo && photo.url, photo && photo.thumbUrl].filter(Boolean);
+      if(!candidates.length){ resolve(''); return; }
+
+      let i = 0;
+      const img = new Image();
+      // preview 頁要顯示的圖片，永遠是使用者「馬上就會看到」的內容
+      // （不管是剛進站的第一畫面，還是撞牆跳轉後的下一張），明確標成高優先度，
+      // 讓瀏覽器把連線/頻寬優先讓給它，不要跟同時間背景在跑的其他預抓
+      // （首頁網格、hover 大圖預抓等）平均分掉。畫質完全不受影響——
+      // candidates 清單、選用的檔案大小都跟原本一模一樣，這裡只調整
+      // 下載的「優先順序」，不是換成更小的檔案。
+      try { img.fetchPriority = 'high'; } catch(e){}
+
+      function finish(url){
+        if(img.decode){
+          img.decode().then(() => resolve(url)).catch(() => resolve(url));
+        } else {
+          resolve(url);
+        }
+      }
+
+      function tryNext(){
+        if(i >= candidates.length){ resolve(''); return; }
+        const url = candidates[i++];
+        img.onload = () => finish(url);
+        img.onerror = tryNext;
+        img.src = url;
+      }
+
+      tryNext();
+    });
+  }
+
+  // ---- 序列與起始張：
+  // 右側＝單數編號（001, 003, 005...），從最前面第一張開始，往後遞增播放
+  // 左側＝雙數編號（002, 004, 006...），從最後一張開始，往前遞減播放
+  // 這樣左右像是「從兩端往中間跑」，方向剛好相反、不會混在一起
+  let previewOddPhotos = [];   // 右側序列
+  let previewEvenPhotos = [];  // 左側序列
+  let previewLeftIdx = 0;
+  let previewRightIdx = 0;
+  let previewActive = false;
+  const previewResolvedLeft = [];
+  const previewResolvedRight = [];
+  // 跟 previewResolvedLeft/Right（存 Promise）分開，另外放一份「已經 resolve
+  // 完成的網址」，讓 applyPreviewSide 可以同步（不用 await）判斷某一張圖是不是
+  // 已經真的準備好了。這是修好「有時候不按照 0.5 秒節奏跳轉、最後整個停住
+  // 不動」這個 bug 的關鍵：原本不管暖機好了沒，每一步都無條件重新 await 一次
+  // Promise 才能知道結果，如果那一步剛好排到還沒暖機完成的圖，畫面就會呆呆
+  // 卡在原地什麼都不做，等到那次 await 真的完成、而且完成時「剛好」還沒被
+  // 下一步蓋過去，才會更新——網路稍慢，這個條件很容易一直不成立，看起來就是
+  // 「跳轉忽快忽慢，最後乾脆卡住不動」。有了這份同步 cache，就能一開始就
+  // 知道要不要直接用高畫質、還是得先墊縮圖，不用每一步都乾等。
+  const previewReadyLeft = [];
+  const previewReadyRight = [];
+
+  function resolvePreviewImage(photo, cache, readyCache, idx){
+    if(cache[idx]) return cache[idx];
+    const p = loadWithFallback(photo).then((url) => {
+      readyCache[idx] = url; // 用字串（哪怕是空字串）標記「已經有結果了」，跟 undefined（還沒好）區分開來
+      return url;
+    });
+    cache[idx] = p;
+    return p;
+  }
+
+  // 縮圖版本（gridUrl/thumbUrl）另外先請瀏覽器下載一次暖機，不特別追蹤
+  // Promise——只是想讓瀏覽器的 HTTP 快取先有這份資料，之後 applyPreviewSide
+  // 裡真的要顯示縮圖時，新建的 Image() 走的是同一個網址，會直接命中快取
+  // 瞬間載完，不用臨場現扛一次網路下載。這是修掉「剛點進 preview 頁還是會
+  // 白一下」的關鍵：原本只有暖機高畫質版本，縮圖墊場圖完全沒被提前暖機過，
+  // 使用者點進來的那一刻，連縮圖都要現下載。
+  function warmPreviewPlaceholder(photo){
+    // 墊場縮圖優先用 thumbUrl（800px），只有在極少數 thumbUrl 缺失的情況下才
+    // 退回 gridUrl（400px，首頁網格縮圖用，preview 頁的畫面遠比網格格子大，
+    // 400px 拉滿半個螢幕會偏糊）。這樣不管是撞太快之外的「一般等待墊場」，
+    // 看到的畫面也會比較清楚，不會在切換高畫質版本前先糊一下。
+    const url = (photo && (photo.thumbUrl || photo.gridUrl)) || '';
+    if(url){
+      const im = new Image();
+      try { im.fetchPriority = 'high'; } catch(e){} // 這張墊場圖也是使用者馬上會看到的東西，同樣不該被其他背景預抓卡住
+      im.src = url;
+    }
+  }
+
+  // 極小備援圖（tinyUrl）另外暖機一次，專門給撞擊太快/連續撞擊時使用——
+  // 跟縮圖墊場的暖機邏輯一樣，提前請瀏覽器把它快取好，真正要用的那一刻
+  // 才能「同步」瞬間顯示，不用臨場等網路。
+  function warmPreviewTiny(photo){
+    const url = (photo && photo.tinyUrl) || '';
+    if(url){ const im = new Image(); im.src = url; }
+  }
+
+  // 把當前這一側該顯示的那張圖，重新（提早）暖機一次：
+  // 先觸發載入 + decode，讓瀏覽器準備好像素，之後真正要顯示時幾乎是瞬間的
+  //
+  // 注意：這裡故意「不」清空 previewResolvedLeft / previewResolvedRight 快取。
+  // 每次點進 preview 頁面的起始索引永遠是同一組固定值（左：最後一張／右：
+  // 第一張），如果每次都把快取清空重來，等於把 preparePreviewSequences() 在
+  // 網頁一開始就先做好的預熱結果整個丟掉，使用者點進來時又要重新等一次載入，
+  // 這正是「剛點進去偶爾全黑」的原因。保留快取，resolvePreviewImage() 內建的
+  // `if(cache[idx]) return cache[idx];` 判斷就會直接沿用已經載入好（或正在
+  // 載入中）的同一個 promise，不會重複下載、也不會重新等待。
+  // WARM_AHEAD_COUNT：除了起始那一張，額外預先暖機幾步之後會用到的圖片。
+  // 原本只多暖 1 步，使用者如果一進 preview 頁就手速很快地連續跳好幾張
+  // （或者剛進首頁沒多久、圖片都還在陸續下載中就馬上點進 preview），
+  // 暖機進度很容易被追過，跳到還沒載好的那張又變成一次白幕/黑幕。
+  // 多暖 2 步（等於隨時保留 3 張的下載/解碼緩衝）在幾乎不增加多少流量的
+  // 前提下，能大幅降低這種「連續切換太快、暖機追不上」的機率。
+  const WARM_AHEAD_COUNT = 2;
+
+  function warmPreviewStart(){
+    previewLeftIdx = previewEvenPhotos.length ? previewEvenPhotos.length - 1 : 0; // 左側：最後一張
+    previewRightIdx = 0; // 右側：第一張
+    if(previewEvenPhotos.length){
+      warmPreviewPlaceholder(previewEvenPhotos[previewLeftIdx]);
+      resolvePreviewImage(previewEvenPhotos[previewLeftIdx], previewResolvedLeft, previewReadyLeft, previewLeftIdx);
+    }
+    if(previewOddPhotos.length){
+      warmPreviewPlaceholder(previewOddPhotos[previewRightIdx]);
+      resolvePreviewImage(previewOddPhotos[previewRightIdx], previewResolvedRight, previewReadyRight, previewRightIdx);
+    }
+
+    // 同時把「進頁面後接下來幾次切換」會用到的圖片也先預熱。原本只暖機起始
+    // 畫面，下一張要等真正切換到那一刻（stepPreviewSide 觸發時）才開始下載
+    // ——如果那時候使用者剛好進頁面沒多久、圖片還在載入中，第一輪的切換就會
+    // 等圖片載完才真正換畫面，使得開頭幾次切換的間隔時間長短不一（不規則
+    // 跳動），要等這個「提前幾步」的暖機追上進度後才會穩定成固定的 0.5 秒
+    // 節奏。這裡提前暖機，讓它從使用者一點進頁面（甚至更早，
+    // preparePreviewSequences 在照片清單一到手就會呼叫這個函式）就開始
+    // 下載，通常會有遠超過 0.5 秒的提前量，等真正切換到它時多半早就已經
+    // 載完。
+    for(let step = 1; step <= WARM_AHEAD_COUNT; step++){
+      if(previewEvenPhotos.length > 1){
+        const nextLeftIdx = (previewLeftIdx - step + previewEvenPhotos.length * 2) % previewEvenPhotos.length;
+        warmPreviewPlaceholder(previewEvenPhotos[nextLeftIdx]);
+        resolvePreviewImage(previewEvenPhotos[nextLeftIdx], previewResolvedLeft, previewReadyLeft, nextLeftIdx);
+      }
+      if(previewOddPhotos.length > 1){
+        const nextRightIdx = (previewRightIdx + step) % previewOddPhotos.length;
+        warmPreviewPlaceholder(previewOddPhotos[nextRightIdx]);
+        resolvePreviewImage(previewOddPhotos[nextRightIdx], previewResolvedRight, previewReadyRight, nextRightIdx);
+      }
+    }
+  }
+
+  // 照片清單一到手就準備好 preview 用的兩組序列，並且立刻開始暖機第一張，
+  // 這樣不管使用者何時點下 preview，兩張起始畫面大機率早就載入/解碼完成，
+  // 點進去馬上就能看到照片，不會有黑屏的空檔
+  function preparePreviewSequences(){
+    previewOddPhotos = photos.filter((_, i) => i % 2 === 0);
+    previewEvenPhotos = photos.filter((_, i) => i % 2 === 1);
+    // 真正「馬上」要用到的，只有起始畫面 + 前面幾步（warmPreviewStart 裡的
+    // WARM_AHEAD_COUNT），這裡先同步暖機好，維持原本「點進去/自動開啟
+    // preview 馬上就能看到照片」的保證。
+    warmPreviewStart();
+    // 剩下「兩條序列全部照片」的極小圖（320px），是給撞牆跳轉「撞太快/
+    // 連續撞擊」這種次要情境用的保險，不是進站當下就要用的東西。原本這裡
+    // 用 forEach 一次性把全部照片的極小圖請求同時發出去，等於是拿這種次要
+    // 用途的請求，去跟首頁網格第一畫面的縮圖、preview 起始畫面搶手機有限
+    // 的頻寬/連線數——這正是「首頁小圖跑出來變慢、一開始整個全白幕」的
+    // 主因之一。改成用 requestIdleCallback 分批、慢慢補齊：等瀏覽器真的
+    // 閒下來（代表首屏真正需要的資源都已經發送出去了）才繼續暖下一張，
+    // 不影響它原本「隨時能墊上」的保險功能，只是不再搶第一時間的頻寬。
+    const allForTiny = previewEvenPhotos.concat(previewOddPhotos);
+    let tinyStep = 0;
+    function warmTinyStep(){
+      if(tinyStep >= allForTiny.length) return;
+      warmPreviewTiny(allForTiny[tinyStep]);
+      tinyStep++;
+      if('requestIdleCallback' in window){
+        requestIdleCallback(warmTinyStep, { timeout: 1000 });
+      } else {
+        setTimeout(warmTinyStep, 80);
+      }
+    }
+    warmTinyStep();
+  }
+
+  // ---------- preview 頁「起始那一刻」左右兩張同時出現 ----------
+  // 跟上面 applyPreviewSide 的邏輯很像（一樣是先看 readyCache、沒有的話墊縮圖、
+  // 縮圖也沒有才等高畫質），差別是這裡「不」直接把結果賦值給 <img>，而是回傳
+  // 一個 Promise<url>，讓呼叫端可以用 Promise.all 等左右兩側都準備好同一個
+  // 層級（例如都至少有縮圖可用）之後，再同一刻一起賦值——這樣就不會發生「反正
+  // 都還沒完全載好，其中一側先跳出來、另一側還維持白幕好一陣子」這種不同步
+  // 的狀況：既然兩邊在載入完成前終究都會有一段白幕，不如讓白幕結束的那一刻
+  // 兩邊一起結束，觀感上乾脆俐落很多。
+  // 只用在「使用者剛進 preview 頁、兩側都還沒有任何畫面」這個起始情境；
+  // 之後靠飄動的 e 撞牆觸發的單側切換（stepPreviewSide／applyPreviewSide）
+  // 維持原本各自獨立更新，不受影響——那本來就是兩個各自獨立的事件，沒有
+  // 「同時出現」的預期。
+  function startPreviewSide(side){
+    const seq = side === 'left' ? previewEvenPhotos : previewOddPhotos;
+    const cache = side === 'left' ? previewResolvedLeft : previewResolvedRight;
+    const readyCache = side === 'left' ? previewReadyLeft : previewReadyRight;
+    const imgEl = side === 'left' ? previewLeftImg : previewRightImg;
+    if(!seq.length) return Promise.resolve('');
+    const idx = side === 'left' ? previewLeftIdx : previewRightIdx;
+    const photo = seq[idx];
+    const isStillCurrent = () => previewActive && (side === 'left' ? previewLeftIdx : previewRightIdx) === idx;
+
+    // 高畫質版本已經暖機完成，直接回傳，畫質不受任何影響
+    if(typeof readyCache[idx] === 'string'){
+      return Promise.resolve(readyCache[idx] || '');
+    }
+
+    // 不管縮圖墊場成不成功，高畫質版本都要在背景繼續請求；一旦它先準備好
+    // （或者是縮圖顯示之後才完成），就無縫升級成清楚版本——這條升級路徑是
+    // 「各自獨立」的，不用等另一側，只有下面「起始畫面」那個 Promise 才需要
+    // 兩側同步。
+    const highResPromise = resolvePreviewImage(photo, cache, readyCache, idx).then((url) => {
+      if(url && isStillCurrent() && imgEl.src !== url) imgEl.src = url;
+      return url;
+    });
+
+    const placeholderUrl = (photo && (photo.thumbUrl || photo.gridUrl)) || '';
+    if(!placeholderUrl) return highResPromise; // 沒有縮圖可墊，只能直接等高畫質
+
+    return new Promise((resolve) => {
+      const thumb = new Image();
+      try { thumb.fetchPriority = 'high'; } catch(e){}
+      thumb.onload = () => {
+        if(thumb.decode){
+          thumb.decode().then(() => resolve(placeholderUrl)).catch(() => resolve(placeholderUrl));
+        } else {
+          resolve(placeholderUrl);
+        }
+      };
+      thumb.onerror = () => resolve(''); // 縮圖失敗：這一側先不賦值，交給上面已經在背景跑的高畫質 promise 接手
+      thumb.src = placeholderUrl;
+    });
+  }
+
+  async function applyPreviewSide(side, forceTiny){
+    const seq = side === 'left' ? previewEvenPhotos : previewOddPhotos;
+    const cache = side === 'left' ? previewResolvedLeft : previewResolvedRight;
+    const readyCache = side === 'left' ? previewReadyLeft : previewReadyRight;
+    const imgEl = side === 'left' ? previewLeftImg : previewRightImg;
+    if(!seq.length) return;
+    const idx = side === 'left' ? previewLeftIdx : previewRightIdx;
+    const photo = seq[idx];
+    const isStillCurrent = () => previewActive && (side === 'left' ? previewLeftIdx : previewRightIdx) === idx;
+
+    // 撞太快／連續撞擊：不要再走下面等縮圖/高畫質的流程（那些流程哪怕已經
+    // 暖機過，也還是要等一次 decode 或 Promise resolve，連續撞擊時排隊排
+    // 不完，看起來就是圖片一直跑不出來）。這裡改成直接同步賦值成已經整條
+    // 序列都提前暖機過的極小圖，瀏覽器幾乎是瞬間就能畫出來，保證每一次撞
+    // 都「馬上」看得到東西。高畫質版本還是在背景繼續請求、暖機起來，等
+    // 撞擊速度緩下來、之後又切回附近張次時就能直接用上。
+    if(forceTiny){
+      // 先同步秀出極小圖，保證這一瞬間一定有東西可看、跟得上撞擊節奏。
+      // 但這張小圖只是「暫時墊著」，不是最終畫質：下面繼續在背景把這張照片
+      // 真正的高畫質版本載入＋decode 好，等它真的準備好之後，只要使用者還
+      // 停在這張（isStillCurrent()），就無縫換成清楚版本——不必等使用者再
+      // 撞回同一張才會升級，撞太快的當下也一樣會在背景默默把畫質補上來。
+      const tiny = photo && photo.tinyUrl;
+      if(tiny && isStillCurrent()) imgEl.src = tiny;
+      resolvePreviewImage(photo, cache, readyCache, idx).then((url) => {
+        if(url && isStillCurrent()) imgEl.src = url;
+      });
+      return;
+    }
+
+    // 真正的舊 bug 不是「還沒修過縮圖墊場」，而是這個函式以前不管暖機好了沒，
+    // 每一步都無條件重新 `await resolvePreviewImage(...)` 一次才知道結果：
+    // 90% 的情況下（WARM_AHEAD_COUNT 早就提前暖機好了）這個 await 幾乎瞬間
+    // resolve，看起來沒問題；但只要有一步剛好排到「還沒暖機完成」的圖（網路
+    // 忽然變慢、或使用者連續切太快追過暖機進度），這一步就會乾等，畫面完全
+    // 不動，等 await 真的完成時，往往下一個 0.5 秒的排程又已經把 idx 推進了，
+    // `stillCurrent` 判斷失敗、這次更新直接被丟掉——於是這一步「什麼都沒發生
+    // 過」，看起來就是跳轉的節奏忽快忽慢；如果網路一直沒追上，之後每一步都會
+    // 被同樣的方式丟掉，最終畫面就完全停住不再更新。
+    //
+    // 修法：先同步（不 await）查 previewReadyLeft/Right 這份 cache，看這張
+    // 照片的高畫質版本是不是已經暖機完成——多數情況下答案是「是」，這時直接
+    // 一次到位換上高畫質，跟原本一樣完全不會閃過縮圖。只有真的還沒暖機完成
+    // 的少數情況，才退而求其次：先墊上（已經在 warmPreviewStart /
+    // warmPreviewPlaceholder 裡提前暖機過、幾乎瞬間就能載完的）縮圖，確保
+    // 這一步「一定」會讓畫面換成新照片、維持住固定節奏，不會呆呆卡住等高
+    // 畫質版本；等高畫質版本真的完成再無縫換上清晰版本。
+    if(typeof readyCache[idx] === 'string'){
+      if(readyCache[idx] && isStillCurrent()) imgEl.src = readyCache[idx];
+      return;
+    }
+
+    const placeholderUrl = (photo && (photo.thumbUrl || photo.gridUrl)) || '';
+    if(placeholderUrl){
+      // 用一顆看不見的 Image() 載入＋decode()，確定「連畫面像素都準備好」
+      // 之後才賦值給真正顯示用的 <img>，這樣縮圖出現的那一刻永遠是完整的
+      // 一整張，不會有「上半段先出現、下半段還是黑的」這種半成品畫面。
+      // 因為 warmPreviewPlaceholder 已經提前請瀏覽器把這個網址快取好，這裡
+      // 多半是直接命中快取、幾乎瞬間完成，不會拖累節奏。
+      await new Promise((resolve) => {
+        const thumb = new Image();
+        thumb.onload = () => {
+          if(thumb.decode){
+            thumb.decode().then(resolve).catch(resolve);
+          } else {
+            resolve();
+          }
+        };
+        thumb.onerror = resolve; // 縮圖失敗就跳過，直接留給下面的高畫質版本處理
+        thumb.src = placeholderUrl;
+      });
+      // decode 這段等待期間，使用者可能已經很快切到別張、或直接關掉 preview
+      // 頁，這裡要重新確認一次「現在真的還是要顯示這張」才賦值，避免把已經
+      // 過期的縮圖畫面蓋到更新的畫面上
+      if(!isStillCurrent()) return;
+      imgEl.src = placeholderUrl;
+    }
+
+    const url = await resolvePreviewImage(photo, cache, readyCache, idx);
+    if(!isStillCurrent()) return;
+    if(url) imgEl.src = url;
+  }
+
+  function stepPreviewSide(side, forceTiny){
+    if(side === 'left'){
+      if(!previewEvenPhotos.length) return;
+      previewLeftIdx = (previewLeftIdx - 1 + previewEvenPhotos.length) % previewEvenPhotos.length; // 左側往前遞減
+    } else {
+      if(!previewOddPhotos.length) return;
+      previewRightIdx = (previewRightIdx + 1) % previewOddPhotos.length; // 右側往後遞增
+    }
+    // 順便預先暖機下一輪那一側會用到的圖片
+    const nextSeq = side === 'left' ? previewEvenPhotos : previewOddPhotos;
+    const nextCache = side === 'left' ? previewResolvedLeft : previewResolvedRight;
+    const nextIdx = side === 'left'
+      ? (previewLeftIdx - 1 + previewEvenPhotos.length) % previewEvenPhotos.length
+      : (previewRightIdx + 1) % previewOddPhotos.length;
+    const nextReadyCache = side === 'left' ? previewReadyLeft : previewReadyRight;
+    if(nextSeq.length){
+      warmPreviewPlaceholder(nextSeq[nextIdx]);
+      resolvePreviewImage(nextSeq[nextIdx], nextCache, nextReadyCache, nextIdx);
+    }
+    applyPreviewSide(side, forceTiny);
+  }
+
+  // ---------- preview 頁的跳轉節奏：改由飄動的 e 撞到螢幕上/下邊界觸發 ----------
+  // 不再用固定 0.5 秒的計時器自動輪流換左右兩側；撞到上半部邊界＝上方（左側）
+  // 照片跳一張，撞到下半部邊界＝下方（右側）照片跳一張，手機（上下版面）、
+  // 桌機（左右版面）都套用同一套「撞上緣/下緣」判斷。
+  //
+  // 快速連續撞擊的處理：分別記錄「上緣」「下緣」各自上一次「真正觸發切換」的
+  // 時間，這一次撞擊如果離上一次真正切換的時間小於 DVD_PREVIEW_RAPID_MS，
+  // 就視為同一次連續撞擊的延續，直接略過——不切照片、也不更新計時基準
+  // （previewLeftLastHitAt / previewRightLastHitAt 維持原值不動）。這樣不管
+  // 在這個時間窗裡實際撞了幾下，最多也只會真的切一次，不會因為撞太快就被
+  // 逼著用比預期更快的速度狂跳；要等離「上一次真正切換」的間隔真的超過這個
+  // 門檻，下一下撞擊才會被當成新的一次、觸發切換。
+  const DVD_PREVIEW_RAPID_MS = 450;
+  let previewLeftLastHitAt = 0;
+  let previewRightLastHitAt = 0;
+  function handleDvdPreviewEdgeHit(side){
+    if(!previewActive) return; // 只在 preview 頁生效，其他頁面撞邊界不受影響
+    const now = performance.now();
+    const lastAt = side === 'left' ? previewLeftLastHitAt : previewRightLastHitAt;
+    if((now - lastAt) < DVD_PREVIEW_RAPID_MS){
+      return; // 離上一次真正切換太近，當作同一次連續撞擊，忽略、不切換
+    }
+    if(side === 'left') previewLeftLastHitAt = now; else previewRightLastHitAt = now;
+    stepPreviewSide(side);
+  }
+
+  function startPreviewCycle(){
+    previewActive = true;
+    previewLeftLastHitAt = 0;
+    previewRightLastHitAt = 0;
+
+    // 記下這一刻的索引，等兩側都準備好要賦值時，再次確認使用者沒有在等待
+    // 期間又切換到別張（理論上起始畫面不會被撞牆事件搶先，但保留這層防呆）
+    const startLeftIdx = previewLeftIdx;
+    const startRightIdx = previewRightIdx;
+
+    // 起始畫面：左右兩側都準備好（至少縮圖已經 decode 完成）才「同時」賦值
+    // 顯示，不再各自各憑本事誰先載完誰先跳出來。之後的跳轉交給飄動的 e
+    // 撞到上/下邊界時觸發（見 handleDvdPreviewEdgeHit → stepPreviewSide →
+    // applyPreviewSide，各自獨立更新，不受這裡影響），這裡不再自動排程計時器。
+    Promise.all([
+      startPreviewSide('left'),
+      startPreviewSide('right')
+    ]).then(([leftUrl, rightUrl]) => {
+      if(!previewActive) return; // 使用者可能在等待期間已經離開 preview 頁
+      if(leftUrl && previewLeftIdx === startLeftIdx) previewLeftImg.src = leftUrl;
+      if(rightUrl && previewRightIdx === startRightIdx) previewRightImg.src = rightUrl;
+    });
+  }
+
+  function stopPreviewCycle(){
+    previewActive = false;
+  }
+
+  // pushHistory=false 用在「因為網址本來就是 #preview（例如重新整理、上一頁/下一頁）
+  // 才開啟這個頁面」的情境，這種情況不需要再往歷史紀錄多推一筆，否則會造成
+  // 網址狀態跟瀏覽器上一頁/下一頁按鈕的行為對不起來。
+  // ---------- 貫穿全站的飄動英文字（EDEN）----------
+  // 不再只在手機版 preview 頁顯示，也不再區分手機/桌機兩種抓取方式——
+  // 這顆元素是 <body> 的直接子節點，從進站那一刻就開始跑，切換
+  // gallery / preview / detail 頁面完全不會影響它、不會被重新定位、
+  // 不會被重新啟動，所以「切頁」不會有任何跳動或震動。
+  const dvdBounce = document.getElementById('dvdBounce');
+  const DVD_SPEED = 240; // px/秒，平常巡迴的固定速度，也是甩出去之後最終會回穩到的速度
+  const DVD_DECAY_MS = 16000; // 放開後，從當下的高速慢慢衰減回 240 要花多久——拉得非常長，讓整個降速過程細膩、有餘韻，不是短短幾秒就結束
+  const DVD_DECAY_EASE = 12; // 衰減曲線的陡度：模擬真實摩擦力「先快後慢」的指數衰減，數字越大前段掉速越猛——丟出去沒多久速度就已經掉下來一大截，剩下的時間則是很長、很平緩的尾段慢慢貼近終速，過程依然平滑，不會有斷點或頓挫感
+
+  let dvdRAF = null;
+  let dvdLastTime = null;
+  let dvdX = 0, dvdY = 0;
+  // 用「方向（單位向量）＋速度純量」拆開存，而不是直接存 dx/dy：撞牆只需要翻轉
+  // 方向、甩出去的衰減只需要調整速度純量，兩件事互相獨立、不會打架
+  let dvdDirX = 1, dvdDirY = 0;
+  let dvdSpeed = DVD_SPEED;
+  let dvdDecaying = false;
+  let dvdDecayStartTime = 0;
+  let dvdDecayStartSpeed = DVD_SPEED;
+  let dvdDragging = false;
+  let dvdPointerId = null;
+  let dvdGrabOffsetX = 0, dvdGrabOffsetY = 0; // 抓取當下，指標位置跟元素左上角的距離，維持抓取點不跳動
+  let dvdMoveSamples = []; // 最近的 {t, x, y} 取樣，放開時用來算「甩動當下」的瞬時速度
+
+  // 元素目前實際渲染出來的視覺尺寸（現在等於圖片本身的實際大小，容器已經
+  // 拿掉多餘的按鍵熱區 padding）——撞牆邊界用這個算，不再像舊版那樣寫死
+  // 一個固定像素值；圖片大小（clamp 隨視窗寬度連續縮放、手機版另外放大
+  // 1.8 倍）改變時，這個尺寸也會跟著變，量測一次存起來，之後每次撞牆
+  // 判斷都直接讀這個值，不用每一影格都重新觸發一次 layout。
+  let dvdW = 0, dvdH = 0;
+  function measureDvdSize(){
+    const rect = dvdBounce.getBoundingClientRect();
+    if(rect.width > 0) dvdW = rect.width;
+    if(rect.height > 0) dvdH = rect.height;
+  }
+
+  // ---------- 撞牆震動 ----------
+  // 只在支援 navigator.vibrate 的裝置上生效（實務上就是觸控裝置）；桌機
+  // 瀏覽器本來就沒有這支 API，下面的 feature-check 會自動跳過，不需要
+  // 再另外判斷「是不是手機」「是不是在哪個頁面」。
+  // dvdWasCollidedLastFrame：用「邊緣觸發」而不是「只要正在撞牆就震」——
+  // 撞牆瞬間 dvdX/dvdY 會被夾在邊界上（見下面 collided 判斷），如果那一幀
+  // 剛好速度極慢（例如使用者用極小力道甩出去、或速度衰減到接近 0），
+  // 元素可能連續好幾影格都貼在同一個邊界值上，若每一影格都判斷「有沒有
+  // 貼著邊界」就震，會變成「卡住那段時間瘋狂連續震動」。改成只在「上一影格
+  // 沒有貼著邊界、這一影格才剛貼上」的那個瞬間震一次，之後只要還貼著同一
+  // 個邊，就不會重複觸發，直到它離開邊界、之後又撞上另一次才會再震一次。
+  let dvdWasCollidedLastFrame = false;
+  // 專門給 preview 頁「撞到螢幕邊界跳照片」用的邊緣觸發旗標——不分是撞到
+  // 上/下/左/右哪一邊，只要是撞到螢幕邊界（跟撞到頁面內圖片的 collided
+  // 分開算）就算一次候選，實際要換哪一側照片再由撞擊當下 e 落在畫面上半/
+  // 下半決定（見 stepDvdBounce 裡的判斷）。
+  let dvdWasScreenEdgeCollidedLastFrame = false;
+  // dvdLastVibrateTime + DVD_VIBRATE_COOLDOWN_MS：再加一層保險用的最短間隔，
+  // 防止某些極端情況（例如同一影格 x、y 兩個方向同時撞到角落，或裝置效能
+  // 不穩定造成判斷抖動）短時間內觸發不只一次震動。
+  let dvdLastVibrateTime = 0;
+  const DVD_VIBRATE_COOLDOWN_MS = 120;
+  function triggerDvdEdgeVibration(){
+    if(!('vibrate' in navigator)) return;
+    const now = performance.now();
+    if(now - dvdLastVibrateTime < DVD_VIBRATE_COOLDOWN_MS) return; // 冷卻時間內，先不重複觸發
+    dvdLastVibrateTime = now;
+    try{ navigator.vibrate(8); }catch(err){} // 8ms：非常短、力道很輕的一次震動
+  }
+
+  // dvdX/dvdY 存的就是元素本身（border-box，現在等於圖片邊緣）左上角的
+  // 位置，不再另外疊一圈抓取熱區 padding——圖片本身已經夠大、夠好點了，
+  // 不需要額外的透明熱區，撞牆判斷也因此精準貼合圖片實際邊緣而不是熱區。
+  function dvdBoundMinX(){ return 0; }
+  function dvdBoundMinY(){ return 0; }
+  function dvdBoundMaxX(){ return Math.max(0, window.innerWidth - dvdW); }
+  function dvdBoundMaxY(){ return Math.max(0, window.innerHeight - dvdH); }
+
+  function clampDvd(v, min, max){ return v < min ? min : (v > max ? max : v); }
+
+  // ---------- 頁面內的「圖片」也當成撞牆單位 ----------
+  // 除了螢幕邊界，飄動的 e 現在還會跟首頁縮圖照片、或詳情頁那張置中大圖
+  // 的實際邊緣互撞反彈——preview 頁刻意排除在外，維持原本只跟螢幕邊界
+  // 碰撞的行為。回傳的是目前這一刻所有要拿來當「牆」的矩形（viewport
+  // 座標，跟 getBoundingClientRect() 一致，也跟 dvd 自己的定位方式一致，
+  // 不用另外換算捲動位移）。
+  function getObstacleRects(){
+    if(previewPage.classList.contains('active')) return [];
+
+    if(detailPage.classList.contains('active')){
+      if(!detailImageWrap.classList.contains('show')) return [];
+      const r = detailImageWrap.getBoundingClientRect();
+      return (r.width > 0 && r.height > 0) ? [r] : [];
+    }
+
+    // 首頁格子頁：只抓「已經載入完成、看得到」的縮圖本身（.grid-item img.loaded），
+    // 不是縮圖外面那個正方形 thumb-wrap 熱區——縮圖本身可能遠比正方形格子小
+    // （object-fit:contain 縮在中間），撞牆邊界要貼合看得到的照片，不是空白格。
+    const rects = [];
+    grid.querySelectorAll('.grid-item img.loaded').forEach(img => {
+      const r = img.getBoundingClientRect();
+      if(r.width > 0 && r.height > 0) rects.push(r);
+    });
+    return rects;
+  }
+
+  // 修正距離在這個範圍內（正常貼著邊緣移動時，每影格的重疊量本來就只有
+  // 幾 px），維持原本「直接貼齊」的做法——距離小到肉眼根本看不出差別，
+  // 用不著額外處理，也不會拖慢反應。只有修正距離超過這個門檻（例如：
+  // 直接把 e 拖進一張圖片中間才放開、或視窗縮放讓圖片瞬間移動到 e 原本
+  // 站的位置，讓它整個被嵌進圖片裡）才會啟動下面的平滑滑出效果，避免
+  // 那種情況下整顆 e 瞬間傳送過去。
+  const DVD_ESCAPE_MIN_DIST = 14;
+  let dvdEscaping = false;
+  let dvdEscapeFromX = 0, dvdEscapeFromY = 0, dvdEscapeToX = 0, dvdEscapeToY = 0;
+  let dvdEscapeStartTime = 0, dvdEscapeDurationMs = 0;
+
+  // AABB 對 AABB 的簡單彈跳判斷：用「重疊面積較淺的那個軸」當作碰撞發生的
+  // 方向（撞到左右邊 vs 撞到上下邊），再用兩者中心點的相對位置決定要把
+  // dvd 往哪邊推出去、哪個方向分量要翻轉。跟撞螢幕邊界共用同一套視覺/震動/
+  // 衰減效果，只是牆壁換成圖片的實際邊緣。
+  function resolveDvdObstacleCollision(o, timestamp){
+    const dvdLeft = dvdX, dvdRight = dvdX + dvdW, dvdTop = dvdY, dvdBottom = dvdY + dvdH;
+    const overlapX = Math.min(dvdRight, o.right) - Math.max(dvdLeft, o.left);
+    const overlapY = Math.min(dvdBottom, o.bottom) - Math.max(dvdTop, o.top);
+    if(overlapX <= 0 || overlapY <= 0) return false;
+
+    const dvdCenterX = dvdX + dvdW / 2, dvdCenterY = dvdY + dvdH / 2;
+    const oCenterX = (o.left + o.right) / 2, oCenterY = (o.top + o.bottom) / 2;
+
+    // 方向一律馬上翻好（不等滑動效果跑完），這樣不管接下來是直接貼齊還是
+    // 要跑滑出動畫，離開這個函式的當下方向就已經是正確的、之後的物理
+    // 迴圈可以直接沿用，不用另外等狀態同步。
+    let targetX = dvdX, targetY = dvdY;
+    if(overlapX < overlapY){
+      if(dvdCenterX < oCenterX){ targetX = o.left - dvdW; dvdDirX = -Math.abs(dvdDirX); }
+      else{ targetX = o.right; dvdDirX = Math.abs(dvdDirX); }
+    } else {
+      if(dvdCenterY < oCenterY){ targetY = o.top - dvdH; dvdDirY = -Math.abs(dvdDirY); }
+      else{ targetY = o.bottom; dvdDirY = Math.abs(dvdDirY); }
+    }
+
+    const dist = Math.hypot(targetX - dvdX, targetY - dvdY);
+    if(dist <= DVD_ESCAPE_MIN_DIST){
+      // 差距很小，維持原本「直接貼齊」，跟修正前的行為一樣、肉眼看不出差別
+      dvdX = targetX; dvdY = targetY;
+    } else {
+      // 差距很大：不瞬間傳送，改成很快地滑過去。滑動的速度用「目前的移動
+      // 速度（含甩出去當下的高速）再放大」來決定，不是寫死一個固定時間，
+      // 這樣不管甩得多用力，滑出去的速度都至少跟得上、甚至略快於接下來
+      // 要接手的正常速度，銜接處才不會有「先慢慢滑、放開後又忽然加速」
+      // 這種不協調的落差感；同時夾在 60ms~260ms 之間，確保無論距離多近
+      // 多遠，看起來都又快又順、不會拖泥帶水，也不會像瞬移一樣一格跳過去。
+      const escapeSpeed = Math.max(dvdSpeed * 1.8, DVD_SPEED * 2);
+      dvdEscapeDurationMs = Math.min(260, Math.max(60, (dist / escapeSpeed) * 1000));
+      dvdEscapeFromX = dvdX; dvdEscapeFromY = dvdY;
+      dvdEscapeToX = targetX; dvdEscapeToY = targetY;
+      dvdEscapeStartTime = timestamp;
+      dvdEscaping = true;
+    }
+    return true;
+  }
+
+  function setDvdDirection(angle){
+    dvdDirX = Math.cos(angle);
+    dvdDirY = Math.sin(angle);
+    // 避免角度太接近純水平/純垂直，看起來會像卡在一條線上來回
+    if(Math.abs(dvdDirX) < 0.25) dvdDirX = dvdDirX < 0 ? -0.25 : 0.25;
+    if(Math.abs(dvdDirY) < 0.25) dvdDirY = dvdDirY < 0 ? -0.25 : 0.25;
+    const len = Math.hypot(dvdDirX, dvdDirY);
+    dvdDirX /= len; dvdDirY /= len;
+  }
+
+  function resetDvdBounce(){
+    measureDvdSize();
+    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
+    const maxX = Math.max(minX + 1, dvdBoundMaxX());
+    const maxY = Math.max(minY + 1, dvdBoundMaxY());
+    dvdX = minX + Math.random() * (maxX - minX);
+    dvdY = minY + Math.random() * (maxY - minY);
+    setDvdDirection(Math.random() * Math.PI * 2); // 隨機挑一個方向出發，360 度都有機會
+    dvdSpeed = DVD_SPEED;
+    dvdDecaying = false;
+    dvdWasCollidedLastFrame = false;
+    dvdWasScreenEdgeCollidedLastFrame = false;
+    dvdEscaping = false;
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+  }
+
+  function stepDvdBounce(timestamp){
+    // dvdDragging 在被指標（手指／滑鼠）抓著的時候會是 true——這種情況
+    // 元素位置是直接被對應的 pointer 事件寫 transform 控制，物理迴圈本來
+    // 就該整個暫停，抓住的當下已經取消過動畫影格，這裡多一層 guard 只是
+    // 保險。放開的那一刻（dvdPointerUp）才會重新把 RAF 排回來。
+    if(dvdDragging){
+      dvdRAF = null;
+      dvdLastTime = null;
+      return;
+    }
+
+    if(dvdLastTime === null) dvdLastTime = timestamp;
+    // 限制單幀最大時間差，避免分頁切到背景、幾秒後切回來時，元素瞬間跳一大段
+    const dt = Math.min(48, timestamp - dvdLastTime) / 1000;
+    dvdLastTime = timestamp;
+
+    // 正在快速滑出障礙物（見 resolveDvdObstacleCollision 裡修正距離太大的
+    // 分支）：這幾影格單純沿著滑出的軌跡跑到目標位置，不疊加下面一般的
+    // 速度位移／撞牆判斷，避免兩套位移邏輯同時作用、互相打架。方向已經在
+    // resolveDvdObstacleCollision 裡先翻好了、速度也完全沒被這段動過，
+    // 滑完（progress 到 1）交還控制權給下面一般的物理迴圈時，會直接無縫
+    // 接上原本要飛出去的方向和速度，不會有忽快忽慢的落差感。
+    if(dvdEscaping){
+      const progress = Math.min(1, (timestamp - dvdEscapeStartTime) / dvdEscapeDurationMs);
+      const eased = 1 - Math.pow(1 - progress, 3); // easeOutCubic：起手快、收尾平滑，看起來像俐落地滑過去而不是硬煞車
+      dvdX = dvdEscapeFromX + (dvdEscapeToX - dvdEscapeFromX) * eased;
+      dvdY = dvdEscapeFromY + (dvdEscapeToY - dvdEscapeFromY) * eased;
+      if(progress >= 1) dvdEscaping = false;
+      dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+      dvdRAF = requestAnimationFrame(stepDvdBounce);
+      return;
+    }
+
+    // 甩出去的速度如果高於定速，放開的那一刻就直接開始「慢慢地」往定速衰減
+    // （見 dvdPointerUp），不再等第一次撞牆才起算——撞牆才開始減速的話，
+    // 高速維持的時間長短完全看運氣（丟到哪裡才撞到東西），現在放開就立刻
+    // 起算，維持高速的時間反而更短、更可控。這裡用貼近真實摩擦力的指數
+    // 衰減（先快後慢，越接近終速變化越平緩），取代原本等速切線的線性
+    // 內插，過程更長也更細膩，不會有機械式的僵硬感。
+    if(dvdDecaying){
+      const progress = Math.min(1, (timestamp - dvdDecayStartTime) / DVD_DECAY_MS);
+      const eased = 1 - Math.exp(-DVD_DECAY_EASE * progress);
+      dvdSpeed = dvdDecayStartSpeed + (DVD_SPEED - dvdDecayStartSpeed) * eased;
+      if(progress >= 1){ dvdSpeed = DVD_SPEED; dvdDecaying = false; }
+    }
+
+    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
+    const maxX = dvdBoundMaxX(), maxY = dvdBoundMaxY();
+
+    dvdX += dvdDirX * dvdSpeed * dt;
+    dvdY += dvdDirY * dvdSpeed * dt;
+
+    // 撞到邊緣就反彈：把座標夾回邊界內、水平或垂直方向的分量直接翻轉方向
+    let collided = false;
+    let hitScreenEdge = false; // 上下左右四個螢幕邊界，撞到任何一個都算
+    if(dvdX <= minX){ dvdX = minX; dvdDirX = Math.abs(dvdDirX); collided = true; hitScreenEdge = true; }
+    else if(dvdX >= maxX){ dvdX = maxX; dvdDirX = -Math.abs(dvdDirX); collided = true; hitScreenEdge = true; }
+    if(dvdY <= minY){ dvdY = minY; dvdDirY = Math.abs(dvdDirY); collided = true; hitScreenEdge = true; }
+    else if(dvdY >= maxY){ dvdY = maxY; dvdDirY = -Math.abs(dvdDirY); collided = true; hitScreenEdge = true; }
+
+    // 撞到螢幕邊界（上下左右四邊都算，不限定是哪一邊）的那一瞬間（邊緣觸發，
+    // 不是每一影格貼著都觸發），觸發 preview 頁跳轉。
+    //
+    // 注意：.preview-left / .preview-right 在桌機和手機是「不同方向」的版面——
+    // 桌機是左右並排（見 .preview-col 預設 CSS），手機（≤640px）則會透過
+    // media query 改成上下堆疊（.preview-left 在上、.preview-right 在下，見
+    // 上方 CSS 的 640px breakpoint）。原本這裡不分版面，一律只看撞擊當下的
+    // 垂直位置落在螢幕上半還是下半來決定切左邊還是右邊的照片——這在手機的
+    // 上下堆疊版面下是對的，但在桌機的左右並排版面下完全對不上：撞在畫面
+    // 右側，只要那一瞬間垂直位置剛好落在螢幕上半，就會被誤判成「左側」，
+    // 切到左邊的圖，這正是「明明撞右邊、卻是左邊圖片跳了」的成因。
+    // 修法：判斷方向要跟著版面走——手機用垂直位置（上半/下半），桌機改用
+    // 水平位置（左半/右半），跟 640px 這個 breakpoint 保持一致。
+    if(hitScreenEdge && !dvdWasScreenEdgeCollidedLastFrame){
+      const isStackedPreviewLayout = window.innerWidth <= 640; // 對齊 CSS 手機版 preview-col 改成上下堆疊的 breakpoint
+      let side;
+      if(isStackedPreviewLayout){
+        const screenMidY = window.innerHeight / 2;
+        const dvdCenterY = dvdY + dvdH / 2;
+        side = dvdCenterY < screenMidY ? 'left' : 'right';
+      } else {
+        const screenMidX = window.innerWidth / 2;
+        const dvdCenterX = dvdX + dvdW / 2;
+        side = dvdCenterX < screenMidX ? 'left' : 'right';
+      }
+      handleDvdPreviewEdgeHit(side);
+    }
+    dvdWasScreenEdgeCollidedLastFrame = hitScreenEdge;
+
+    // 再檢查跟頁面內圖片（首頁縮圖 / 詳情頁大圖）的碰撞，同一顆球，只是牆壁
+    // 換成這些圖片的實際邊緣；同一影格理論上最多只會真的疊到一張圖，用 some
+    // 找到第一個真的重疊的矩形即可，不需要每張都硬套一次。
+    const obstacles = getObstacleRects();
+    for(let i = 0; i < obstacles.length; i++){
+      if(resolveDvdObstacleCollision(obstacles[i], timestamp)){ collided = true; break; }
+    }
+
+    // 只在「這一影格才剛撞上」時震動一次（見 dvdWasCollidedLastFrame 上面的說明），
+    // 不是「只要正貼著邊界」就震——這樣元素卡在邊緣不動時不會連續狂震
+    if(collided && !dvdWasCollidedLastFrame){
+      triggerDvdEdgeVibration();
+    }
+    dvdWasCollidedLastFrame = collided;
+
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+    dvdRAF = requestAnimationFrame(stepDvdBounce);
+  }
+
+  function startDvdBounce(){
+    if(dvdRAF || dvdDragging) return; // 已經在跑了，或正被抓著（放開再接手）
+    resetDvdBounce();
+    dvdLastTime = null;
+    dvdRAF = requestAnimationFrame(stepDvdBounce);
+  }
+
+  // 視窗尺寸改變時（轉橫向、桌機拖曳視窗寬度）只重新量測尺寸、把目前位置
+  // 夾回新的邊界內，不隨機換位置、不重新啟動——避免使用者感覺「畫面一動
+  // 元素就跳掉」，這正是「切換頁面／改變視窗不會有任何震動」的關鍵。
+  function clampDvdIntoViewport(){
+    measureDvdSize();
+    dvdEscaping = false; // 視窗尺寸一變，舊的滑出目標位置可能已經不對，直接取消，改用下面重新夾回邊界的結果
+    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
+    const maxX = Math.max(minX, dvdBoundMaxX());
+    const maxY = Math.max(minY, dvdBoundMaxY());
+    dvdX = clampDvd(dvdX, minX, maxX);
+    dvdY = clampDvd(dvdY, minY, maxY);
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+  }
+
+  // ---------- 抓取／甩出去（手指、滑鼠共用同一套 Pointer Events，
+  // 桌機不再需要長按才能抓，跟手機版一樣直接按著拖就能抓住） ----------
+  function dvdPointerDown(e){
+    e.preventDefault();
+    if(dvdRAF){ cancelAnimationFrame(dvdRAF); dvdRAF = null; }
+    dvdLastTime = null;
+    dvdDragging = true;
+    dvdEscaping = false; // 抓取當下若剛好正在滑出動畫途中，直接取消，位置維持抓取的當下值即可
+    dvdPointerId = e.pointerId;
+    try{ dvdBounce.setPointerCapture(e.pointerId); }catch(err){}
+
+    const rect = dvdBounce.getBoundingClientRect();
+    dvdGrabOffsetX = e.clientX - rect.left;
+    dvdGrabOffsetY = e.clientY - rect.top;
+    dvdX = rect.left;
+    dvdY = rect.top;
+    dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+  }
+
+  function dvdPointerMove(e){
+    if(!dvdDragging || e.pointerId !== dvdPointerId) return;
+    e.preventDefault();
+    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
+    const maxX = dvdBoundMaxX(), maxY = dvdBoundMaxY();
+    dvdX = clampDvd(e.clientX - dvdGrabOffsetX, minX, maxX);
+    dvdY = clampDvd(e.clientY - dvdGrabOffsetY, minY, maxY);
+    dvdBounce.style.transform = `translate(${dvdX}px, ${dvdY}px)`;
+
+    const now = performance.now();
+    dvdMoveSamples.push({ t: now, x: dvdX, y: dvdY });
+    // 只留最近 ~100ms 的取樣，讓算出來的是「放開前那一瞬間甩動」的速度，
+    // 不會被拖曳一開始比較慢的移動拉低平均值
+    while(dvdMoveSamples.length > 2 && now - dvdMoveSamples[0].t > 100){
+      dvdMoveSamples.shift();
+    }
+  }
+
+  function dvdPointerUp(e){
+    if(!dvdDragging || e.pointerId !== dvdPointerId) return;
+    dvdDragging = false;
+    try{ dvdBounce.releasePointerCapture(e.pointerId); }catch(err){}
+
+    const now = performance.now();
+    const first = dvdMoveSamples[0];
+    const last = dvdMoveSamples[dvdMoveSamples.length - 1];
+    const dt = Math.max(16, now - first.t) / 1000;
+    let vx = (last.x - first.x) / dt;
+    let vy = (last.y - first.y) / dt;
+    let flingSpeed = Math.hypot(vx, vy);
+
+    // 有偵測到方向才更新方向；幾乎沒有移動（flingSpeed 趨近 0）就維持原本
+    // 抓取前的方向不變，反正接下來速度也趨近 0，方向本來就看不太出來
+    if(flingSpeed > 0.5) setDvdDirection(Math.atan2(vy, vx));
+
+    // 完全依偵測到的甩動速度決定之後的跑動速度，不再有最低 210px/秒的下限：
+    // 甩得越輕就跑得越慢，幾乎沒移動、放開後就直接停在原地不動也可以
+    dvdSpeed = flingSpeed;
+    if(flingSpeed > DVD_SPEED){
+      // 放開的這一刻就直接開始往定速衰減（見 stepDvdBounce 裡的指數衰減
+      // 公式），不用等它真的撞到牆才起算——這樣維持在高速的時間不會因為
+      // 「丟到哪裡才撞到東西」而長短不一，衰減的長長尾段也才看得完整。
+      dvdDecaying = true;
+      dvdDecayStartTime = now;
+      dvdDecayStartSpeed = flingSpeed;
+    } else {
+      dvdDecaying = false; // 210 以下（含靜止）不會自動變化，維持原速度
+    }
+    dvdWasCollidedLastFrame = false; // 放開的瞬間視為全新一輪，即使正好放在邊界上也能正確判斷成一次新的撞牆
+    dvdWasScreenEdgeCollidedLastFrame = false;
+
+    dvdLastTime = null;
+    if(!dvdRAF) dvdRAF = requestAnimationFrame(stepDvdBounce);
+  }
+
+  dvdBounce.addEventListener('pointerdown', dvdPointerDown);
+  dvdBounce.addEventListener('pointermove', dvdPointerMove);
+  dvdBounce.addEventListener('pointerup', dvdPointerUp);
+  dvdBounce.addEventListener('pointercancel', dvdPointerUp);
+  // 不管是單純點一下、還是抓住甩出去，放開後瀏覽器都會在元素上補一個 click
+  // 事件；這顆元素不在任何頁面容器（previewPage / detailPage）的 DOM 樹裡，
+  // 所以這個 click 本來就不會冒泡去觸發「點擊畫面關閉」之類的邏輯，這裡
+  // stopPropagation 純粹是多一層保險。
+  dvdBounce.addEventListener('click', (e) => e.stopPropagation());
+
+  window.addEventListener('resize', clampDvdIntoViewport);
+  if(window.visualViewport){
+    window.visualViewport.addEventListener('resize', clampDvdIntoViewport);
+  }
+
+  function openPreviewPage(pushHistory, instant){
+    if(pushHistory === undefined) pushHistory = true;
+    if(!previewOddPhotos.length || !previewEvenPhotos.length) return;
+
+    if(detailPage.classList.contains('active')) closeDetail();
+    hideHoverPreview();
+
+    document.body.classList.add('preview-active');
+    document.body.style.overflow = 'hidden';
+    if(instant){
+      // 進站當下第一次自動開啟：先關掉淡入動畫再切成 active，讓 opacity
+      // 直接一步到位變成 1，不會有中間值讓底下的首頁網格透出來；下一個
+      // 影格再把這個 class 拿掉，之後使用者手動開關 preview 都還是原本
+      // 平滑的淡入淡出。
+      previewPage.classList.add('no-fade');
+      void previewPage.offsetHeight; // 強制 reflow，確保上面這行先生效
+    }
+    previewPage.classList.add('active');
+    if(instant){
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        previewPage.classList.remove('no-fade');
+      }));
+    }
+
+    // 把目前網址記錄成 #preview，這樣重新整理頁面時才知道要留在這頁，
+    // 而不是每次都跳回首頁
+    if(pushHistory && location.hash !== '#preview'){
+      history.pushState({ page: 'preview' }, '', '#preview');
+    }
+
+    // 每次重新進入都從固定的起始張重新開始（左：最後一張／右：第一張），
+    // 並確保起始畫面已經暖機好，這裡如果先前已經暖過就直接沿用快取，幾乎不用等
+    warmPreviewStart();
+    startPreviewCycle();
+
+    // 注意：EDEN 飄動字現在是貫穿全站的元素，從進站那一刻就開始跑，
+    // 進出 preview 頁面完全不需要（也不應該）重新啟動或重新定位它——
+    // 這正是「切換頁面不會有任何震動」的原因。
+  }
+
+  function closePreviewPage(pushHistory){
+    if(pushHistory === undefined) pushHistory = true;
+    previewPage.classList.remove('active');
+    document.body.classList.remove('preview-active');
+    document.body.style.overflow = '';
+    stopPreviewCycle();
+
+    if(pushHistory && location.hash === '#preview'){
+      history.pushState({ page: 'home' }, '', location.pathname + location.search);
+    }
+  }
+
+  previewLabel.addEventListener('click', () => openPreviewPage());
+  // 這個頁面點任何地方都直接跳回首頁；頁面開啟時 header 會把 pointer-events
+  // 關掉，讓點擊直接穿透到這裡，所以點在標題文字上也一樣會回首頁。EDEN 飄動字
+  // 不在 previewPage 的 DOM 樹裡（它是 body 的直接子節點），點在它上面的
+  // click 本來就不會冒泡到這裡，不需要另外攔截。
+  previewPage.addEventListener('click', () => {
+    closePreviewPage();
+  });
+  // overflow:hidden 已經擋住捲動了，這裡再擋一次滾輪事件保險
+  previewPage.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+  // detail-page（點進去單張照片的頁面）同樣道理：body overflow:hidden + CSS
+  // touch-action:none 已經擋住大部分捲動，這裡再擋一次滑鼠滾輪事件保險，
+  // 確保電腦上滾輪也不會把底下的頁面捲動
+  detailPage.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+
+  // 支援瀏覽器「上一頁 / 下一頁」按鈕，跟網址列的 #preview 狀態保持同步
+  window.addEventListener('popstate', () => {
+    if(location.hash === '#preview'){
+      openPreviewPage(false);
+    } else if(previewPage.classList.contains('active')){
+      closePreviewPage(false);
+    }
+  });
+
+  function nextPhoto(){
+    currentIndex = (currentIndex + 1) % photos.length;
+    renderDetail();
+  }
+  function prevPhoto(){
+    currentIndex = (currentIndex - 1 + photos.length) % photos.length;
+    renderDetail();
+  }
+
+  prevBtn.addEventListener('click', prevPhoto);
+  nextBtn.addEventListener('click', nextPhoto);
+  backHome.addEventListener('click', closeDetail);
+  backArrowBtn.addEventListener('click', closeDetail);
+
+  document.addEventListener('keydown', (e) => {
+    if(!detailPage.classList.contains('active')) return;
+    if(e.key === 'ArrowRight') nextPhoto();
+    if(e.key === 'ArrowLeft') prevPhoto();
+    if(e.key === 'Escape') closeDetail();
+  });
+
+  // 縮放（pinch-zoom）在某些行動瀏覽器上會連帶觸發 resize 事件，
+  // 但此時 window.innerWidth/innerHeight 可能回報的是「縮放後」的數值，
+  // 若照樣重新定位，大圖就會瞬間跳位、變得極小。
+  //
+  // 原本的做法：resize 事件「一觸發當下」先判斷是否還在縮放，沒有縮放才排一個
+  // 120ms 後執行的 timeout。問題是使用者放開兩指後，縮放比例通常還會再微調
+  // 好幾次才真正穩定到 1，這些微調也會觸發 resize；如果剛好某一次判斷時 scale
+  // 已經很接近 1（但還沒完全穩定），就會排入 timeout，等 120ms 後才執行——但那時
+  // 版面可能還沒真正定案，所以會先用「還沒穩定」的尺寸重新定位一次（歸到偏掉的
+  // 位置），等下一次 resize 事件抓到真正穩定的狀態才又修正一次，看起來就是
+  // 「先跳到錯誤位置、才瞬間修正」。
+  //
+  // 修正方式：判斷「是否還在縮放」要放在 timeout 真正執行的當下重新檢查一次，
+  // 而不是相信事件剛觸發時的舊狀態；還沒穩定就直接跳過，等下一次 resize 事件
+  // 再重新排一次，這樣只有在真正確定縮放已經結束時才會定位，不會有中途跳動。
+  let viewportSettleDebounce = null;
+  function scheduleViewportSettle(){
+    clearTimeout(viewportSettleDebounce);
+    viewportSettleDebounce = setTimeout(() => {
+      const stillZoomed = window.visualViewport && Math.abs(window.visualViewport.scale - 1) > 0.01;
+      if(stillZoomed) return; // 縮放還沒穩定，先不動，等下一次 resize 事件再判斷
+
+      if(detailPage.classList.contains('active')){
+        positionDetailImage(lastNaturalW, lastNaturalH);
+      }
+      // 縮放期間 syncFixedChromeLive 全程跳過沒有更新（見下方），縮放真正結束、
+      // 穩定下來的這一刻，順便補一次正確的重新定位，不用等使用者手動觸發
+      // 下一次 resize 事件才修正回來
+      syncFixedChrome();
+    }, 150);
+  }
+
+  // syncFixedChrome()（header 的 preview 對齊 / detail-info / 左右箭頭定位）原本
+  // 認為只用 getBoundingClientRect() 讀「當下實際渲染位置」，不像 positionDetailImage
+  // 依賴 innerWidth/innerHeight，所以不需要等縮放穩定——但這個假設漏算了一種情況：
+  // detail-info 的直式定位（syncDetailInfoAlignment）本身就有用到 window.innerHeight
+  // 去算 top，雙指縮放中途這個值一樣不可靠，算出來的位置可能整個飛出畫面外，
+  // 而且因為縮放結束後沒有任何後續事件會再重新校正它（不像 resize 那樣持續觸發），
+  // 這個錯誤的偏移量會一直卡住，直到重新整理頁面、CSS 變數被重置才會消失——
+  // 這正是「雙指縮放後 001 那排字飛不見，切換照片、不重整都救不回來」的成因。
+  // 修法：縮放進行中（scale 明顯不是 1）就直接跳過整次 live 更新，等縮放真的
+  // 結束（下一次 resize/visualViewport resize 事件時 scale 已經穩定）才繼續算。
+  let fixedChromeRAF = null;
+  function syncFixedChromeLive(){
+    if(fixedChromeRAF) return;
+    fixedChromeRAF = requestAnimationFrame(() => {
+      fixedChromeRAF = null;
+      const stillZoomed = window.visualViewport && Math.abs(window.visualViewport.scale - 1) > 0.01;
+      if(stillZoomed) return; // 縮放中途座標不可靠，先不要算，避免把 detail-info 之類的定位帶偏
+      syncFixedChrome();
+    });
+  }
+
+  window.addEventListener('resize', scheduleViewportSettle);
+  window.addEventListener('resize', syncFixedChromeLive);
+  // visualViewport 的 resize 事件在雙指縮放時觸發得比 window resize 更即時、更頻繁，
+  // 一起監聽可以更快抓到「縮放剛結束」的那個時間點。
+  if(window.visualViewport){
+    window.visualViewport.addEventListener('resize', scheduleViewportSettle);
+    window.visualViewport.addEventListener('resize', syncFixedChromeLive);
+  }
+
+  async function init(){
+    syncFixedChrome();
+    startDvdBounce(); // 貫穿全站的飄動字，不等照片載入，進站就開始跑
+    photos = await fetchDriveImages();
+
+    // 照片一到手，第一件事是先暖機 preview 頁要用的起始兩張照片，而不是
+    // 先渲染網格。現在進站預設會直接顯示 preview 頁（見下面 openPreviewPage），
+    // 網格在使用者點一下之前其實是被蓋在底下、看不到的——所以「使用者這一刻
+    // 真正會看到的東西」是 preview 的這兩張照片，理當比網格縮圖更早發出
+    // 網路請求、更早拿到瀏覽器的連線／頻寬。原本是先 renderGrid()（會一次
+    // 發出前 GRID_EAGER_COUNT 張網格縮圖的請求）才輪到 preview 暖機，等於
+    // 讓使用者看不到的內容搶先跟使用者馬上要看到的內容搶頻寬，這是
+    // 「preview 頁一開始還是白幕好一陣子」的原因之一。
+    preparePreviewSequences();
+
+    renderGrid();
+
+    prefetchAllInBackground();
+    prefetchHoverThumbsInBackground();
+
+    // ---------- 進站預設先看到 preview 頁，點一下才到首頁 ----------
+    // 原本只有網址是 #preview 時才會自動開 preview；現在改成不管網址有沒有
+    // 這個 hash，一律先開 preview——但故意傳 pushHistory=false，不把
+    // #preview 寫進網址列。這樣「剛進站看到 preview」跟「點一下回到首頁」
+    // 這兩個狀態，網址列從頭到尾都是同一個乾淨網址（沒有 hash 差異）：
+    //   - 進站當下 hash 本來就是空的，這裡不會主動加上 #preview
+    //   - 使用者點擊 previewPage 觸發 closePreviewPage() 時，裡面判斷
+    //     「pushHistory && location.hash === '#preview'」才會改網址，
+    //     這裡 hash 從頭到尾不是 '#preview'，所以自然不會觸發、不會動到網址
+    // 如果是使用者分享 https://.../#preview 這種明確帶 hash 的連結進來，
+    // 一樣會走到這裡正常開啟 preview，行為不變。
+    //
+    // 照片「保證會出現」的部分不需要另外重寫一套邏輯——上面
+    // preparePreviewSequences() 早就把起始兩張照片（極小圖／縮圖／原始
+    // 高畫質）全部排進暖機佇列，而 openPreviewPage → startPreviewCycle →
+    // applyPreviewSide() 內建的是一層一層的降級保護：已經暖好就直接上
+    // 高畫質、還沒暖好就先等縮圖 decode 完成再顯示、縮圖也還沒好就繼續等
+    // 高畫質——不管網路快慢，最後一定會顯示出照片，不會卡在空白或半張的
+    // 狀態。這套機制原本就是為了「使用者手動點 preview」這個情境準備的，
+    // 這裡讓進站自動開啟也走同一套，不需要重新設計。
+    openPreviewPage(false, true);
+  }
+
+  // 禁止右鍵選單、禁止拖曳圖片（防止另存新檔 / 長按儲存）
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+  document.addEventListener('dragstart', (e) => {
+    if(e.target.tagName === 'IMG') e.preventDefault();
+  });
+
+  // 只擋雙擊縮放，不影響雙指縮放（pinch-zoom 保持可用）
+  // 用 isMultiTouch 標記排除「雙指放開手指」被誤判成雙擊的狀況
+  let lastTouchEnd = 0;
+  let isMultiTouch = false;
+  document.addEventListener('touchstart', (e) => {
+    if(e.touches.length > 1) isMultiTouch = true;
+  }, { passive: true });
+  document.addEventListener('touchend', (e) => {
+    if(e.touches.length > 0) return; // 還有手指沒放開，先不判斷
+    if(isMultiTouch){
+      isMultiTouch = false;
+      lastTouchEnd = Date.now();
+      return; // 這是縮放手勢放開，不是雙擊，不攔截
+    }
+    const now = Date.now();
+    if(now - lastTouchEnd <= 300) e.preventDefault(); // 300ms 內連續兩次點擊視為雙擊，擋掉
+    lastTouchEnd = now;
+  }, { passive: false });
+
+  // 背景慢慢把所有照片都預先下載一次（不搶主要資源），
+  // 這樣使用者不管點開哪一張、往哪個方向連續切換，都大機率已經有快取
+  function prefetchAllInBackground(){
+    let i = 0;
+    function step(){
+      if(i >= photos.length) return;
+      prefetchOne(photos[i].detailUrlMobile || photos[i].detailUrl || photos[i].url, true);
+      i++;
+      if('requestIdleCallback' in window){
+        requestIdleCallback(step, { timeout: 800 });
+      } else {
+        setTimeout(step, 120);
+      }
+    }
+    step();
+  }
+
+  // hover 大圖預覽現在改用獨立的 thumbUrl（畫質維持原本的 s800，不受網格
+  // 縮圖瘦身影響），跟網格顯示用的 gridUrl 已經是兩個不同檔案、不會互相
+  // 沾光快取。為了不讓「使用者第一次 hover 到某張照片」變成要重新等一次
+  // 網路下載，這裡在背景把所有照片的 thumbUrl 都先跑過一輪、解碼好放進
+  // hoverPreviewCache，等真的 hover 到時幾乎都已經是現成的。只在支援 hover
+  // 的裝置（桌機／滑鼠）才跑，手機本來就沒有 hover 預覽功能，不需要多耗這筆
+  // 流量。優先順序低於 prefetchAllInBackground（大圖頁要用的原始畫質），
+  // 用 idle callback 排在更後面，不搶主要資源。
+  function prefetchHoverThumbsInBackground(){
+    if(!supportsHover) return;
+    let i = 0;
+    function step(){
+      if(i >= photos.length) return;
+      const photo = photos[i];
+      i++;
+      if(photo && photo.thumbUrl && !hoverPreviewCache.has(photo.thumbUrl)){
+        const loader = new Image();
+        try { loader.fetchPriority = 'low'; } catch(e){} // 純背景暖機用，不搶當下畫面實際需要的資源
+        loader.src = photo.thumbUrl;
+        const store = () => hoverPreviewCache.set(photo.thumbUrl, loader);
+        if(loader.decode){ loader.decode().then(store).catch(store); }
+        else if(loader.complete){ store(); }
+        else { loader.onload = store; }
+      }
+      if('requestIdleCallback' in window){
+        requestIdleCallback(step, { timeout: 1500 });
+      } else {
+        setTimeout(step, 200);
+      }
+    }
+    step();
+  }
+
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(() => {
+      syncFixedChrome();
+      clampDvdIntoViewport();
+    });
+  }
+
+  init();
+
+})();
+</script>
+</body>
+</html>
