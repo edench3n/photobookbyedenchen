@@ -1386,10 +1386,11 @@
     transition:none !important;
   }
   @media (max-width: 640px){
-    /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍，這裡再整體放大 1.3 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間 */
+    /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍，這裡再整體放大 1.3 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間
+       ↓再整體縮小約 0.9 倍（使用者反應手機版飄動物件偏大，縮小一點點），區間三個數字等比例乘上 0.9 */
     .dvd-bounce-img{
       /* 同上面基礎規則一樣乘上 --dvd-area-scale，手機版跟著桌機版一起再放大約 1.1 倍，維持原本手機相對桌機的放大比例 */
-      height: calc(clamp(223.68px, 53.69vw, 656.11px) * var(--dvd-area-scale, 1));
+      height: calc(clamp(201.31px, 48.32vw, 590.5px) * var(--dvd-area-scale, 1));
     }
   }
   /* 平板縮小成桌機版的 0.85 倍。原本用「寬度介於 641~1100px 之間」來判斷
@@ -1822,6 +1823,44 @@
   // 沒有任何東西可以互動。這裡設一個安全逾時，不管照片流程順不順利，最晚
   // 也一定會在這個時間點強制放行一次，不會讓整個網站卡死在一片空白。
   const INITIAL_REVEAL_FALLBACK_MS = 4000;
+
+  // ---------- 進站第一次載入：讓「飄動物件」真的跟 preview 起始照片同一刻
+  // 一起出現 ----------
+  // 原本 revealInitialChrome() 只要 preview 起始兩張照片準備好就會馬上
+  // 呼叫——但飄動物件顯示的圖片，來自另一個獨立的 Google Drive 資料夾
+  // （EDEN_E_FOLDER_ID，刻意用低優先度抓取，見 fetchDvdEImages() 內的
+  // 說明，目的是不要跟 preview 照片搶頻寬），如果這組圖片這時候還沒抓、
+  // 裁切、decode 完成，會被 .dvd-image-pending 這層獨立開關擋住，得等它
+  // 自己準備好才「補」跳出來——這就是「飄動物件沒有跟著 preview 照片一起
+  // 出現」的成因：不是沒放行，是兩邊各自獨立放行、時間點對不齊。
+  // 修法：兩邊準備好時都只是先舉手（設下面這兩個旗標），真正呼叫
+  // revealInitialChrome() 統一交給 attemptInitialReveal() 判斷——兩者都
+  // 準備好才放行，確保同一刻一起出現；如果照片先準備好、飄動物件還在等
+  // （例如那個資料夾網路比較慢），額外多等 DVD_REVEAL_GRACE_MS 這麼一小段
+  // 緩衝時間讓它趕上，緩衝時間到了還沒準備好，才不再等、先放行照片／
+  // header，不讓使用者對著白畫面等太久——這種情況下飄動物件會維持原本
+  // 「準備好之後自己補跳出來」的退路（見 markDvdRealImageReady() 內
+  // chromeAlreadyRevealed 分支的完整說明），不會有任何一種情況卡死；上面
+  // INITIAL_REVEAL_FALLBACK_MS 那個 4 秒保底逾時也還在，兩層保底互不影響。
+  let previewReadyForInitialReveal = false;
+  let dvdReadyForInitialReveal = false;
+  let initialRevealGraceTimer = null;
+  const DVD_REVEAL_GRACE_MS = 500;
+  function attemptInitialReveal(){
+    if(initialChromeRevealed) return;
+    if(previewReadyForInitialReveal && dvdReadyForInitialReveal){
+      clearTimeout(initialRevealGraceTimer);
+      initialRevealGraceTimer = null;
+      revealInitialChrome();
+      return;
+    }
+    if(previewReadyForInitialReveal && !initialRevealGraceTimer){
+      initialRevealGraceTimer = setTimeout(() => {
+        initialRevealGraceTimer = null;
+        revealInitialChrome();
+      }, DVD_REVEAL_GRACE_MS);
+    }
+  }
 
   // 照片編號：直接顯示實際數字，不補零（例如第 7 張顯示「7」，不是「007」）。
   function formatPhotoIndex(n){ return String(n); }
@@ -5671,9 +5710,11 @@
       // 起始畫面兩側的照片就是在這一刻真正「準備好、要出現在畫面上」——
       // 不管 leftUrl/rightUrl 實際上是不是都拿到值（就算其中一側失敗、
       // 或兩側都空，也不該讓 header／飄動的 e 永遠卡在隱藏狀態），這裡都
-      // 一律放行，讓照片、header 文字、飄動的 e 同一刻一起淡入（完整
-      // 說明見 CSS body.initial-reveal-pending 那段）。
-      revealInitialChrome();
+      // 一律舉手表示「照片這邊準備好了」；實際是否放行、要不要多等飄動
+      // 物件一下，交給 attemptInitialReveal() 判斷（完整說明見上面該函式
+      // 旁的註解、以及 CSS body.initial-reveal-pending 那段）。
+      previewReadyForInitialReveal = true;
+      attemptInitialReveal();
 
       // 起始畫面兩側這時已經「同時」亮出來了（不管當下亮出來的是縮圖還是
       // 已經是高畫質）。從這一刻開始，兩側是否同步已經不重要了——這裡才
@@ -6237,20 +6278,44 @@
   // 會接手，行為等同沒有這個機制時的原本固定高度。
   function setDvdBounceImageSrc(src, areaScale){
     if(!dvdBounceImgEl) return Promise.resolve();
-    dvdBounceImgEl.src = src;
-    dvdBounceImgEl.style.setProperty('--dvd-area-scale', (typeof areaScale === 'number' && areaScale > 0) ? areaScale : 1);
-    // 同步記錄「目前顯示的是哪一張圖」，供 computeDvdPixelInsets() 查詢
-    // 對應的像素遮罩、算撞螢幕邊界時圖案本身實際的最外緣（完整說明見
-    // 該函式上方的註解）。
-    dvdActiveImgSrc = src;
-    // 量完撞牆用的矩形尺寸之後，順便觸發這張圖的像素遮罩建立（見上面
-    // requestAlphaMask() 的完整說明）——撞牆判斷要用的「實際去背形狀」
-    // 從這裡開始準備，不需要呼叫端另外再做任何事。
-    const remeasure = () => { measureDvdSize(); requestAlphaMask(src, dvdBounceImgEl); };
-    if(dvdBounceImgEl.decode){
-      return dvdBounceImgEl.decode().then(remeasure).catch(remeasure);
+    const scaleValue = (typeof areaScale === 'number' && areaScale > 0) ? areaScale : 1;
+    // 真正把新圖套到「畫面上看得見」的這顆 <img> 上，並重新量測撞牆矩形。
+    const apply = () => {
+      dvdBounceImgEl.src = src;
+      dvdBounceImgEl.style.setProperty('--dvd-area-scale', scaleValue);
+      // 同步記錄「目前顯示的是哪一張圖」，供 computeDvdPixelInsets() 查詢
+      // 對應的像素遮罩、算撞螢幕邊界時圖案本身實際的最外緣（完整說明見
+      // 該函式上方的註解）。
+      dvdActiveImgSrc = src;
+      // 量完撞牆用的矩形尺寸之後，順便觸發這張圖的像素遮罩建立（見上面
+      // requestAlphaMask() 的完整說明）——撞牆判斷要用的「實際去背形狀」
+      // 從這裡開始準備，不需要呼叫端另外再做任何事。
+      measureDvdSize();
+      requestAlphaMask(src, dvdBounceImgEl);
+    };
+    // ---------- 修正撞牆換圖時「很短暫的消失」，改成無縫直接切換 ----------
+    // 原本的做法是直接把新的 src 寫進畫面上這顆看得見的 <img>，再呼叫
+    // decode() 等它解碼完成——decode() 只保證「解碼完成後才 resolve」，
+    // 不保證瀏覽器在解碼完成前不會先把畫面上舊的那張圖清掉；尤其手機
+    // 瀏覽器通常會在 src 換掉的那一瞬間就先清空目前內容，等新圖真的解碼
+    // 繪製完成才重新畫上去，中間那一小段空白，就是使用者看到的「切換時
+    // 很短暫地消失」，不是無縫直接切換。
+    // 修正做法：先在畫面外、使用者看不到的地方（一顆沒有插進 DOM、只存在
+    // 記憶體裡的 Image()）把新圖解碼好，確定解碼完成之後，才把同一個
+    // src 寫進畫面上這顆看得見的 <img>。瀏覽器對同一個 URL（這裡是裁切好
+    // 的 data URL）的解碼結果本身就會快取，等到真正寫進看得見的 <img>
+    // 那一刻，幾乎可以直接沿用剛剛解碼好的結果立即顯示，不需要重新解碼、
+    // 中間也就不會再有那段空白——視覺上就是使用者要的「直接切換」。
+    const offscreen = new Image();
+    offscreen.src = src;
+    if(offscreen.decode){
+      return offscreen.decode().then(apply, apply);
     } else {
-      return new Promise(resolve => { setTimeout(() => { remeasure(); resolve(); }, 50); });
+      return new Promise(resolve => {
+        const finish = () => { apply(); resolve(); };
+        offscreen.onload = finish;
+        offscreen.onerror = finish;
+      });
     }
   }
 
@@ -6639,60 +6704,37 @@
     return [];
   }
 
-  // ---------- 首頁捲動時，經過的縮圖對飄動的 e 產生像被風吹到的撥動效果 ----------
-  // 需求：e 完全不能被縮圖「卡住」或「擋住」（不能阻止重疊，必須維持能夠
-  // 自由疊在照片上面/後面這件事），使用者上下捲動頁面、縮圖劃過 e 所在
-  // 範圍的那一瞬間，希望有種「被風吹到、輕輕撥了一下」的流暢手感，不是
-  // 硬碰硬的撞擊感。
+  // ---------- 上下捲動／拖曳頁面時，飄動的 e 有種「被風吹到、輕輕吹動」的
+  // 物理手感 ----------
+  // 原本這個效果是「捲動時，經過的縮圖劃過 e 所在範圍才觸發」，跟照片的
+  // 位置／有沒有重疊綁在一起；使用者要求改成完全跟照片無關，單純只看
+  // 「使用者上下捲動／拖曳了多少」——不管飄動的 e 當下飄到畫面上哪裡、
+  // 有沒有疊到任何照片，只要頁面在上下捲動，就會有一致、平滑的風吹手感，
+  // 不再需要每一影格去查詢、量測畫面上所有縮圖的位置做重疊判斷。
   //
-  // 做法刻意跟 resolveDvdObstacleCollision()（詳情頁大圖用的那套硬碰撞）
-  // 完全分開、不共用：那套會算重疊深度、把座標夾到邊緣外、翻轉方向、觸發
-  // 邊框震動——目的就是「不能重疊」；這裡要的剛好相反，只需要一個最簡單
-  // 的 AABB 是否重疊判斷（有沒有疊到，不用管疊多深），完全不改動
-  // dvdDirX/dvdDirY 本身、也不觸發撞牆的震動邏輯——e 該怎麼飄還是怎麼飄，
-  // 重疊本身完全不受影響，接下來一樣可以繼續疊在照片上。
-  //
-  // 第一版做法是重疊時直接在 dvdY 上加一筆瞬間位移——這在快速捲動（例如
-  // 滑鼠滾輪一次觸發一大段 scrollY 變化）時，會變成「單一影格內位移量
-  // 突然跳一大截」，視覺上就是很生硬的一下「撞擊感」，不是使用者要的
-  // 「風吹過去、緩緩撥動」的手感。
-  // 改成「風力殘留速度」模型：捲動＋重疊只負責疊加一筆瞬時「風速」
-  // （dvdNudgeVY，單位 px/s），不直接動位置；真正的位移改到 stepDvdBounce()
-  // 主迴圈裡，每一影格都用這個殘留風速乘上 dt 疊進去，同時讓風速本身按照
-  // dt 為基準的指數衰減慢慢歸零（DVD_SCROLL_NUDGE_DECAY_PER_SEC，數字越
-  // 大衰減越快）——不管當下這一影格捲動量有多突然，位移都會被攤平成一段
-  // 平滑的曲線，像風真的吹過去、然後慢慢停下來，不會有任何單一影格暴衝
-  // 的瞬間跳動。
-  // 追蹤飄動迴圈自己上一次看到的視窗尺寸——只用來判斷「這一影格視窗是不是
-  // 真的被外部（例如手機網址列收合、瀏覽器介面重新排版）縮小過」，跟下面
-  // stepDvdBounce() 裡「像素內縮值」分開判斷，完整理由見該處判斷式上方的
-  // 說明。
-  let dvdLastViewportW = window.innerWidth, dvdLastViewportH = window.innerHeight;
+  // 物理模型維持不變：捲動只負責疊加一筆瞬時「風速」（dvdNudgeVY，單位
+  // px/s），不直接動位置；真正的位移在 stepDvdBounce() 主迴圈裡，每一
+  // 影格都用這個殘留風速乘上 dt 疊進去，風速本身按 dt 為基準指數衰減慢慢
+  // 歸零（DVD_SCROLL_NUDGE_DECAY_PER_SEC）——不管當下這一影格捲動量有多
+  // 突然，位移都會被攤平成一段平滑的曲線，像風真的吹過去、然後慢慢停
+  // 下來，不會有任何單一影格暴衝的瞬間跳動。
   let dvdLastScrollY = window.scrollY;
   let dvdNudgeVY = 0; // 目前累積的「風速」殘留值（px/s），每影格自然衰減，見 stepDvdBounce() 內的套用處
-  const DVD_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例（比上一版 1.4 加大）
-  const DVD_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單次疊加的風速上限 (px/s)（比上一版 130 加大）
+  const DVD_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例
+  const DVD_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單次疊加的風速上限 (px/s)
   const DVD_SCROLL_NUDGE_DECAY_PER_SEC = 6.5; // 風速衰減係數：數字越大，風停下來的速度越快、尾韻越短
   function applyGridScrollNudge(){
     const scrollY = window.scrollY;
     const scrollDelta = scrollY - dvdLastScrollY;
     dvdLastScrollY = scrollY;
-    if(scrollDelta === 0) return; // 這一影格沒有捲動，不需要量測任何 DOM、也不需要疊加風力
+    if(scrollDelta === 0) return; // 這一影格沒有捲動，不需要疊加任何風力
 
-    const dvdLeft = dvdX, dvdRight = dvdX + dvdW, dvdTop = dvdY, dvdBottom = dvdY + dvdH;
-    const imgs = grid.querySelectorAll('.grid-item img.loaded');
-    for(let i = 0; i < imgs.length; i++){
-      const r = imgs[i].getBoundingClientRect();
-      if(r.width <= 0 || r.height <= 0) continue;
-      if(dvdRight > r.left && dvdLeft < r.right && dvdBottom > r.top && dvdTop < r.bottom){
-        // 往下捲（scrollY 變大）時，頁面內容在螢幕上其實是往「上」移動——
-        // 這裡取負號，讓風向跟縮圖劃過螢幕的實際視覺方向一致（縮圖往上滑
-        // 過 e，就順著把 e 也往上吹一點點，而不是反方向頂回去）。
-        const impulse = Math.max(-DVD_SCROLL_NUDGE_MAX_IMPULSE, Math.min(DVD_SCROLL_NUDGE_MAX_IMPULSE, -scrollDelta * DVD_SCROLL_NUDGE_IMPULSE));
-        dvdNudgeVY += impulse;
-        break; // 一影格只借用「目前正在重疊的第一張圖」疊加一次風力，疊到好幾張圖也不重複疊加
-      }
-    }
+    // 往下捲（scrollY 變大）時，頁面內容在螢幕上其實是往「上」移動——這裡
+    // 取負號，讓風向跟頁面內容捲動的實際視覺方向一致（往下捲、內容往上
+    // 滑，就順著把 e 也往上吹一點點；往上捲則反過來往下吹），單純依據
+    // 捲動方向與速度決定風向風速，完全不查詢、不判斷任何照片的位置。
+    const impulse = Math.max(-DVD_SCROLL_NUDGE_MAX_IMPULSE, Math.min(DVD_SCROLL_NUDGE_MAX_IMPULSE, -scrollDelta * DVD_SCROLL_NUDGE_IMPULSE));
+    dvdNudgeVY += impulse;
   }
 
   // 修正距離在這個範圍內（正常貼著邊緣移動時，每影格的重疊量本來就只有
@@ -6792,6 +6834,11 @@
     dvdRotationVel = 0;
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
   }
+
+  // 追蹤飄動迴圈自己上一次看到的視窗尺寸——只用來判斷「這一影格視窗是不是
+  // 真的被外部（例如手機網址列收合、瀏覽器介面重新排版）縮小過」，見下面
+  // stepDvdBounce() 裡「像素內縮值」分開判斷那段的完整說明。
+  let dvdLastViewportW = window.innerWidth, dvdLastViewportH = window.innerHeight;
 
   function stepDvdBounce(timestamp){
     // dvdDragging 在被指標（手指／滑鼠）抓著的時候會是 true——這種情況
@@ -7155,18 +7202,50 @@
     dvdDragging = true;
     dvdBounce.classList.add('dvd-grabbing'); // 觸發內層圖片的縮小 transition（見上面 CSS 說明）
     dvdEscaping = false; // 抓取當下若剛好正在滑出動畫途中，直接取消，位置維持抓取的當下值即可
+    // 抓住的當下順便把殘留的旋轉角速度歸零：原本這裡沒有清掉 dvdRotationVel，
+    // 抓取只是暫停了 RAF（旋轉當然也跟著暫停，因為 stepDvdRotation() 沒機會
+    // 被呼叫到），但角速度這個數值本身還留著沒清——放開之後 stepDvdBounce()
+    // 重新排入 RAF，stepDvdRotation() 接著就拿這筆「抓取前」殘留的舊角速度
+    // 繼續轉，看起來像「一放開又自己轉了起來」，跟使用者要的「已經被抓住、
+    // 就不該再帶著抓取前的旋轉慣性」不符。這裡歸零之後，放開只會讓它照甩出
+    // 去的方向／速度飄走，角度維持抓取當下的樣子不再變化，要等它真的撞到
+    // 東西（見 kickDvdRotation() 的呼叫處）才會重新開始旋轉。
+    dvdRotationVel = 0;
     dvdPointerId = e.pointerId;
     // 偏移量在「真正確定拖曳」的這一刻、用這一刻的座標／矩形重新計算
     // （而不是沿用按下當下算好的舊值）：按下之後到真正確定拖曳之間，飄動
     // 字可能因為原本的飄動迴圈繼續跑了幾影格而已經移動了一點位置，這裡
-    // 用「當下」的矩形／座標算偏移，才能保證接手的這一刻元素位置完全不變
-    // （dvdX/dvdY 直接等於目前的 rect.left/top），之後 dvdPointerMove()
-    // 才會跟著指標／手指自然移動，不會有任何一影格突然跳去別的位置。
+    // 用「當下」的矩形／座標算偏移，才能保證接手的這一刻元素位置完全不變，
+    // 之後 dvdPointerMove() 才會跟著指標／手指自然移動，不會有任何一影格
+    // 突然跳去別的位置。
+    //
+    // 修正「用滑鼠抓住飄動物件時，會位移跳一下」：這裡原本直接拿
+    // dvdBounce.getBoundingClientRect() 的 rect.left/rect.top 當作
+    // dvdX/dvdY。問題是 .dvd-bounce 的 transform 是
+    // translate(dvdX,dvdY) rotate(dvdRotationDeg)（見 dvdTransformString()），
+    // 飄動物件撞牆後有好幾秒的旋轉衰減期（見 dvdRotationDeg／
+    // stepDvdRotation() 那段），角度多半不是剛好 0——getBoundingClientRect()
+    // 量到的是「旋轉後」的外接矩形，旋轉不會移動元素的中心點，但外接矩形
+    // 的四個邊界會被撐大／偏移，rect.left/rect.top 因此不等於真正未旋轉
+    // 狀態下的左上角（下面 measureDvdSize() 那段註解對同一個現象有更完整
+    // 的說明）。抓取當下如果角度剛好不是 0，dvdX/dvdY 就會被賦成這個偏移
+    // 過的錯誤值，下一影格照這個錯誤座標＋原本角度重繪 transform，元素的
+    // 真正中心點就會瞬間位移，看起來像「一抓住就跳一下」，角度剛好轉得越
+    // 大，跳動越明顯。
+    // 修法：改用矩形的「中心點」反推真正未旋轉的左上角——旋轉是繞元素中心
+    // 進行，中心點在旋轉前後永遠不變；這裡拿 rect 算出中心點，再用
+    // measureDvdSize() 量到的、完全不受旋轉影響的 dvdW/dvdH（offsetWidth／
+    // offsetHeight，原理見該函式的完整說明）換算回真正的 dvdX/dvdY，這樣
+    // 算出來的位置跟目前的旋轉角度完全無關，抓取當下元素的視覺位置／角度
+    // 保證原地不動，不會再有任何偏移。
+    measureDvdSize();
     const rect = dvdBounce.getBoundingClientRect();
-    dvdGrabOffsetX = e.clientX - rect.left;
-    dvdGrabOffsetY = e.clientY - rect.top;
-    dvdX = rect.left;
-    dvdY = rect.top;
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    dvdX = centerX - dvdW / 2;
+    dvdY = centerY - dvdH / 2;
+    dvdGrabOffsetX = e.clientX - dvdX;
+    dvdGrabOffsetY = e.clientY - dvdY;
     dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
   }
@@ -9803,34 +9882,65 @@
     // 第一批照片出現的時間。抓回來之後先逐一裁掉透明留白（見上面
     // trimTransparentImage() 的完整說明，撞牆才會照圖案實際邊緣算），
     // 裁完的版本才存進 dvdEImages、預先解碼好，撞牆換圖的當下不用臨時等待。
+    //
+    // ---------- 優化首次進站加載：先只裁切第一張，讓飄動物件盡快跟著照片
+    // 一起出現 ----------
+    // 原本的做法是等「整批」圖片庫都裁切完成（Promise.all 全部跑完）才
+    // 第一次讓飄動物件顯示出來——裁切每一張圖都牽涉到 canvas 畫圖、算
+    // 透明留白邊界這類要花時間的工作，圖片庫張數一多，即使每張只多花
+    // 幾十毫秒，加總起來也會讓飄動物件比首頁照片晚好一段時間才出現，這
+    // 正是「飄動物件都不會跟著照片馬上出來」的成因——不是網路請求本身慢，
+    // 是「裁切這批圖片庫全部跑完才放行顯示」這段邏輯本身在等待。
+    // 改成：先單獨裁切陣列的第一張，裁完立刻用暫時倍率（scale:1，這張
+    // 還沒被拿去跟其他張一起算面積平均值）讓飄動物件顯示出來，不用等
+    // 其餘所有圖片都裁切完成；剩下的圖片留到下面用 .then() 串接、在背景
+    // 慢慢裁切，裁完之後才重新統一算一次整批的面積縮放倍率、更新
+    // dvdEImages 供之後撞牆換圖使用，同時把目前顯示中這張的倍率也一併
+    // 更新成正確值。
     dvdEImagesPromise.then(urls => {
-      return Promise.all(urls.map(trimTransparentImage));
-    }).then(trimmedEntries => {
-      // trimmedEntries 是這一批圖片各自的 {src, coverage} 結果（見
-      // trimTransparentImage() 的說明）；這裡先統一算出每一張的顯示縮放
-      // 倍率（見 computeDvdAreaScales() 的完整說明），dvdEImages 存的是
-      // {src, scale} 物件，之後撞牆換圖只需要直接讀出來用，不用每次都
-      // 重新計算。
-      dvdEImages = computeDvdAreaScales(trimmedEntries);
-      preloadDvdEImages();
-      // 圖片庫真的準備好了：馬上把飄動物件目前顯示的圖換成陣列裡的第一張
-      // 真實照片，不用等使用者真的撞到牆才第一次換圖，等這張圖真的
-      // decode 完成（見 setDvdBounceImageSrc() 回傳的 Promise 的完整說明）
-      // 才放行顯示——這樣使用者第一次真正看到這個元素時，畫面上一定已經
-      // 是圖片庫裡的真實照片、不會有任何一瞬間還停留在內建黃色 e 預設圖
-      // 上，也就是「有時候打開網站還是黃色 e」這個回報的徹底修法。
-      // 圖片庫是空陣列（理論上不會發生，因為前面 fetchDvdEImages 回傳
-      // 空陣列時 dvdEImagesPromise 也會是空陣列，這裡多一層保險）：
-      // 一律不放行顯示，維持隱藏，絕不退回顯示內建黃色 e 預設圖。
-      if(dvdEImages.length){
-        const firstEntry = dvdEImages[dvdEImageIndex];
-        setDvdBounceImageSrc(firstEntry.src, firstEntry.scale).then(markDvdRealImageReady);
-      }
+      if(!urls.length) return Promise.reject(new Error('dvd e images empty'));
+      return trimTransparentImage(urls[0]).then(firstTrimmed => {
+        dvdEImages = [{ src: firstTrimmed.src, scale: 1 }];
+        // 圖片庫真的準備好第一張了：馬上把飄動物件目前顯示的圖換成這張
+        // 真實照片，不用等使用者真的撞到牆才第一次換圖，等這張圖真的
+        // decode 完成（見 setDvdBounceImageSrc() 回傳的 Promise 的完整
+        // 說明）才放行顯示——這樣使用者第一次真正看到這個元素時，畫面上
+        // 一定已經是圖片庫裡的真實照片、不會有任何一瞬間還停留在內建
+        // 黃色 e 預設圖上，也就是「有時候打開網站還是黃色 e」這個回報的
+        // 徹底修法。
+        return setDvdBounceImageSrc(dvdEImages[0].src, 1)
+          .then(markDvdRealImageReady)
+          .then(() => {
+            // 飄動物件這邊也準備好了：舉手告訴 attemptInitialReveal()，
+            // 讓它跟 preview 照片那邊的旗標一起判斷，確保兩者是同一刻
+            // 一起放行、一起出現，而不是各自獨立放行（完整說明見上面
+            // attemptInitialReveal() 旁的註解）。
+            dvdReadyForInitialReveal = true;
+            attemptInitialReveal();
+          })
+          .then(() => urls);
+      });
+    }).then(urls => {
+      // 背景把整批圖片庫（含剛剛已經顯示過的第一張）都裁切好，統一算出
+      // 正確的面積縮放倍率（見 computeDvdAreaScales() 的完整說明，需要
+      // 整批照片的平均值才能算）——使用者這時已經看得到飄動物件了，這裡
+      // 晚一點完成不影響第一次出現的時間點。
+      return Promise.all(urls.map(trimTransparentImage)).then(trimmedEntries => {
+        dvdEImages = computeDvdAreaScales(trimmedEntries);
+        preloadDvdEImages();
+        // 如果目前還停在剛剛快速顯示的第一張（使用者還沒撞牆換過圖），
+        // 把它的縮放倍率從暫時的 1 更新成整批算出來的正確倍率，讓大小
+        // 趨於一致；直接改 CSS 自訂屬性即可，不會有任何跳動或重新觸發
+        // 進場動畫。
+        if(dvdEImageIndex === 0 && dvdEImages.length && dvdBounceImgEl){
+          dvdBounceImgEl.style.setProperty('--dvd-area-scale', dvdEImages[0].scale);
+        }
+      });
     }).catch(() => {
-      // 圖片庫抓取或裁切整個失敗（資料夾沒設定、離線等）：這裡刻意不呼叫
-      // markDvdRealImageReady()，飄動物件會維持隱藏、不會退回顯示內建那張
-      // 黃色 e 預設圖——這是使用者明確要求的行為：寧可這種情況下不顯示
-      // 飄動物件，也不要顯示錯的那張預設圖。
+      // 圖片庫抓取或裁切整個失敗（資料夾沒設定、離線、空陣列等）：這裡
+      // 刻意不呼叫 markDvdRealImageReady()，飄動物件會維持隱藏、不會退回
+      // 顯示內建那張黃色 e 預設圖——這是使用者明確要求的行為：寧可這種
+      // 情況下不顯示飄動物件，也不要顯示錯的那張預設圖。
     });
     photos = await photosPromise; // 請求早在腳本最上方就已經發出去了（見 photosPromise 宣告處的說明），這裡只是接收結果
 
