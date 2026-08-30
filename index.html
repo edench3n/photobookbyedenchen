@@ -1264,7 +1264,17 @@
   .dvd-bounce:active{ cursor: grabbing; }
   .dvd-bounce-img{
     display:block;
-    height: clamp(71.93px, 17.26vw, 211.00px); /* 沿用原本文字版的高度區間，這次先放大約 1.15 倍，之後陸續再放大約 1.08 倍、1.1 倍（使用者持續要求飄動物件整體再大一點） */
+    /* 高度在原本區間的基礎上，再乘上 --dvd-area-scale 這個自訂屬性：JS 換上
+       每一張圖片時（見 setDvdBounceImageSrc() 的完整說明），會依照這張圖
+       去背後「實際有色面積」相對於整批照片平均值的比例，算出一個縮放
+       倍率寫進這個屬性——面積小的照片（例如細長的樹枝）倍率大於 1，會
+       顯示得比原本大；面積大、佔滿整個畫面的照片倍率小於 1，會顯示得比
+       原本小，讓使用者撞牆看到的每一張照片，肉眼看到的實際圖案大小趨近
+       一致，不會因為照片本身疏密不同而忽大忽小。沒有算過（例如還沒換上
+       圖片庫的圖、或那張圖裁切失敗沒有 coverage 資料）就用預設值 1，
+       維持原本固定高度的行為不變。width:auto 會自動跟著等比例縮放，不用
+       另外處理。 */
+    height: calc(clamp(71.93px, 17.26vw, 211.00px) * var(--dvd-area-scale, 1));
     width:auto;
     -webkit-user-drag:none;
     -webkit-touch-callout:none;
@@ -1378,7 +1388,8 @@
   @media (max-width: 640px){
     /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間 */
     .dvd-bounce-img{
-      height: clamp(115.09px, 27.62vw, 337.59px); /* 手機版跟著桌機版一起再放大約 1.1 倍，維持原本手機相對桌機的放大比例 */
+      /* 同上面基礎規則一樣乘上 --dvd-area-scale，手機版跟著桌機版一起再放大約 1.1 倍，維持原本手機相對桌機的放大比例 */
+      height: calc(clamp(115.09px, 27.62vw, 337.59px) * var(--dvd-area-scale, 1));
     }
   }
   /* 平板縮小成桌機版的 0.85 倍。原本用「寬度介於 641~1100px 之間」來判斷
@@ -1394,7 +1405,8 @@
      不變。 */
   @media (hover: none) and (pointer: coarse) and (min-width: 641px){
     .dvd-bounce-img{
-      height: clamp(61.15px, 14.67vw, 179.36px); /* 平板版跟著桌機版一起再放大約 1.1 倍，維持原本平板相對桌機縮小 0.85 倍的比例 */
+      /* 同上面基礎規則一樣乘上 --dvd-area-scale，平板版跟著桌機版一起再放大約 1.1 倍，維持原本平板相對桌機縮小 0.85 倍的比例 */
+      height: calc(clamp(61.15px, 14.67vw, 179.36px) * var(--dvd-area-scale, 1));
     }
   }
 
@@ -4590,6 +4602,10 @@
       detailLightPositioned = true;
       detailImage.src = warmImg.src;
       detailImageWrap.classList.add('show'); // 直接顯示，不經過淡出/淡入
+      // warmImg 本身已經是載入完成的圖片元素，直接拿來建立像素遮罩最快，
+      // 不用等 detailImage 自己重新觸發一次載入（見 requestAlphaMask() 的
+      // 完整說明；idempotent，不會因為呼叫多次而重複計算）。
+      requestAlphaMask(warmImg.src, warmImg);
     }
     // gridReady 為 false 時什麼都不做：保留目前畫面（不管是上一張照片還是
     // 空白），一路等到下面 renderDetailFull() 的 commit() 真正拿到這張照片
@@ -4619,6 +4635,10 @@
         if(!detailLightPositioned) positionDetailImage(lastNaturalW, lastNaturalH);
         detailImage.src = loader.src;
         detailImageWrap.classList.add('show');
+        // loader 這時已經 decode() 完成，直接拿來建立像素遮罩，撞牆判斷才能
+        // 盡快用上這張高畫質版本實際去背後的形狀（見 requestAlphaMask() 的
+        // 完整說明；idempotent，不會因為呼叫多次而重複計算）。
+        requestAlphaMask(loader.src, loader);
         // 注意：這裡刻意「不」把 loader.src 同步套到 activeFlipClone 身上，
         // 即使分身還在飛行途中也一樣。原因見 activeFlipClone 宣告處的完整
         // 說明——分身跟最終大圖的長寬比很多時候不同（分身用的是網格正方形
@@ -5797,10 +5817,18 @@
   //     透明留白可裁，屬於「正常、不用再試下一種方式」的結果
   //   - null：讀取像素這一步本身失敗（多半是 tainted canvas），呼叫端看到
   //     null 才需要改試下一種載入方式
+  // 回傳值從單純一個 src 字串，改成 {src, coverage} 物件：coverage 是「裁切
+  // 後範圍內，實際有畫到東西（非透明／非背景色）的像素」佔整個裁切範圍
+  // 面積的比例（0~1）。這是供上面 --dvd-area-scale 那套「依實際有色面積
+  // 平均每張飄動照片顯示大小」機制使用的原始數據（見 computeDvdAreaScales()
+  // 的完整說明）：細長、鏤空的圖案（例如樹枝）coverage 會很低，塞滿整個
+  // 畫面的照片 coverage 會接近 1。coverage 算不出來的情況（讀取像素失敗、
+  // 整張圖完全透明等）一律回傳 null，呼叫端會把這張圖從「平均值」的計算
+  // 中排除、维持縮放倍率 1，不受影響。
   function trimLoadedImage(img, fallbackSrc){
     try{
       const w = img.naturalWidth, h = img.naturalHeight;
-      if(!w || !h) return fallbackSrc;
+      if(!w || !h) return { src: fallbackSrc, coverage: null };
       const srcCanvas = document.createElement('canvas');
       srcCanvas.width = w; srcCanvas.height = h;
       // willReadFrequently:true：明確告訴瀏覽器這顆 canvas 接下來會被
@@ -5831,8 +5859,13 @@
           if(y > maxY) maxY = y;
         }
       }
-      // 整張圖都是透明（極端情況），直接用原圖，不用多包一層 canvas
-      if(maxX < minX || maxY < minY) return fallbackSrc;
+      // 整張圖都是透明（極端情況），直接用原圖，不用多包一層 canvas；也沒有
+      // 任何有色像素可以算 coverage，回傳 null 讓這張圖不參與大小平均計算
+      if(maxX < minX || maxY < minY) return { src: fallbackSrc, coverage: null };
+
+      let coverageBg = null; // 若下面第二輪「純色背景」判斷真的被採用，記下
+                              // 估計出來的背景色，之後算 coverage 時要沿用
+                              // 同一套判斷標準，結果才會跟裁切範圍一致
 
       // 第二輪：只有在圖片從頭到尾都沒有一個像素是真正透明的（hasRealTransparency
       // 仍是 false，代表上面那輪算出來的範圍必然等於整張圖）時才需要——處理
@@ -5860,21 +5893,50 @@
           // （那樣多半代表背景色估計失準，維持原本不裁的行為比較安全）才採用。
           if(cMaxX >= cMinX && cMaxY >= cMinY && !(cMinX === 0 && cMinY === 0 && cMaxX === w - 1 && cMaxY === h - 1)){
             minX = cMinX; minY = cMinY; maxX = cMaxX; maxY = cMaxY;
+            coverageBg = bg;
           }
         }
       }
 
+      // 在最終確定下來的裁切範圍內，重新掃一次「實際有色（非透明／非
+      // 背景）」的像素數量，除以整個範圍的面積，得出 coverage。判斷標準
+      // 刻意跟上面決定裁切範圍時完全一致：真的有 alpha 透明就用 alpha
+      // 門檻；是純色背景畫布、且上面第二輪判斷真的被採用，就用跟該背景色
+      // 的距離；兩者都不是（例如整張圖本來就沒有留白可裁，也沒偵測到
+      // 可信的背景色）就視為整個範圍都是圖案本身，coverage 直接算 1。
+      let coverage = 1;
+      {
+        const boxW = maxX - minX + 1, boxH = maxY - minY + 1;
+        if(boxW > 0 && boxH > 0 && (hasRealTransparency || coverageBg)){
+          let coloredCount = 0;
+          for(let y = minY; y <= maxY; y++){
+            const rowBase = y * w * 4;
+            for(let x = minX; x <= maxX; x++){
+              const idx = rowBase + x * 4;
+              if(hasRealTransparency){
+                if(data[idx + 3] > DVD_TRIM_ALPHA_THRESHOLD) coloredCount++;
+              } else {
+                const dr = data[idx] - coverageBg.r, dg = data[idx + 1] - coverageBg.g, db = data[idx + 2] - coverageBg.b;
+                if((dr * dr + dg * dg + db * db) > (DVD_TRIM_BG_COLOR_THRESHOLD * DVD_TRIM_BG_COLOR_THRESHOLD)) coloredCount++;
+              }
+            }
+          }
+          coverage = coloredCount / (boxW * boxH);
+        }
+      }
+
       // 裁到的範圍等於整張圖，代表本來就沒有留白可裁（不管是透明留白還是
-      // 純色留白），直接用原圖即可，不用多包一層 canvas。
+      // 純色留白），直接用原圖即可，不用多包一層 canvas；coverage 這裡算好
+      // 的比例依然照樣回傳給呼叫端，不受這條「不用裁切」的捷徑影響。
       if(minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1){
-        return fallbackSrc;
+        return { src: fallbackSrc, coverage };
       }
       const trimW = maxX - minX + 1;
       const trimH = maxY - minY + 1;
       const outCanvas = document.createElement('canvas');
       outCanvas.width = trimW; outCanvas.height = trimH;
       outCanvas.getContext('2d').drawImage(srcCanvas, minX, minY, trimW, trimH, 0, 0, trimW, trimH);
-      return outCanvas.toDataURL('image/png');
+      return { src: outCanvas.toDataURL('image/png'), coverage };
     }catch(err){
       return null; // tainted canvas 等讀取失敗，回傳 null 讓呼叫端知道要試下一種載入方式，不是「這張圖沒有留白可裁」
     }
@@ -5903,7 +5965,7 @@
     }).then(blob => {
       const blobUrl = URL.createObjectURL(blob);
       return loadImageEl(blobUrl, null).then(img => {
-        const trimmed = trimLoadedImage(img, src);
+        const trimmed = trimLoadedImage(img, src); // 現在回傳 {src, coverage} 物件，見 trimLoadedImage() 的說明
         URL.revokeObjectURL(blobUrl); // 已經畫進 canvas 了，不再需要這個暫存網址，馬上釋放
         if(trimmed === null) throw new Error('read pixels failed via blob');
         return trimmed;
@@ -5915,16 +5977,165 @@
   // 再讀取。同樣讀取失敗就 reject，讓最外層的 catch 接手退回原圖。
   function trimViaCrossOriginImg(src){
     return loadImageEl(src, 'anonymous').then(img => {
-      const trimmed = trimLoadedImage(img, src);
+      const trimmed = trimLoadedImage(img, src); // 現在回傳 {src, coverage} 物件，見 trimLoadedImage() 的說明
       if(trimmed === null) throw new Error('read pixels failed via crossOrigin img');
       return trimmed;
     });
   }
 
+  // 回傳值統一是 {src, coverage} 物件（見 trimLoadedImage() 的完整說明）。
+  // 兩種方式都失敗時，照原圖使用、coverage 給 null——這張圖一樣正常顯示，
+  // 只是不參與下面「依實際有色面積平均大小」的計算，縮放倍率維持預設的 1，
+  // 不影響原本「這張圖壞不掉整個功能」的行為。
   function trimTransparentImage(src){
     return trimViaFetchBlob(src)
       .catch(() => trimViaCrossOriginImg(src))
-      .catch(() => src); // 兩種方式都失敗，照原圖使用，不讓這張圖壞掉整個功能
+      .catch(() => ({ src, coverage: null }));
+  }
+
+  // ---------- 依「實際去背後的形狀邊緣」做像素級撞牆判斷 ----------
+  // 上面 trimTransparentImage() 只解決「圖片四周留白」的問題——把圖片裁到
+  // 只剩下「有東西的最小矩形範圍」，但裁完之後那個矩形本身多半還不是圖案
+  // 真正的輪廓（例如飄動的「e」本身是英文字母的鏤空造型、詳情頁大圖如果
+  // 也是去背過的異形照片），矩形範圍內部本來就還留有大片透明區域——單純
+  // 拿「矩形 vs 矩形」做撞牆判斷，物件還沒真的碰到圖案本身、只是矩形框
+  // 提早重疊，看起來就是「隔著一段透明才撞到」，這正是使用者回報的成因。
+  //
+  // 這裡改成「像素遮罩（alpha mask）vs 像素遮罩」的作法：把每張參與撞牆的
+  // 圖片，掃一次 alpha 色版，記錄哪些像素「真的有畫到東西」，撞牆判斷時
+  // 除了原本的矩形是否重疊（廣義相位，快速排除完全沒交集的情況），還要
+  // 再確認「兩邊真正不透明的像素」有沒有真的疊在一起（窄義相位）——沒有
+  // 疊到，就代表肉眼看起來還沒真的碰到，直接放行讓物件繼續往前移動、可以
+  // 自由穿過對方的透明區域，只有在兩邊圖案本身真的疊到才觸發反彈。
+  //
+  // 這一套遮罩取樣解析度刻意縮到很小（PF_ALPHA_MASK_MAX_DIM），因為撞牆
+  // 判斷只需要「有沒有碰到」這種程度的精確度，不需要跟原圖一樣細；縮小
+  // 解析度換來的是每一影格取樣時的運算量大幅降低，物件飛得再快也不會
+  // 拖慢畫面。
+  const PF_ALPHA_MASK_MAX_DIM = 72; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能
+  const PF_ALPHA_MASK_THRESHOLD = 10; // 跟 DVD_TRIM_ALPHA_THRESHOLD 用同一個容忍值，判斷是否為「有畫到東西」
+
+  // src -> {mask:Uint8Array(0/1), w, h}｜null（讀取失敗，永久視為沒有遮罩可用）。
+  // 沒有這個 key 代表「還沒開始建立」；建立中的狀態另外用 Set 追蹤，避免
+  // 同一張圖同時被重複觸發好幾次建立流程。
+  const pfAlphaMaskCache = new Map();
+  const pfAlphaMaskPending = new Set();
+
+  // 把「已經載入完成的圖片來源」（<img> 元素，或已解碼的 Image()）縮小畫進
+  // 一顆很小的 canvas，掃一次 alpha 色版，轉成 0/1 的像素遮罩。跟
+  // trimLoadedImage() 共用同樣的「畫進 canvas 才能讀像素」原理，只是這裡
+  // 目的是拿去做撞牆判斷、不是拿去裁圖，兩邊職責不同，故意不合併成同一支
+  // 函式；讀取失敗（tainted canvas）會直接把例外丟給呼叫端處理。
+  function buildAlphaMaskFromSource(source, naturalW, naturalH){
+    if(!naturalW || !naturalH) return null;
+    const scale = Math.min(1, PF_ALPHA_MASK_MAX_DIM / Math.max(naturalW, naturalH));
+    const maskW = Math.max(2, Math.round(naturalW * scale));
+    const maskH = Math.max(2, Math.round(naturalH * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = maskW; canvas.height = maskH;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(source, 0, 0, maskW, maskH); // 縮小直接畫進小張 canvas，省掉先畫原尺寸再另外縮小的一輪運算
+    const data = ctx.getImageData(0, 0, maskW, maskH).data; // tainted canvas 的話，錯誤會在這一行丟出
+    const mask = new Uint8Array(maskW * maskH);
+    for(let i = 0; i < mask.length; i++){
+      mask[i] = data[i * 4 + 3] > PF_ALPHA_MASK_THRESHOLD ? 1 : 0;
+    }
+    return { mask, w: maskW, h: maskH };
+  }
+
+  // 觸發（或直接沿用快取）某張圖片的像素遮罩建立，非同步、不阻塞呼叫端——
+  // 呼叫這支的當下如果遮罩還沒準備好，撞牆判斷會暫時退回「矩形 vs 矩形」
+  // 的舊行為（見下面 getCachedAlphaMask() 的說明），不會等待、也不會報錯，
+  // 等遮罩真的建立好之後，下一次撞牆判斷自然就會開始用上精確版本。
+  function requestAlphaMask(src, imgEl){
+    if(!src || !imgEl || pfAlphaMaskCache.has(src) || pfAlphaMaskPending.has(src)) return;
+    pfAlphaMaskPending.add(src);
+    const finish = (result) => { pfAlphaMaskCache.set(src, result); pfAlphaMaskPending.delete(src); };
+
+    // 第一步：直接用現有的圖片元素畫（同源的 data: URL——飄動的 e 裁切完
+    // 一定是這種——這裡最快，不需要多一輪 fetch）。跨網域圖片如果沒有通過
+    // CORS 檢查，這裡會直接丟出例外，走下面 fetch 備援，跟 trimTransparentImage()
+    // 的兩階段策略同樣的道理。
+    try{
+      const result = buildAlphaMaskFromSource(imgEl, imgEl.naturalWidth, imgEl.naturalHeight);
+      finish(result);
+      return;
+    }catch(err){ /* tainted canvas，繼續往下試 fetch+blob */ }
+
+    fetch(src, { mode: 'cors' }).then(res => {
+      if(!res.ok) throw new Error('fetch failed: ' + res.status);
+      return res.blob();
+    }).then(blob => {
+      const blobUrl = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        let result = null;
+        try{ result = buildAlphaMaskFromSource(img, img.naturalWidth, img.naturalHeight); }catch(err){}
+        URL.revokeObjectURL(blobUrl);
+        finish(result);
+      };
+      img.onerror = () => { URL.revokeObjectURL(blobUrl); finish(null); };
+      img.src = blobUrl;
+    }).catch(() => finish(null)); // 兩種方式都失敗，標記成「沒有遮罩」，撞牆判斷永久退回矩形版本，不會讓功能壞掉
+  }
+
+  // 讀取快取——回傳三種狀態，呼叫端要分開處理：
+  //   - {mask,w,h}：遮罩已就緒，可以做像素級判斷
+  //   - null：已經確定讀不到像素（tainted 或載入失敗），視為「沒有遮罩」
+  //   - undefined：還沒建立好（或還沒呼叫 requestAlphaMask）
+  // null 和 undefined 這兩種「沒有遮罩」的情況，在下面 sampleAlphaMaskSolid()
+  // 裡都當作「這個位置算實心」處理，等同還沒套用這套像素判斷之前的矩形
+  // 行為，寧可暫時retain舊行為，也不要讓物件在遮罩準備好之前莫名其妙穿過去。
+  function getCachedAlphaMask(src){
+    return pfAlphaMaskCache.get(src);
+  }
+
+  function sampleAlphaMaskSolid(maskEntry, u, v){
+    if(!maskEntry) return true;
+    if(u < 0 || u >= 1 || v < 0 || v >= 1) return false;
+    const x = Math.min(maskEntry.w - 1, Math.floor(u * maskEntry.w));
+    const y = Math.min(maskEntry.h - 1, Math.floor(v * maskEntry.h));
+    return maskEntry.mask[y * maskEntry.w + x] === 1;
+  }
+
+  // 窄義相位：在兩個矩形（螢幕座標）的重疊範圍內，依固定間距取樣，逐點
+  // 換算回各自的本地遮罩座標（dvd 這邊還要考慮目前的旋轉角度），只要有
+  // 任何一個取樣點「兩邊都是實心像素」，就代表圖案本身真的疊到了。
+  // dvdRotationDegNow 用度數、跟 CSS rotate() 一致；轉換成本地座標時要用
+  // 「反方向」旋轉，把螢幕上的點轉回 dvd 未旋轉狀態下的座標系，這樣才能
+  // 正確對應到旋轉前建立的那份遮罩。
+  const PF_MASK_SAMPLE_STEP = 4; // 取樣間距（px）：越小越精準也越吃效能，4px 對這裡的物件尺寸來說肉眼已經看不出差別
+  function pixelShapesOverlap(dvdLeft, dvdTop, dvdWidth, dvdHeight, dvdRotationDegNow, dvdMaskEntry, obsLeft, obsTop, obsWidth, obsHeight, obsMaskEntry){
+    const left = Math.max(dvdLeft, obsLeft);
+    const right = Math.min(dvdLeft + dvdWidth, obsLeft + obsWidth);
+    const top = Math.max(dvdTop, obsTop);
+    const bottom = Math.min(dvdTop + dvdHeight, obsTop + obsHeight);
+    if(right <= left || bottom <= top) return false;
+
+    // 兩邊都沒有遮罩可用（或都還沒準備好）——沒有更精確的資訊可以查，直接
+    // 沿用矩形已經重疊這件事本身當作「有撞到」，等同舊版行為，不會卡住。
+    if(!dvdMaskEntry && !obsMaskEntry) return true;
+
+    const cx = dvdLeft + dvdWidth / 2, cy = dvdTop + dvdHeight / 2;
+    const theta = -dvdRotationDegNow * Math.PI / 180; // 反方向旋轉，把螢幕座標轉回 dvd 本地未旋轉座標系
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+
+    for(let py = top + PF_MASK_SAMPLE_STEP / 2; py < bottom; py += PF_MASK_SAMPLE_STEP){
+      for(let px = left + PF_MASK_SAMPLE_STEP / 2; px < right; px += PF_MASK_SAMPLE_STEP){
+        // dvd 本地座標：先減去中心點、反旋轉，再加回半寬高換算成 0~1 normalized
+        const relX = px - cx, relY = py - cy;
+        const localX = relX * cosT - relY * sinT + dvdWidth / 2;
+        const localY = relX * sinT + relY * cosT + dvdHeight / 2;
+        const du = localX / dvdWidth, dv = localY / dvdHeight;
+        if(!sampleAlphaMaskSolid(dvdMaskEntry, du, dv)) continue;
+
+        const ou = (px - obsLeft) / obsWidth, ov = (py - obsTop) / obsHeight;
+        if(!sampleAlphaMaskSolid(obsMaskEntry, ou, ov)) continue;
+
+        return true; // 兩邊都是實心像素，確定真的撞到圖案本身
+      }
+    }
+    return false; // 矩形雖然重疊，但取樣範圍內兩邊實心像素從未疊在一起——只是透明區域重疊，不算撞到
   }
 
   // 換上一張新圖（不管是內建預設圖，還是圖片庫裁切完的圖）之後，圖片的
@@ -5945,10 +6156,20 @@
   // 中間這一小段空窗期使用者偶爾會瞥到那一瞬間的黃色 e。改成等 decode()
   // 真的 resolve（代表瀏覽器已經備妥可以直接畫出來的像素資料）才放行
   // 顯示，就不會再有這個空窗期。
-  function setDvdBounceImageSrc(src){
+  // areaScale：這張圖依照「實際有色面積」算出來的顯示縮放倍率（見上面 CSS
+  // .dvd-bounce-img 的 --dvd-area-scale 用法、下面 computeDvdAreaScales()
+  // 的完整說明）。不是每個呼叫端都會算過這個倍率（例如下面內建預設圖只是
+  // 拿來量撞牆矩形、從來不會真的顯示給使用者看，不需要參與大小平均），
+  // 這種情況不傳這個參數即可，CSS 那邊的 var(--dvd-area-scale, 1) 預設值
+  // 會接手，行為等同沒有這個機制時的原本固定高度。
+  function setDvdBounceImageSrc(src, areaScale){
     if(!dvdBounceImgEl) return Promise.resolve();
     dvdBounceImgEl.src = src;
-    const remeasure = () => measureDvdSize();
+    dvdBounceImgEl.style.setProperty('--dvd-area-scale', (typeof areaScale === 'number' && areaScale > 0) ? areaScale : 1);
+    // 量完撞牆用的矩形尺寸之後，順便觸發這張圖的像素遮罩建立（見上面
+    // requestAlphaMask() 的完整說明）——撞牆判斷要用的「實際去背形狀」
+    // 從這裡開始準備，不需要呼叫端另外再做任何事。
+    const remeasure = () => { measureDvdSize(); requestAlphaMask(src, dvdBounceImgEl); };
     if(dvdBounceImgEl.decode){
       return dvdBounceImgEl.decode().then(remeasure).catch(remeasure);
     } else {
@@ -5965,14 +6186,20 @@
   // 下面圖片庫（EDEN_E_FOLDER_ID）抓回來、裁切完成後的照片（見
   // markDvdRealImageReady() 呼叫處的完整說明）。
   if(dvdBounceImgEl){
-    trimTransparentImage(dvdBounceImgEl.src).then(setDvdBounceImageSrc);
+    // 這張內建預設圖從頭到尾不會真的顯示給使用者看（見上面完整說明），
+    // 不需要算面積縮放倍率，這裡只取 .src、不傳 areaScale 給
+    // setDvdBounceImageSrc()，維持固定高度。
+    trimTransparentImage(dvdBounceImgEl.src).then(result => setDvdBounceImageSrc(result.src));
   }
 
   // ---------- 飄動的「e」撞牆換圖（來自 EDEN_E_FOLDER_ID 那個圖片庫） ----------
-  // dvdEImages：裁切好、可以直接拿來當 <img src> 用的圖片陣列，init() 裡
-  // await 完 dvdEImagesPromise、逐一裁切完成後才會填入；在那之前（或資料夾
-  // 沒設定／是空的）維持空陣列，撞牆時直接跳過、繼續顯示原本內建的那張圖，
-  // 不影響既有行為。
+  // dvdEImages：裁切好的圖片庫陣列，init() 裡 await 完 dvdEImagesPromise、
+  // 逐一裁切完成後才會填入；在那之前（或資料夾沒設定／是空的）維持空
+  // 陣列，撞牆時直接跳過、繼續顯示原本內建的那張圖，不影響既有行為。
+  // 陣列每一項是 {src, scale} 物件（見下面 computeDvdAreaScales() 的完整
+  // 說明）：src 是可以直接當 <img src> 用的裁切後 data URL，scale 是這張
+  // 圖依「實際有色面積」相對整批照片平均值算出來的顯示縮放倍率，換圖時
+  // 兩個都要一起傳給 setDvdBounceImageSrc()。
   // dvdEImageIndex：目前顯示到陣列中的第幾張，每次撞牆 +1，用取餘數的方式
   // 繞回陣列開頭，達成「一直無限循環下去」。
   let dvdEImages = [];
@@ -5982,7 +6209,54 @@
   // 圖片這時已經是裁切完成的 data URL（本地資料），主要是讓瀏覽器先解碼
   // 一次、避免第一次顯示時的解碼延遲，不是網路下載的問題。
   function preloadDvdEImages(){
-    dvdEImages.forEach(src => { const im = new Image(); im.src = src; });
+    dvdEImages.forEach(entry => { const im = new Image(); im.src = entry.src; });
+  }
+
+  // ---------- 依「實際有色面積」平均每張飄動照片顯示的大小 ----------
+  // 使用者需求：飄動物件顯示的每一張照片，去背後真正「有顏色」的可視面積
+  // 差異很大——例如細長的樹枝，去背後剩下的實際圖案面積遠比一張塞滿整個
+  // 畫布的照片小很多；如果統一用同一個固定高度顯示，視覺上會覺得「樹枝
+  // 那張明顯比較不明顯、比較小」。
+  // 做法：整批圖片庫都裁切完成、每一張的 coverage（實際有色像素佔裁切後
+  // 矩形面積的比例，見 trimLoadedImage() 的完整說明）都算出來之後，取
+  // 這一批「有效 coverage」的平均值當基準（用實際這批照片自己的平均，而
+  // 不是寫死一個常數，符合「去平均每一張的大小」的需求，不管照片庫換成
+  // 哪一批照片，基準都會自動跟著調整）：
+  //   - coverage 低於平均的（畫面稀疏，例如細枝）→ 縮放倍率 > 1，顯示得
+  //     比原本大
+  //   - coverage 高於平均的（畫面飽滿，例如塞滿畫面的照片）→ 縮放倍率 < 1，
+  //     顯示得比原本小
+  // 兩者互相抵銷之後，使用者撞牆時看到的每一張照片，肉眼看得到的實際
+  // 圖案面積會大致平均，不會再因為照片本身疏密不同而忽大忽小。
+  // 縮放是套在 CSS 的 height 上（見 .dvd-bounce-img 的 --dvd-area-scale
+  // 用法，width:auto 會自動跟著等比例縮放），因此「顯示面積」的縮放倍率
+  // 其實是 scale 的平方——用 sqrt(平均值 / 自己的 coverage) 換算，縮放完
+  // 之後「顯示面積 × 自己的 coverage」這個乘積，理論上每一張都會趨近同一
+  // 個數值，達到「平均」的效果。
+  // 縮放倍率夾在 [DVD_AREA_SCALE_MIN, DVD_AREA_SCALE_MAX] 之間，避免極端
+  // 稀疏（例如幾乎全透明、只剩一兩條細線的圖，理論倍率會大到不成比例）或
+  // 極端飽滿的照片被縮放到不合理的大小。
+  // coverage 是 null 的項目（裁切失敗、整張透明等，見 trimTransparentImage()
+  // 的說明）不參與平均值計算，縮放倍率固定給 1，維持原本固定高度的行為。
+  const DVD_AREA_SCALE_MIN = 0.65;
+  const DVD_AREA_SCALE_MAX = 1.7;
+  function computeDvdAreaScales(entries){
+    const valid = entries.filter(e => e && typeof e.coverage === 'number' && e.coverage > 0);
+    if(!valid.length){
+      // 這批圖沒有任何一張算得出 coverage（理論上很少見）：全部維持縮放
+      // 倍率 1，等同沒有這套機制時的原本固定高度行為。
+      return entries.map(e => ({ src: (e && e.src) || e, scale: 1 }));
+    }
+    const avgCoverage = valid.reduce((sum, e) => sum + e.coverage, 0) / valid.length;
+    return entries.map(e => {
+      const src = (e && e.src) || e;
+      if(!e || typeof e.coverage !== 'number' || e.coverage <= 0){
+        return { src, scale: 1 };
+      }
+      let scale = Math.sqrt(avgCoverage / e.coverage);
+      scale = Math.min(DVD_AREA_SCALE_MAX, Math.max(DVD_AREA_SCALE_MIN, scale));
+      return { src, scale };
+    });
   }
 
   // 撞牆那一刻呼叫：換下一張圖，繞到陣列尾端就回到開頭，一直循環下去。
@@ -6006,7 +6280,8 @@
     }
     dvdEImageLastChangeAt = now;
     dvdEImageIndex = (dvdEImageIndex + 1) % dvdEImages.length;
-    setDvdBounceImageSrc(dvdEImages[dvdEImageIndex]);
+    const nextEntry = dvdEImages[dvdEImageIndex];
+    setDvdBounceImageSrc(nextEntry.src, nextEntry.scale);
   }
   // =====================================================================
   // ⚠️ 以下這段（末速度偵測 + 定速回穩規則）已經跟使用者來回確認、調到
@@ -6177,7 +6452,12 @@
     if(detailPage.classList.contains('active')){
       if(!detailImageWrap.classList.contains('show')) return [];
       const r = detailImageWrap.getBoundingClientRect();
-      return (r.width > 0 && r.height > 0) ? [r] : [];
+      if(r.width <= 0 || r.height <= 0) return [];
+      // 詳情頁大圖本身也可能是「去背過的異形照片」，撞牆才需要用上它實際
+      // 的像素遮罩，不是矩形——idempotent，遮罩已經在建立中或已經就緒都
+      // 不會重複觸發（見上面 requestAlphaMask() 的完整說明）。
+      requestAlphaMask(detailImage.src, detailImage);
+      return [{ rect: r, mask: getCachedAlphaMask(detailImage.src) }];
     }
 
     // 首頁格子頁：飄動的 e 在首頁不跟任何縮圖硬碰撞，行為比照 preview 頁
@@ -6255,25 +6535,38 @@
   // 方向（撞到左右邊 vs 撞到上下邊），再用兩者中心點的相對位置決定要把
   // dvd 往哪邊推出去、哪個方向分量要翻轉。跟撞螢幕邊界共用同一套視覺/震動/
   // 衰減效果，只是牆壁換成圖片的實際邊緣。
+  //
+  // o 現在是 { rect, mask } —— rect 是矩形（廣義相位，快速排除完全沒交集
+  // 的情況、也用來算推出去的方向跟距離），mask 是這張圖去背後的實際像素
+  // 遮罩（窄義相位，見上面 pixelShapesOverlap() 的完整說明）。矩形重疊只是
+  // 「有可能撞到」的候選，還要再確認兩邊真正不透明的像素有沒有真的疊在一起，
+  // 沒有疊到就直接放行，不觸發下面的反彈／推出邏輯，讓 dvd 可以自由穿過
+  // 兩邊圖案的透明區域，只有真的碰到圖案本身才會彈開。
   function resolveDvdObstacleCollision(o, timestamp){
+    const rect = o.rect;
     const dvdLeft = dvdX, dvdRight = dvdX + dvdW, dvdTop = dvdY, dvdBottom = dvdY + dvdH;
-    const overlapX = Math.min(dvdRight, o.right) - Math.max(dvdLeft, o.left);
-    const overlapY = Math.min(dvdBottom, o.bottom) - Math.max(dvdTop, o.top);
+    const overlapX = Math.min(dvdRight, rect.right) - Math.max(dvdLeft, rect.left);
+    const overlapY = Math.min(dvdBottom, rect.bottom) - Math.max(dvdTop, rect.top);
     if(overlapX <= 0 || overlapY <= 0) return false;
 
+    const dvdMaskEntry = getCachedAlphaMask(dvdBounceImgEl && dvdBounceImgEl.src);
+    if(!pixelShapesOverlap(dvdLeft, dvdTop, dvdW, dvdH, dvdRotationDeg, dvdMaskEntry, rect.left, rect.top, rect.width, rect.height, o.mask)){
+      return false; // 矩形雖然重疊，但兩邊實際去背過的圖案本身還沒真的碰到，不算撞牆
+    }
+
     const dvdCenterX = dvdX + dvdW / 2, dvdCenterY = dvdY + dvdH / 2;
-    const oCenterX = (o.left + o.right) / 2, oCenterY = (o.top + o.bottom) / 2;
+    const oCenterX = (rect.left + rect.right) / 2, oCenterY = (rect.top + rect.bottom) / 2;
 
     // 方向一律馬上翻好（不等滑動效果跑完），這樣不管接下來是直接貼齊還是
     // 要跑滑出動畫，離開這個函式的當下方向就已經是正確的、之後的物理
     // 迴圈可以直接沿用，不用另外等狀態同步。
     let targetX = dvdX, targetY = dvdY;
     if(overlapX < overlapY){
-      if(dvdCenterX < oCenterX){ targetX = o.left - dvdW; dvdDirX = -Math.abs(dvdDirX); }
-      else{ targetX = o.right; dvdDirX = Math.abs(dvdDirX); }
+      if(dvdCenterX < oCenterX){ targetX = rect.left - dvdW; dvdDirX = -Math.abs(dvdDirX); }
+      else{ targetX = rect.right; dvdDirX = Math.abs(dvdDirX); }
     } else {
-      if(dvdCenterY < oCenterY){ targetY = o.top - dvdH; dvdDirY = -Math.abs(dvdDirY); }
-      else{ targetY = o.bottom; dvdDirY = Math.abs(dvdDirY); }
+      if(dvdCenterY < oCenterY){ targetY = rect.top - dvdH; dvdDirY = -Math.abs(dvdDirY); }
+      else{ targetY = rect.bottom; dvdDirY = Math.abs(dvdDirY); }
     }
 
     const dist = Math.hypot(targetX - dvdX, targetY - dvdY);
@@ -9309,8 +9602,13 @@
     // 裁完的版本才存進 dvdEImages、預先解碼好，撞牆換圖的當下不用臨時等待。
     dvdEImagesPromise.then(urls => {
       return Promise.all(urls.map(trimTransparentImage));
-    }).then(trimmedUrls => {
-      dvdEImages = trimmedUrls;
+    }).then(trimmedEntries => {
+      // trimmedEntries 是這一批圖片各自的 {src, coverage} 結果（見
+      // trimTransparentImage() 的說明）；這裡先統一算出每一張的顯示縮放
+      // 倍率（見 computeDvdAreaScales() 的完整說明），dvdEImages 存的是
+      // {src, scale} 物件，之後撞牆換圖只需要直接讀出來用，不用每次都
+      // 重新計算。
+      dvdEImages = computeDvdAreaScales(trimmedEntries);
       preloadDvdEImages();
       // 圖片庫真的準備好了：馬上把飄動物件目前顯示的圖換成陣列裡的第一張
       // 真實照片，不用等使用者真的撞到牆才第一次換圖，等這張圖真的
@@ -9322,7 +9620,8 @@
       // 空陣列時 dvdEImagesPromise 也會是空陣列，這裡多一層保險）：
       // 一律不放行顯示，維持隱藏，絕不退回顯示內建黃色 e 預設圖。
       if(dvdEImages.length){
-        setDvdBounceImageSrc(dvdEImages[dvdEImageIndex]).then(markDvdRealImageReady);
+        const firstEntry = dvdEImages[dvdEImageIndex];
+        setDvdBounceImageSrc(firstEntry.src, firstEntry.scale).then(markDvdRealImageReady);
       }
     }).catch(() => {
       // 圖片庫抓取或裁切整個失敗（資料夾沒設定、離線等）：這裡刻意不呼叫
