@@ -6419,10 +6419,29 @@
   // 1.8 倍）改變時，這個尺寸也會跟著變，量測一次存起來，之後每次撞牆
   // 判斷都直接讀這個值，不用每一影格都重新觸發一次 layout。
   let dvdW = 0, dvdH = 0;
+  // 這裡刻意不能用 dvdBounce.getBoundingClientRect()：.dvd-bounce 本身的
+  // transform 就是 translate(x,y) rotate(dvdRotationDeg)（見上面
+  // dvdTransformString()），只要呼叫這支函式的當下角度不是 0（例如剛撞牆、
+  // 旋轉衝量還沒衰減完；或撞牆換圖時 setDvdBounceImageSrc()→decode()
+  // 是非同步的，decode 真正 resolve、觸發 remeasure() 的那一刻，物件很可能
+  // 已經因為同一次撞擊在轉了——見下面 cycleDvdEImage() 呼叫點的説明），
+  // getBoundingClientRect() 量到的會是「旋轉後」被撐大的外接矩形（旋轉
+  // 45 度時，正方形的外接矩形邊長會變成約 1.41 倍），不是圖片本身真正的
+  // 未旋轉尺寸。這個被撐大的 dvdW/dvdH 之後會拿去算螢幕邊界、也拿去把
+  // 撞牆取樣點換算回像素遮罩的 0~1 本地座標（見 pixelShapesOverlap()／
+  // computeDvdPixelInsets()）——一旦量錯，等於整套「像素級撞牆」判斷都
+  // 是拿錯誤的框在算，撞牆感覺起來就會變回「隔著一圈空白才撞到」，這正是
+  // 使用者回報「撞擊依舊是用周圍空白在撞擊邊界」在像素遮罩已經到位之後
+  // 還是沒改善的實際成因。
+  // 改用 offsetWidth／offsetHeight：排版尺寸，完全不受 CSS transform（含
+  // 旋轉）影響，不管當下轉到幾度，量到的永遠是圖片未旋轉時的真實寬高——
+  // 跟上面 getStableImgRect() 為了同一類「transform 造成量測失真」問題
+  // 採用的做法一致（該函式的完整說明見其上方註解）。
   function measureDvdSize(){
-    const rect = dvdBounce.getBoundingClientRect();
-    if(rect.width > 0) dvdW = rect.width;
-    if(rect.height > 0) dvdH = rect.height;
+    const w = dvdBounce.offsetWidth;
+    const h = dvdBounce.offsetHeight;
+    if(w > 0) dvdW = w;
+    if(h > 0) dvdH = h;
   }
 
   // 目前顯示在 <img> 上的圖片來源，供下面 computeDvdPixelInsets() 查詢
