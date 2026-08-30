@@ -1274,7 +1274,7 @@
        圖片庫的圖、或那張圖裁切失敗沒有 coverage 資料）就用預設值 1，
        維持原本固定高度的行為不變。width:auto 會自動跟著等比例縮放，不用
        另外處理。 */
-    height: calc(clamp(71.93px, 17.26vw, 211.00px) * var(--dvd-area-scale, 1));
+    height: calc(clamp(82.72px, 19.85vw, 242.65px) * var(--dvd-area-scale, 1));
     width:auto;
     -webkit-user-drag:none;
     -webkit-touch-callout:none;
@@ -1389,7 +1389,7 @@
     /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍，這裡再整體放大 1.3 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間 */
     .dvd-bounce-img{
       /* 同上面基礎規則一樣乘上 --dvd-area-scale，手機版跟著桌機版一起再放大約 1.1 倍，維持原本手機相對桌機的放大比例 */
-      height: calc(clamp(149.62px, 35.91vw, 438.87px) * var(--dvd-area-scale, 1));
+      height: calc(clamp(172.06px, 41.30vw, 504.70px) * var(--dvd-area-scale, 1));
     }
   }
   /* 平板縮小成桌機版的 0.85 倍。原本用「寬度介於 641~1100px 之間」來判斷
@@ -5858,7 +5858,7 @@
       }
       // 整張圖都是透明（極端情況），直接用原圖，不用多包一層 canvas；也沒有
       // 任何有色像素可以算 coverage，回傳 null 讓這張圖不參與大小平均計算
-      if(maxX < minX || maxY < minY) return { src: fallbackSrc, coverage: null };
+      if(maxX < minX || maxY < minY) return { src: fallbackSrc, coverage: null, aspect: null };
 
       let coverageBg = null; // 若下面第二輪「純色背景」判斷真的被採用，記下
                               // 估計出來的背景色，之後算 coverage 時要沿用
@@ -5922,18 +5922,29 @@
         }
       }
 
-      // 裁到的範圍等於整張圖，代表本來就沒有留白可裁（不管是透明留白還是
-      // 純色留白），直接用原圖即可，不用多包一層 canvas；coverage 這裡算好
-      // 的比例依然照樣回傳給呼叫端，不受這條「不用裁切」的捷徑影響。
-      if(minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1){
-        return { src: fallbackSrc, coverage };
-      }
+      // aspect：裁切後矩形本身的寬高比（trimW / trimH）。這張圖顯示時走的是
+      // CSS 的「固定 height、width:auto」，寬度會跟著這個寬高比自動等比例
+      // 縮放——換句話說，光看 coverage（矩形「裡面」有多滿）還不夠：兩張
+      // coverage 相同、但一張矩形是細長型（trimW/trimH 很小）、一張矩形是
+      // 寬扁型（trimW/trimH 很大），在「固定 height」的顯示方式下，寬扁型
+      // 那張的實際顯示面積、乃至於「有色像素顯示出來的面積」都會比細長型
+      // 那張大上好幾倍，光靠 coverage 補不回這個差距。下面 computeDvdAreaScales()
+      // 會把 coverage 和 aspect 兩者一起帶入計算，才能真正讓「肉眼看到的
+      // 有色面積」平均，不只是「矩形裡面的疏密程度」平均。
       const trimW = maxX - minX + 1;
       const trimH = maxY - minY + 1;
+      const aspect = trimW / trimH;
+
+      // 裁到的範圍等於整張圖，代表本來就沒有留白可裁（不管是透明留白還是
+      // 純色留白），直接用原圖即可，不用多包一層 canvas；coverage/aspect
+      // 這裡算好的數值依然照樣回傳給呼叫端，不受這條「不用裁切」的捷徑影響。
+      if(minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1){
+        return { src: fallbackSrc, coverage, aspect };
+      }
       const outCanvas = document.createElement('canvas');
       outCanvas.width = trimW; outCanvas.height = trimH;
       outCanvas.getContext('2d').drawImage(srcCanvas, minX, minY, trimW, trimH, 0, 0, trimW, trimH);
-      return { src: outCanvas.toDataURL('image/png'), coverage };
+      return { src: outCanvas.toDataURL('image/png'), coverage, aspect };
     }catch(err){
       return null; // tainted canvas 等讀取失敗，回傳 null 讓呼叫端知道要試下一種載入方式，不是「這張圖沒有留白可裁」
     }
@@ -5987,7 +5998,7 @@
   function trimTransparentImage(src){
     return trimViaFetchBlob(src)
       .catch(() => trimViaCrossOriginImg(src))
-      .catch(() => ({ src, coverage: null }));
+      .catch(() => ({ src, coverage: null, aspect: null }));
   }
 
   // ---------- 依「實際去背後的形狀邊緣」做像素級撞牆判斷 ----------
@@ -6278,43 +6289,57 @@
   // 差異很大——例如細長的樹枝，去背後剩下的實際圖案面積遠比一張塞滿整個
   // 畫布的照片小很多；如果統一用同一個固定高度顯示，視覺上會覺得「樹枝
   // 那張明顯比較不明顯、比較小」。
-  // 做法：整批圖片庫都裁切完成、每一張的 coverage（實際有色像素佔裁切後
-  // 矩形面積的比例，見 trimLoadedImage() 的完整說明）都算出來之後，取
-  // 這一批「有效 coverage」的平均值當基準（用實際這批照片自己的平均，而
-  // 不是寫死一個常數，符合「去平均每一張的大小」的需求，不管照片庫換成
-  // 哪一批照片，基準都會自動跟著調整）：
-  //   - coverage 低於平均的（畫面稀疏，例如細枝）→ 縮放倍率 > 1，顯示得
-  //     比原本大
-  //   - coverage 高於平均的（畫面飽滿，例如塞滿畫面的照片）→ 縮放倍率 < 1，
-  //     顯示得比原本小
-  // 兩者互相抵銷之後，使用者撞牆時看到的每一張照片，肉眼看得到的實際
-  // 圖案面積會大致平均，不會再因為照片本身疏密不同而忽大忽小。
-  // 縮放是套在 CSS 的 height 上（見 .dvd-bounce-img 的 --dvd-area-scale
-  // 用法，width:auto 會自動跟著等比例縮放），因此「顯示面積」的縮放倍率
-  // 其實是 scale 的平方——用 sqrt(平均值 / 自己的 coverage) 換算，縮放完
-  // 之後「顯示面積 × 自己的 coverage」這個乘積，理論上每一張都會趨近同一
-  // 個數值，達到「平均」的效果。
+  //
+  // 這張圖顯示時走的是 CSS「固定 height、width:auto」，寬度是跟著裁切後
+  // 矩形自己的寬高比（aspect = trimW/trimH，見 trimLoadedImage() 的完整
+  // 說明）自動等比例算出來的。這代表單純只看 coverage（矩形「裡面」有多
+  // 滿）並不夠：在「固定 height」的前提下，
+  //   顯示面積 ∝ height² × aspect
+  //   顯示出來的「有色面積」 ∝ 顯示面積 × coverage = height² × aspect × coverage
+  // 也就是說矩形本身的寬高比（細長 vs 寬扁）跟 coverage 一樣，都會直接
+  // 影響肉眼看到的有色面積大小；只針對 coverage 平均、完全不管 aspect，
+  // 細長型的圖片矩形（例如直向的樹枝）就算 coverage 補到跟別人一樣，
+  // 顯示出來的實際有色面積還是會偏小，這正是「現在看來不太平均」的成因。
+  //
+  // 做法：整批圖片庫都裁切完成後，改成取 coverage × aspect 這個乘積
+  // （直接對應到上面「顯示出來的有色面積 ÷ height²」這個比例常數）的平均值
+  // 當基準（用這批照片自己的平均，不寫死常數，圖庫換一批照片基準也會跟著
+  // 自動調整）：
+  //   - coverage × aspect 低於平均的（矩形細長、或畫面稀疏，例如細長的
+  //     樹枝）→ 縮放倍率 > 1，顯示得比原本大
+  //   - coverage × aspect 高於平均的（矩形寬扁、或畫面飽滿，例如塞滿畫面
+  //     的橫幅照片）→ 縮放倍率 < 1，顯示得比原本小
+  // 縮放同樣是套在 CSS 的 height 上，「顯示出來的有色面積」正比於 scale²，
+  // 用 sqrt(平均值 / 自己的 coverage×aspect) 換算縮放倍率，縮放完之後
+  // 「height² × aspect × coverage × scale²」這個乘積，每一張理論上都會
+  // 趨近同一個數值——這時比較的才是使用者真正在意的「肉眼看到的有色面積」，
+  // 不只是「矩形裡面的疏密程度」。
   // 縮放倍率夾在 [DVD_AREA_SCALE_MIN, DVD_AREA_SCALE_MAX] 之間，避免極端
-  // 稀疏（例如幾乎全透明、只剩一兩條細線的圖，理論倍率會大到不成比例）或
-  // 極端飽滿的照片被縮放到不合理的大小。
-  // coverage 是 null 的項目（裁切失敗、整張透明等，見 trimTransparentImage()
-  // 的說明）不參與平均值計算，縮放倍率固定給 1，維持原本固定高度的行為。
+  // 稀疏／細長（例如幾乎全透明、只剩一兩條細線的圖，理論倍率會大到不成
+  // 比例）或極端飽滿／寬扁的照片被縮放到不合理的大小。
+  // coverage 或 aspect 是 null／算不出來的項目（裁切失敗、整張透明等，見
+  // trimTransparentImage() 的說明）不參與平均值計算，縮放倍率固定給 1，
+  // 維持原本固定高度的行為。
   const DVD_AREA_SCALE_MIN = 0.65;
   const DVD_AREA_SCALE_MAX = 1.7;
   function computeDvdAreaScales(entries){
-    const valid = entries.filter(e => e && typeof e.coverage === 'number' && e.coverage > 0);
+    const weightOf = e => e.coverage * e.aspect;
+    const valid = entries.filter(e => e
+      && typeof e.coverage === 'number' && e.coverage > 0
+      && typeof e.aspect === 'number' && e.aspect > 0);
     if(!valid.length){
-      // 這批圖沒有任何一張算得出 coverage（理論上很少見）：全部維持縮放
-      // 倍率 1，等同沒有這套機制時的原本固定高度行為。
+      // 這批圖沒有任何一張算得出 coverage/aspect（理論上很少見）：全部
+      // 維持縮放倍率 1，等同沒有這套機制時的原本固定高度行為。
       return entries.map(e => ({ src: (e && e.src) || e, scale: 1 }));
     }
-    const avgCoverage = valid.reduce((sum, e) => sum + e.coverage, 0) / valid.length;
+    const avgWeight = valid.reduce((sum, e) => sum + weightOf(e), 0) / valid.length;
     return entries.map(e => {
       const src = (e && e.src) || e;
-      if(!e || typeof e.coverage !== 'number' || e.coverage <= 0){
+      if(!e || typeof e.coverage !== 'number' || e.coverage <= 0
+        || typeof e.aspect !== 'number' || e.aspect <= 0){
         return { src, scale: 1 };
       }
-      let scale = Math.sqrt(avgCoverage / e.coverage);
+      let scale = Math.sqrt(avgWeight / weightOf(e));
       scale = Math.min(DVD_AREA_SCALE_MAX, Math.max(DVD_AREA_SCALE_MIN, scale));
       return { src, scale };
     });
