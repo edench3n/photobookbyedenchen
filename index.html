@@ -1386,10 +1386,10 @@
     transition:none !important;
   }
   @media (max-width: 640px){
-    /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間 */
+    /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍，這裡再整體放大 1.3 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間 */
     .dvd-bounce-img{
       /* 同上面基礎規則一樣乘上 --dvd-area-scale，手機版跟著桌機版一起再放大約 1.1 倍，維持原本手機相對桌機的放大比例 */
-      height: calc(clamp(115.09px, 27.62vw, 337.59px) * var(--dvd-area-scale, 1));
+      height: calc(clamp(149.62px, 35.91vw, 438.87px) * var(--dvd-area-scale, 1));
     }
   }
   /* 平板縮小成桌機版的 0.85 倍。原本用「寬度介於 641~1100px 之間」來判斷
@@ -2399,7 +2399,7 @@
             // 一次到位顯示正確畫面，不需要再靠縮圖墊場、事後校正這些額外的
             // 過場處理。只在觸控裝置套用，桌機版不受影響，仍然用 2000px。
             detailUrlMobile: (supportsTouch && thumbBase) ? (thumbBase + '=s1200') : '',
-            thumbUrl: thumbBase ? (thumbBase + '=s700') : `https://drive.google.com/uc?export=view&id=${file.id}`, // hover 大圖預覽專用：見下方「這一輪速度優化」的說明，從 800 微調到 700
+            thumbUrl: thumbBase ? (thumbBase + '=s750') : `https://drive.google.com/uc?export=view&id=${file.id}`, // hover 大圖預覽專用：上一輪速度優化從 800 調到 700，這次使用者反應整體看起來偏小／偏糊，往回調到 750——介於兩者之間，畫質比 700 明顯提升，仍然比原本的 800 省一點下載量，維持優化的方向不變。
             // gridUrl：首頁網格縮圖實際顯示用的尺寸。網格每張圖片最終渲染出來
             // 頂多幾十到一百多 px 寬（.grid-item img { max-width:52% } 疊在
             // 本來就不大的欄位裡），用 800px 明顯是殺雞用牛刀，檔案大小是真正
@@ -2411,48 +2411,45 @@
             // ---- 這一輪速度優化 ----
             // 這是整個網格畫面裡「用量最大」的一個尺寸——網格裡每一張照片
             // 都要載入一份，張數一多，光是這個尺寸的總下載量就決定了首頁
-            // 整體跑出來的快慢。再從 400px 微調到 340px（約再小 15%，換算
-            // 面積／檔案大小大約再省三成）：網格縮圖本來就已經是縮小顯示，
-            // 又疊在最多 52% 寬的小格子裡，這個幅度的差異即使是 Retina/2x
-            // 螢幕也幾乎分辨不出來，但因為是「每張照片都要載入一次」的
-            // 尺寸，省下來的總時間相對其他單一尺寸調整更明顯，是這次優化
-            // 對「圖片庫整體看起來變快」貢獻最大的一項。跟 thumbUrl／
+            // 整體跑出來的快慢。原本從 400px 微調到 340px（約再小 15%，換算
+            // 面積／檔案大小大約再省三成）省下不少下載量，但使用者後來反應
+            // 整體圖片看起來偏小、優化得太過頭，這裡再往回調到 380px——
+            // 幅度只回補一半左右，畫質比 340px 明顯好一截，但仍然比最早的
+            // 400px 小、維持著優化的方向，不是整個復原。跟 thumbUrl／
             // tinyUrl／previewUrl 這幾個同一批調整的尺寸一樣，detailUrl／
             // detailUrlMobile（大圖詳細頁，使用者真正會放大細看的地方）
             // 刻意完全不動，把畫質預算留在使用者真的會盯著看的地方。
-            gridUrl: thumbBase ? (thumbBase + '=s340') : `https://drive.google.com/uc?export=view&id=${file.id}`,
+            gridUrl: thumbBase ? (thumbBase + '=s380') : `https://drive.google.com/uc?export=view&id=${file.id}`,
             fallbackUrl: thumbBase ? (thumbBase + '=s1600') : '', // 縮圖／原圖都失敗時的備援
             // tinyUrl：專門給 preview 頁「飄動的 e 撞到上/下邊界」觸發跳轉、但撞擊
-            // 太快或連續撞擊、且連 thumbUrl（700px）都還沒被瀏覽器快取到時
+            // 太快或連續撞擊、且連 thumbUrl（現在是 750px）都還沒被瀏覽器快取到時
             // 使用的最後備援圖。原本是 60px，檔案極小、瞬間就能顯示，但撞太快
             // 時整個畫面幾乎全是這張圖，60px 拉滿半個螢幕肉眼一看就是馬賽克，
             // 畫質完全不能看；後來改成 320px、再提升到 480px，清晰度明顯提升，
             // 即使是它被顯示出來的少數情況，看起來也不會再一眼就覺得「畫質
-            // 很差」。這一輪再微調到 420px：這張圖出現的情境本來就是「畫面
-            // 正在快速跳轉的過渡瞬間」，肉眼原本就來不及細看，這點幅度的
-            // 差異更不會被注意到，但檔案更小，需要用到它的那個瞬間能更快
-            // 顯示出來。
-            tinyUrl: thumbBase ? (thumbBase + '=s420') : `https://drive.google.com/uc?export=view&id=${file.id}`,
+            // 很差」。上一輪微調到 420px，這次跟其他幾個尺寸一起往回補一點，
+            // 調到 450px：出現的情境依舊是「畫面正在快速跳轉的過渡瞬間」，
+            // 肉眼原本就來不及細看，但整體都補一點之後看起來更一致，不會
+            // 這張特別小。
+            tinyUrl: thumbBase ? (thumbBase + '=s450') : `https://drive.google.com/uc?export=view&id=${file.id}`,
             // previewUrl：preview 跳轉頁（一打開網站看到的那個左右／上下交錯
             // 全版跳轉畫面）專用。這裡的照片撞牆就換、停留時間很短，肉眼幾乎
             // 來不及看清細節，卻要求跟大圖詳細頁一樣載 2000px 原始尺寸的
             // thumbnail，這正是「一打開網站，preview 畫面第一批照片跑出來
             // 明顯慢一拍」的主因——不只手機，桌機同樣受影響。
-            // 手機（supportsTouch）沿用原本已經調校過、這一輪再微調的 800px：
-            // object-fit:cover 撐滿半個螢幕高度，這個幅度的差異在肉眼可辨識
-            // 的程度上跟原本的 900px 幾乎沒有分別，但檔案更小、下載跟解碼
-            // 都更快。
+            // 手機（supportsTouch）原本是 900px，上一輪調到 800px；這次跟
+            // 其他尺寸一起往回補一點，調到 850px——介於兩者之間，肉眼可辨
+            // 的畫質比 800px 好一點，仍然比最早的 900px 省一些下載量。
             // 桌機／平板原本完全沒有專屬的 previewUrl，會直接落到下面
             // fallback 清單的下一個候選 detailUrl（=s2000），等於用「大圖
             // 詳細頁在看細節」才需要的尺寸，去餵一個只佔螢幕一半寬、而且
             // 隨時會被下一張蓋過去的跳動畫面，白白多下載、多等好幾倍的資料量。
-            // 補上桌機專屬、這一輪微調過的 1400px：欄寬是 50vw，即使是
-            // Retina/2x 螢幕，1400px 仍然遠超過那個寬度實際需要的像素，
-            // 清晰度跟原本的 1600px 版本並排比較幾乎看不出差異，但檔案大小
-            // 更小，能讓第一畫面更快出現——這裡的取捨原則跟上面 gridUrl／
-            // tinyUrl 一致：畫面停留短、使用者來不及細看的地方多省一點，
-            // detailUrl／detailUrlMobile 那種會被放大細看的地方完全不動。
-            previewUrl: thumbBase ? (thumbBase + (supportsTouch ? '=s800' : '=s1400')) : ''
+            // 補上桌機專屬的尺寸，原本是 1600px，上一輪調到 1400px，這次
+            // 同樣往回補一點到 1500px：欄寬是 50vw，即使是 Retina/2x 螢幕，
+            // 1500px 仍然遠超過那個寬度實際需要的像素，這裡的取捨原則跟上面
+            // gridUrl／tinyUrl 一致：畫面停留短、使用者來不及細看的地方，
+            // 優化的方向維持不變，只是這次把幅度往回收一些。
+            previewUrl: thumbBase ? (thumbBase + (supportsTouch ? '=s850' : '=s1500')) : ''
           };
         });
 
@@ -6636,6 +6633,11 @@
   // 大衰減越快）——不管當下這一影格捲動量有多突然，位移都會被攤平成一段
   // 平滑的曲線，像風真的吹過去、然後慢慢停下來，不會有任何單一影格暴衝
   // 的瞬間跳動。
+  // 追蹤飄動迴圈自己上一次看到的視窗尺寸——只用來判斷「這一影格視窗是不是
+  // 真的被外部（例如手機網址列收合、瀏覽器介面重新排版）縮小過」，跟下面
+  // stepDvdBounce() 裡「像素內縮值」分開判斷，完整理由見該處判斷式上方的
+  // 說明。
+  let dvdLastViewportW = window.innerWidth, dvdLastViewportH = window.innerHeight;
   let dvdLastScrollY = window.scrollY;
   let dvdNudgeVY = 0; // 目前累積的「風速」殘留值（px/s），每影格自然衰減，見 stepDvdBounce() 內的套用處
   const DVD_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例（比上一版 1.4 加大）
@@ -6827,7 +6829,26 @@
     // 速度移動撞上去的，這一影格只靜靜地把座標夾回邊界內，不觸發撞擊、
     // 不跳圖；真正由球自己這一影格的移動撞到邊界，才會進到下面正常的
     // 撞牆流程。
-    if(dvdX < minX || dvdX > maxX || dvdY < minY || dvdY > maxY){
+    //
+    // 這個判斷式原本只考慮「視窗尺寸變小」這一種外部原因，但上面
+    // computeDvdPixelInsets() 現在會逐影格重新算，只要物件還在旋轉，
+    // 內縮值本身就會持續變動——完全沒有視窗縮小、只是這一影格剛好轉到
+    // 內縮值變小，也會讓「球停在邊界上的舊位置」瞬間變成落在新邊界外面，
+    // 觸發這裡的「靜默夾回＋不移動」分支。跟真正的視窗縮小不一樣的是：
+    // 下一影格內縮值可能又變大、球又暫時落回邊界內，接著又因為繼續旋轉
+    // 再次縮小……每一次觸發這個分支都完全不移動（下面 dvdX += 那一行
+    // 這一影格根本沒執行到），肉眼看起來就是「撞到邊界之後卡住、瞬間
+    // 不太會動」——這正是這次回報的成因，只有旋轉剛好轉到內縮值變大、
+    // 讓球重新落回邊界內的那一刻，才會恢復正常移動，看起來像「黏了一下
+    // 又放開」。
+    // 修法：只有「視窗尺寸真的變了」才算外部原因、才允許這個靜默分支
+    // 生效；純粹因為旋轉造成的內縮值變動，不能再觸發這個分支——直接讓
+    // 它落到下面正常的移動＋撞牆流程處理，該撞牆就正常撞牆、該繼續飄就
+    // 繼續飄，不會有任何一影格被跳過不動。
+    const dvdViewportResizedThisFrame = window.innerWidth !== dvdLastViewportW || window.innerHeight !== dvdLastViewportH;
+    dvdLastViewportW = window.innerWidth;
+    dvdLastViewportH = window.innerHeight;
+    if(dvdViewportResizedThisFrame && (dvdX < minX || dvdX > maxX || dvdY < minY || dvdY > maxY)){
       dvdX = clampDvd(dvdX, minX, maxX);
       dvdY = clampDvd(dvdY, minY, maxY);
       // 不改動 dvdWasScreenEdgeCollidedLastFrame：維持它原本的值，球下一次
@@ -6837,6 +6858,11 @@
       dvdRAF = requestAnimationFrame(stepDvdBounce);
       return;
     }
+    // 不是視窗縮小、純粹是旋轉造成內縮值變動：什麼都不用特別做，直接落到
+    // 下面正常的「移動→撞牆判斷」流程即可——就算這一影格開始前球剛好落在
+    // 新邊界外一點點，下面的撞牆判斷本來就會用同一組 minX/maxX/minY/maxY
+    // 正常抓到、正常夾回、該反彈就反彈，不需要另外搶在前面處理，也不會
+    // 跳過這一影格的移動。
 
     dvdX += dvdDirX * dvdSpeed * dt;
     dvdY += dvdDirY * dvdSpeed * dt;
