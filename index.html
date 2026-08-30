@@ -6040,7 +6040,28 @@
     for(let i = 0; i < mask.length; i++){
       mask[i] = data[i * 4 + 3] > PF_ALPHA_MASK_THRESHOLD ? 1 : 0;
     }
-    return { mask, w: maskW, h: maskH };
+    // 額外找出遮罩的「輪廓像素」（供下面 computeDvdPixelInsets() 用來算
+    // 撞螢幕邊界時的實際圖案最外緣，完整理由見該函式上方的說明）：只挑
+    // 「自己是實心、但上下左右四個相鄰格至少一格不是實心（含超出遮罩
+    // 範圍）」的格子——也就是圖案邊緣上的像素。不管圖案怎麼旋轉，內部
+    // 被完全包住的實心像素永遠不可能變成最外緣，篩掉它們可以把之後每一
+    // 影格要做的旋轉運算量，從整個面積的規模降到只剩周長的規模。座標
+    // 存成 0~1 的正規化比例（對齊遮罩寬高），跟 sampleAlphaMaskSolid()
+    // 用的座標系一致。
+    const boundaryPts = [];
+    for(let y = 0; y < maskH; y++){
+      const rowBase = y * maskW;
+      for(let x = 0; x < maskW; x++){
+        if(mask[rowBase + x] !== 1) continue;
+        const left = x > 0 ? mask[rowBase + x - 1] : 0;
+        const right = x < maskW - 1 ? mask[rowBase + x + 1] : 0;
+        const up = y > 0 ? mask[rowBase - maskW + x] : 0;
+        const down = y < maskH - 1 ? mask[rowBase + maskW + x] : 0;
+        if(left === 1 && right === 1 && up === 1 && down === 1) continue; // 四周都是實心＝內部像素，不可能是最外緣，跳過
+        boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
+      }
+    }
+    return { mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts) };
   }
 
   // 觸發（或直接沿用快取）某張圖片的像素遮罩建立，非同步、不阻塞呼叫端——
@@ -6166,6 +6187,10 @@
     if(!dvdBounceImgEl) return Promise.resolve();
     dvdBounceImgEl.src = src;
     dvdBounceImgEl.style.setProperty('--dvd-area-scale', (typeof areaScale === 'number' && areaScale > 0) ? areaScale : 1);
+    // 同步記錄「目前顯示的是哪一張圖」，供 computeDvdPixelInsets() 查詢
+    // 對應的像素遮罩、算撞螢幕邊界時圖案本身實際的最外緣（完整說明見
+    // 該函式上方的註解）。
+    dvdActiveImgSrc = src;
     // 量完撞牆用的矩形尺寸之後，順便觸發這張圖的像素遮罩建立（見上面
     // requestAlphaMask() 的完整說明）——撞牆判斷要用的「實際去背形狀」
     // 從這裡開始準備，不需要呼叫端另外再做任何事。
@@ -6398,6 +6423,66 @@
     const rect = dvdBounce.getBoundingClientRect();
     if(rect.width > 0) dvdW = rect.width;
     if(rect.height > 0) dvdH = rect.height;
+  }
+
+  // 目前顯示在 <img> 上的圖片來源，供下面 computeDvdPixelInsets() 查詢
+  // 對應的像素遮罩用；每次換圖（見 setDvdBounceImageSrc()）都會同步更新。
+  let dvdActiveImgSrc = '';
+
+  // ---------- 撞螢幕邊界也改用「實際圖案像素」判斷，不是外框的空白 ----------
+  // 上面 requestAlphaMask()／pixelShapesOverlap() 那套「像素遮罩 vs 像素
+  // 遮罩」原本只用在飄動物件跟頁面內照片（首頁縮圖／詳情頁大圖）的碰撞
+  // 判斷；跟螢幕四個邊界的撞牆，原本仍然單純拿「整個裁切後的矩形外框」去
+  // 判斷——去背裁切只保證外框本身沒有多餘的四周留白，外框「內部」（尤其
+  // 是圖案本身是異形、鏤空造型，或飄動時帶有旋轉角度）仍然可能留有大片
+  // 透明區域，造成「肉眼看到的圖案明明還沒真的碰到螢幕邊緣，就已經反彈」
+  // 的落差感——這正是「撞擊依舊是用周圍空白在撞擊邊界」這個回報的成因。
+  //
+  // 這裡補上：沿用同一份已經在算物件間碰撞用的像素遮罩，取出圖案的
+  // 「輪廓像素」（見 buildAlphaMaskFromSource() 裡新增的 boundary 說明），
+  // 套用目前這一影格的旋轉角度，算出圖案本身實際的上下左右最外緣，相對
+  // 外框邊緣各自內縮了多少距離（inset）。撞牆邊界檢查時，把這個內縮距離
+  // 加回允許的活動範圍——外框可以比原本多飄出螢幕 inset 這麼多，直到
+  // 圖案本身的像素真的碰到螢幕邊緣，才會觸發反彈，不再是外框一碰到就彈開。
+  // 每一影格重新算一次，是因為飄動物件會持續旋轉（見 dvdRotationDeg／
+  // stepDvdRotation()），最外緣的位置會隨旋轉角度即時改變，沒辦法只算
+  // 一次就沿用。運算量只跟圖案「輪廓」的像素數量成正比（見上面 boundary
+  // 的說明，遠小於整張遮罩的面積），每影格重算一次不會造成效能負擔。
+  // 遮罩還沒準備好（例如剛換上新圖，requestAlphaMask() 是非同步的、還沒
+  // 跑完）就傳回全 0 的 inset，等同暫時退回原本「矩形外框」的行為，不會
+  // 等待、也不會讓撞牆判斷暫時失靈。
+  function computeDvdPixelInsets(){
+    const entry = getCachedAlphaMask(dvdActiveImgSrc);
+    if(!entry || !entry.boundary || !entry.boundary.length || !dvdW || !dvdH){
+      return { left: 0, right: 0, top: 0, bottom: 0 };
+    }
+    const pts = entry.boundary;
+    const theta = dvdRotationDeg * Math.PI / 180; // 跟 CSS rotate() 同方向，直接拿本地座標旋轉即可換算成目前螢幕方向下的偏移
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for(let i = 0; i < pts.length; i += 2){
+      const lx = (pts[i] - 0.5) * dvdW; // 相對外框中心點的本地座標（尚未旋轉）
+      const ly = (pts[i + 1] - 0.5) * dvdH;
+      const rx = lx * cosT - ly * sinT; // 旋轉之後，相對外框中心點的座標
+      const ry = lx * sinT + ly * cosT;
+      if(rx < minX) minX = rx;
+      if(rx > maxX) maxX = rx;
+      if(ry < minY) minY = ry;
+      if(ry > maxY) maxY = ry;
+    }
+    if(minX > maxX || minY > maxY){
+      return { left: 0, right: 0, top: 0, bottom: 0 };
+    }
+    // 換算成「外框四邊各自內縮了多少距離」：理論上都會 >=0（旋轉不會讓
+    // 圖案的像素跑到外框範圍以外），Math.max(0, …) 純粹保底，避免極端
+    // 浮點數誤差算出負值。
+    const halfW = dvdW / 2, halfH = dvdH / 2;
+    return {
+      left: Math.max(0, minX + halfW),
+      right: Math.max(0, halfW - maxX),
+      top: Math.max(0, minY + halfH),
+      bottom: Math.max(0, halfH - maxY)
+    };
   }
 
   // ---------- 撞牆震動 ----------
@@ -6665,8 +6750,12 @@
       if(progress >= 1){ dvdSpeed = DVD_SPEED; dvdDecaying = false; }
     }
 
-    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
-    const maxX = dvdBoundMaxX(), maxY = dvdBoundMaxY();
+    // 撞螢幕邊界改用「實際圖案像素」的最外緣，不是外框本身（見上面
+    // computeDvdPixelInsets() 的完整說明）：每一影格重新算一次，是因為
+    // 飄動物件會持續旋轉，圖案最外緣的位置會跟著即時改變。
+    const dvdPixelInsets = computeDvdPixelInsets();
+    const minX = dvdBoundMinX() - dvdPixelInsets.left, minY = dvdBoundMinY() - dvdPixelInsets.top;
+    const maxX = dvdBoundMaxX() + dvdPixelInsets.right, maxY = dvdBoundMaxY() + dvdPixelInsets.bottom;
 
     // 視窗尺寸如果剛好在這個時間點縮小（例如手機網址列從收起變成重新展開、
     // 或者鎖住捲動之後瀏覽器介面重新排版——這在剛點進 preview 頁、body 被
