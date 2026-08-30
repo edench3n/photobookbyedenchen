@@ -1651,7 +1651,8 @@
   // 共用同一把 GOOGLE_API_KEY 即可（Google Drive API 的公開檔案清單查詢，
   // key 本身不綁定資料夾，同一把 key 可以查詢任何一個公開分享的資料夾）。
   const EDEN_E_FOLDER_ID = '1QXgbx5t6KC5q07gyhGL6tXqo_YUKzpKH';
-  const EDEN_E_CACHE_KEY = 'photobook-e-cache-v1:' + EDEN_E_FOLDER_ID;
+  const EDEN_E_CACHE_KEY = 'photobook-e-cache-v2:' + EDEN_E_FOLDER_ID; // v1→v2：來源縮圖尺寸從 =s240 改成 =s1600（見 fetchDvdEImages() 的說明），
+    // 版本號跟著换，才不會讓還留著舊版 sessionStorage 快取的使用者，繼續沿用裡面存的舊 =s240 網址而看不到畫質改善。
   const EDEN_E_CACHE_TTL_MS = 10 * 60 * 1000;
   // 跟下面 photosPromise 的道理完全一樣：請求越早發出去越好，不要等整份
   // script 執行到 init() 才姍姍來遲——這裡先把 Promise 存起來，真正用到
@@ -2526,20 +2527,24 @@
       if(!data.files || data.files.length === 0) return [];
 
       // 「e」在畫面上實際顯示的高度：原本落在 40~119px 之間時，240px 高的
-      // 來源圖就算是 Retina/3x 螢幕也綽綽有餘；後來這個元素整體放大過幾輪，
-      // 桌機/平板目前落在 60~178px、手機更到 97~284px，嚴格來說已經超過
-      // 240px 這個來源尺寸在高倍率螢幕上能完全無損顯示的範圍。這裡刻意
-      // 不跟著往上調：這是一個持續在飄動、很少長時間靜止不動的小型裝飾
-      // 物件，肉眼在移動中幾乎不會注意到這一點點取樣不足，維持 240 換來
-      // 的是明顯更快的下載＋裁切速度（見下面 trimTransparentImage 那段，
-      // 圖片越小，裁切要掃描的像素也越少），這筆取捨相對安全、划算。
-      // 用 thumbnailLink 這個 Google 圖片 CDN 版本，比原始檔案
+      // 來源圖就算是 Retina/3x 螢幕也綽綽有餘，所以先前一路維持 240 這個
+      // 尺寸沒有跟著調整。後來這個元素整體放大過好幾輪，桌機/平板目前
+      // 最大可以到 315px、手機更到 656px，240px 的來源圖被拉伸到這個尺寸
+      // 早就遠遠超出取樣範圍，使用者反應「都糊掉了」正是這個原因——不是
+      // 裁切／編碼過程壓縮造成的（下面裁切完是用 canvas.toDataURL('image/png')
+      // 輸出，PNG 是無損格式，不會額外損失畫質），純粹是來源圖本身解析度
+      // 不夠、被瀏覽器放大顯示時內插模糊。
+      // 改成 1600px：即使是手機版最大 656px 高、疊上 3x Retina 螢幕
+      // （656 × 3 ≈ 1968px）也已經非常接近「幾乎不需要再放大」的程度，
+      // 桌機/平板最大 315px 更是綽綽有餘；同時 1600 仍然遠小於原始檔案，
+      // 不是完全不設限，下載/裁切速度不會變得跟原圖一樣慢。用
+      // thumbnailLink 這個 Google 圖片 CDN 版本，比原始檔案
       // （drive.google.com/uc?export=view）快很多、也不會被導去「無法
       // 掃描病毒」中介頁面。沒有 thumbnailLink 的檔案（極少數情況）退回
-      // uc?export=view 當備援。
+      // uc?export=view 當備援（原始檔案本身沒有這個尺寸限制問題）。
       const urls = data.files.map(file => {
         const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
-        return thumbBase ? (thumbBase + '=s240') : `https://drive.google.com/uc?export=view&id=${file.id}`;
+        return thumbBase ? (thumbBase + '=s1600') : `https://drive.google.com/uc?export=view&id=${file.id}`;
       });
 
       writeDvdECache(urls);
