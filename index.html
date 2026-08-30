@@ -6021,24 +6021,63 @@
   const pfAlphaMaskCache = new Map();
   const pfAlphaMaskPending = new Set();
 
-  // 把「已經載入完成的圖片來源」（<img> 元素，或已解碼的 Image()）縮小畫進
-  // 一顆很小的 canvas，掃一次 alpha 色版，轉成 0/1 的像素遮罩。跟
-  // trimLoadedImage() 共用同樣的「畫進 canvas 才能讀像素」原理，只是這裡
-  // 目的是拿去做撞牆判斷、不是拿去裁圖，兩邊職責不同，故意不合併成同一支
-  // 函式；讀取失敗（tainted canvas）會直接把例外丟給呼叫端處理。
+  // 把「已經載入完成的圖片來源」（<img> 元素，或已解碼的 Image()）掃一次
+  // alpha 色版，轉成 0/1 的像素遮罩。跟 trimLoadedImage() 共用同樣的「畫進
+  // canvas 才能讀像素」原理，只是這裡目的是拿去做撞牆判斷、不是拿去裁圖，
+  // 兩邊職責不同，故意不合併成同一支函式；讀取失敗（tainted canvas）會
+  // 直接把例外丟給呼叫端處理。
+  // 這裡的縮小方式刻意不能直接 ctx.drawImage(source, 0, 0, maskW, maskH)
+  // 把原圖一口氣畫進一顆只有 PF_ALPHA_MASK_MAX_DIM（72px）的小 canvas——
+  // 瀏覽器內建的縮圖演算法在縮小比例很大時（例如原圖是兩千多 px 高的
+  // 直式照片，縮到 72px 大概是 28 倍以上的縮小率），是用「鄰域像素取
+  // 平均值」在做縮圖，去背圖案的邊緣、細節（例如筆畫收尾的尖角、樹枝
+  // 細梢、只有一兩個像素寬的突起）在平均之後，alpha 會被周圍大片透明
+  // 稀釋到門檻以下，等於直接從遮罩上消失——算出來的遮罩會比圖案實際
+  // 範圍還要往內縮一圈，但縮多少完全看「那一側剛好是細節還是實心色塊」，
+  // 不同圖案、不同邊縮的量都不一樣，這正是「每張照片都有一兩側是正常的
+  // （剛好是實心色塊那幾側），其他面依舊是空白在撞擊（剛好是細節、
+  // 突起的那幾側，被縮圖平均掉了）」這個回報的實際成因。
+  //
+  // 改成兩階段、用「像素塊內只要有一個不透明就算實心」（max-pool，不是
+  // 平均值）的方式手動縮小：先把原圖畫進一張解析度高很多的 canvas（上限
+  // capDim，遠大於最終遮罩用的 72px，但還是有上限避免極端大圖拖慢建立
+  // 遮罩的一次性運算），完整讀一次這個解析度的 alpha 值；再手動把這份
+  // 資料縮到最終的 maskW×maskH——每一個縮小後的格子，只要對應範圍內的
+  // 來源像素「有任何一個」超過透明門檻，這一格就算實心。不管圖案邊緣的
+  // 細節多細小，只要它在這個中繼解析度底下還佔得到至少一個像素，就一定
+  // 會被保留下來，不會再被平均演算法稀釋消失——遮罩因此只會等於或略小於
+  // 原本用平均值縮圖時的範圍，絕不會比圖案實際範圍更往內縮。
+  const PF_ALPHA_MASK_FULL_CAP_DIM = 800; // 中繼高解析度讀取的上限（長邊），只在建立遮罩時算一次，不影響每影格的撞牆運算量
   function buildAlphaMaskFromSource(source, naturalW, naturalH){
     if(!naturalW || !naturalH) return null;
-    const scale = Math.min(1, PF_ALPHA_MASK_MAX_DIM / Math.max(naturalW, naturalH));
-    const maskW = Math.max(2, Math.round(naturalW * scale));
-    const maskH = Math.max(2, Math.round(naturalH * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = maskW; canvas.height = maskH;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(source, 0, 0, maskW, maskH); // 縮小直接畫進小張 canvas，省掉先畫原尺寸再另外縮小的一輪運算
-    const data = ctx.getImageData(0, 0, maskW, maskH).data; // tainted canvas 的話，錯誤會在這一行丟出
+    const fullScale = Math.min(1, PF_ALPHA_MASK_FULL_CAP_DIM / Math.max(naturalW, naturalH));
+    const fullW = Math.max(1, Math.round(naturalW * fullScale));
+    const fullH = Math.max(1, Math.round(naturalH * fullScale));
+    const fullCanvas = document.createElement('canvas');
+    fullCanvas.width = fullW; fullCanvas.height = fullH;
+    const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
+    fullCtx.drawImage(source, 0, 0, fullW, fullH);
+    const fullData = fullCtx.getImageData(0, 0, fullW, fullH).data; // tainted canvas 的話，錯誤會在這一行丟出
+
+    const scale = Math.min(1, PF_ALPHA_MASK_MAX_DIM / Math.max(fullW, fullH));
+    const maskW = Math.max(2, Math.round(fullW * scale));
+    const maskH = Math.max(2, Math.round(fullH * scale));
     const mask = new Uint8Array(maskW * maskH);
-    for(let i = 0; i < mask.length; i++){
-      mask[i] = data[i * 4 + 3] > PF_ALPHA_MASK_THRESHOLD ? 1 : 0;
+    for(let my = 0; my < maskH; my++){
+      const sy0 = Math.floor(my * fullH / maskH);
+      const sy1 = Math.max(sy0 + 1, Math.floor((my + 1) * fullH / maskH));
+      for(let mx = 0; mx < maskW; mx++){
+        const sx0 = Math.floor(mx * fullW / maskW);
+        const sx1 = Math.max(sx0 + 1, Math.floor((mx + 1) * fullW / maskW));
+        let solid = 0;
+        for(let sy = sy0; sy < sy1 && !solid; sy++){
+          const rowBase = sy * fullW;
+          for(let sx = sx0; sx < sx1; sx++){
+            if(fullData[(rowBase + sx) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD){ solid = 1; break; }
+          }
+        }
+        mask[my * maskW + mx] = solid;
+      }
     }
     // 額外找出遮罩的「輪廓像素」（供下面 computeDvdPixelInsets() 用來算
     // 撞螢幕邊界時的實際圖案最外緣，完整理由見該函式上方的說明）：只挑
