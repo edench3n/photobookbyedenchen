@@ -2780,9 +2780,56 @@
   // 實際渲染大小也會跟著變，所有已經渲染出來的編號都要一起重新算一次位置。
   // 這個函式會被排進跟其他版面對齊邏輯同一個入口 syncFixedChrome()（見下方），
   // 不需要另外自己接 resize / orientationchange 事件。
+  // ---------- 修正「剛進站，飄動物件卡住不動很久，之後才又開始動」 ----------
+  // 成因：這裡原本直接 grid.querySelectorAll('.grid-item').forEach(positionGridIdxItem)——
+  // positionGridIdxItem() 每個格子都會先「讀」（thumbWrap/img 各呼叫一次
+  // getBoundingClientRect()），緊接著「寫」（idx.style.left/top）。上百個
+  // 格子這樣一路讀、寫、讀、寫地交替下去，每一次「寫」都會讓瀏覽器上一輪
+  // 量到的版面資訊失效，逼得緊接在後面的「讀」必須先同步跑一次完整的頁面
+  // 重新排版（forced synchronous layout）才拿得到正確數字——這就是經典的
+  // 「layout thrashing」，整個網格跑一輪要付出的代價，不是「量一次版面」
+  // 的成本，而是「量一次版面 × 格子數量」，網格照片一多（上百張），這一輪
+  // forEach 可能要跑到幾百毫秒甚至更久。
+  // 這一段是 renderGrid() 全部批次都建置完成後、透過 onComplete 呼叫的
+  // 「保底補一次」動作（見上面呼叫端的說明），换句話說會在使用者剛進站
+  // 沒多久、網格分批建置完的那一刻，一次性地整段同步執行——這段同步 JS
+  // 執行期間，瀏覽器沒有機會畫出下一影格，飄動的 e 那套
+  // requestAnimationFrame 迴圈（stepDvdBounce）雖然照常在背景排隊，但要
+  // 等這整段跑完才輪得到它，肉眼看到的就是「飄動物件忽然卡住不動一段
+  // 時間」；等這段終於跑完，飄動迴圈才終於接手繼續畫，看起來像「卡住很久
+  // 之後又開始動了」——這正是這次回報的成因，跟碰撞判斷、圖片庫本身都
+  // 無關，純粹是這裡的讀寫交替方式太貴。
+  // 修法：跟 renderGrid() 同一批次內「先組好、一次 appendChild」的精神一樣，
+  // 把「讀」跟「寫」拆成兩輪各自集中處理——先用一輪 forEach 把每個格子
+  // 需要的 wrapRect/imgRect 全部讀完、算好 left/top 存進陣列，讀的這一輪
+  // 完全不寫任何 style，版面不會被中途弄髒，瀏覽器只需要在第一次讀取前
+  // 排版一次；讀完之後才用第二輪 forEach 把算好的數字一次寫進去，寫的這
+  // 一輪不再讀任何版面資訊，也不會觸發強制重排。總運算量（讀幾次、寫幾次）
+  // 完全沒變，純粹是把「讀寫交替」改成「先全部讀、再全部寫」，強制重排的
+  // 次數就從「格子數量」降到最多 1 次，這一輪保底補位不再是main thread的
+  // 卡點。
   function positionAllGridIdx(){
     if(!grid) return;
-    grid.querySelectorAll('.grid-item').forEach(positionGridIdxItem);
+    if(gridRevealInFlight) return; // 理由同 positionGridIdxItem() 內的同一個判斷
+    const items = grid.querySelectorAll('.grid-item');
+    const updates = [];
+    items.forEach(item => {
+      const thumbWrap = item.querySelector('.thumb-wrap');
+      const img = thumbWrap ? thumbWrap.querySelector('img') : null;
+      const idx = item.querySelector('.idx');
+      if(!thumbWrap || !img || !idx) return;
+      if(!img.classList.contains('loaded')) return; // 理由同 positionGridIdxItem()：圖片還沒真正載入完成，尺寸不可靠
+      const wrapRect = thumbWrap.getBoundingClientRect();
+      const imgRect = img.getBoundingClientRect();
+      if(!imgRect.width || !imgRect.height) return;
+      const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
+      const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
+      updates.push({ idx, left, top });
+    });
+    updates.forEach(({ idx, left, top }) => {
+      idx.style.left = left + 'px';
+      idx.style.top = top + 'px';
+    });
   }
 
   // ---------- 首頁「滑鼠引力放大」特效（桌機版） ----------
@@ -2873,7 +2920,8 @@
         if(nodeList.length){
           magnetItemsCache = Array.from(nodeList).map(item => {
             const thumbWrap = item.querySelector('.thumb-wrap');
-            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null };
+            const idx = item.querySelector('.idx');
+            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx };
           });
         }
       }
@@ -2963,7 +3011,37 @@
         }
       }
 
-      getMagnetItems().forEach(({ item, thumbWrap, img }) => {
+      // ---------- 修正：「飄動物件移動中偶爾還會小小卡lag一下」 ----------
+      // 原本這裡是單一個 forEach，對每張照片依序做「讀 wrapRect（算跟滑鼠
+      // 的距離）→ 寫 img.style.transform → 呼叫 positionGridIdxItem()（裡面
+      // 又是讀 wrapRect/imgRect → 寫 idx.style.left/top）」——一張接一張，
+      // 讀、寫、讀、寫交替下去。上百張照片這樣跑，每一次「寫」都會讓瀏覽器
+      // 上一輪量到的版面資訊失效，逼得緊接在後面的「讀」必須先同步跑一次
+      // 完整的頁面重新排版（forced synchronous layout）才拿得到正確數字，
+      // 這正是經典的「layout thrashing」——跟上面 positionAllGridIdx() 當初
+      // 那次「剛進站，飄動物件卡住不動很久」修的是同一種成因，只是這裡是
+      // magnetFrame() 這個永遠跟著滑鼠移動、以 60fps 常態在跑的迴圈，不是
+      // 只跑一次的保底補位，所以只要滑鼠停在首頁格子上移動，這筆 layout
+      // thrashing 的成本就會每一影格重複發生一次。這個迴圈跟飄動的 e 那套
+      // stepDvdBounce() 是同一個主執行緒、同一輪 requestAnimationFrame 批次
+      // 一起跑的，這裡多花的時間會直接墊高整輪 RAF 的執行時間、容易掉幀，
+      // 掉幀之後 stepDvdBounce() 拿到的 dt 變大，飄動的 e 一次移動的距離
+      // 也跟著變大，肉眼看起來就是「移動中偶爾小小卡一下、跳一下」。
+      // 修法：跟 positionAllGridIdx() 同一個精神，把「讀」跟「寫」拆開集中
+      // 處理，不要讓它們在同一輪迴圈裡逐張穿插：
+      //   1) 第一輪只讀 wrapRect（算跟滑鼠的距離）、算出新的縮放值，不寫
+      //      任何 style，版面全程不會被弄髒。
+      //   2) 第二輪把所有照片的 img.style.transform 一次寫完（含歸零）。
+      //   3) 第三輪：idx 編號要貼齊的是「縮放後」的實際邊緣，所以一定要
+      //      等上面的 transform 真的寫進去才讀得到正確數字——這裡才需要
+      //      再讀一次 wrapRect/imgRect，但集中在同一輪讀完，不會再跟寫
+      //      交替。
+      //   4) 第四輪把算好的 idx left/top 一次寫完。
+      // 總共只需要「一次寫→一次讀」這一個交界會觸發一次強制重排，不管
+      // 網格有幾百張照片，強制重排的次數都固定是 1 次，不會再隨照片數量
+      // 線性增加。
+      const magnetPending = [];
+      getMagnetItems().forEach(({ item, thumbWrap, img, idx }) => {
         if(!img || !img.classList.contains('loaded')) return;
 
         let target = 1;
@@ -2985,21 +3063,46 @@
         if(current == null) current = 1;
         current += (target - current) * smoothFactor;
 
-        if(Math.abs(current - target) < MAGNET_SETTLE_EPS && Math.abs(target - 1) < MAGNET_SETTLE_EPS){
-          // 已經完全收斂回原始大小且穩定不動：清掉 inline transform（交還
-          // 給 CSS 預設的 scale(1)）、重新貼齊一次編號位置，之後不再需要
-          // 每一影格都重寫這張照片的 style，省下不必要的重繪。
-          if(img.style.transform){
-            img.style.transform = '';
-            positionGridIdxItem(item);
-          }
-          magnetScaleState.set(item, 1);
-          return;
-        }
+        const settled = Math.abs(current - target) < MAGNET_SETTLE_EPS && Math.abs(target - 1) < MAGNET_SETTLE_EPS;
+        // hadTransform：這張照片「這一影格開始前」是不是還帶著 inline
+        // transform——settled 情況下只有原本還有 transform 才需要真的寫一次
+        // 歸零並重新貼齊編號，已經是原始大小、且本來就沒有 inline transform
+        // 的照片，維持原本「不用每影格都碰它」的省電行為，不放進待處理清單。
+        const hadTransform = !!img.style.transform;
+        if(settled && !hadTransform) return;
+        magnetPending.push({ item, thumbWrap, img, idx, current, settled });
+      });
 
-        magnetScaleState.set(item, current);
-        img.style.transform = `scale(${current.toFixed(4)})`;
-        positionGridIdxItem(item);
+      // 寫階段：先把這一輪所有照片的 transform（含歸零）一次寫完，這一輪
+      // 完全不讀取任何版面資訊，不會被上面已經讀好的 wrapRect 弄髒。
+      magnetPending.forEach(({ item, img, current, settled }) => {
+        if(settled){
+          img.style.transform = '';
+          magnetScaleState.set(item, 1);
+        } else {
+          magnetScaleState.set(item, current);
+          img.style.transform = `scale(${current.toFixed(4)})`;
+        }
+      });
+
+      // 讀階段：上面這輪 transform 寫完之後，每張照片的編號位置才可能
+      // 真的變了（idx 貼齊的是縮放後的實際邊緣），這裡才需要重新讀一次
+      // wrapRect/imgRect——集中在同一輪讀完，不會再跟上面的寫穿插。
+      const idxUpdates = [];
+      magnetPending.forEach(({ thumbWrap, img, idx }) => {
+        if(!thumbWrap || !img || !idx) return;
+        const wrapRect = thumbWrap.getBoundingClientRect();
+        const imgRect = img.getBoundingClientRect();
+        if(!imgRect.width || !imgRect.height) return; // 極端情況（例如剛好被隱藏）保底不動
+        const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
+        const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
+        idxUpdates.push({ idx, left, top });
+      });
+
+      // 寫階段：idx 的 left/top 也集中在最後一次寫完。
+      idxUpdates.forEach(({ idx, left, top }) => {
+        idx.style.left = left + 'px';
+        idx.style.top = top + 'px';
       });
     }
 
@@ -10135,7 +10238,14 @@
     // 更新成正確值。
     dvdEImagesPromise.then(urls => {
       if(!urls.length) return Promise.reject(new Error('dvd e images empty'));
-      const firstUrl = urls[0];
+      // 每次進站隨機挑一張圖當作飄動物件的初始圖，而不是永遠固定用陣列
+      // 第一張（urls[0]）——同時把 dvdEImageIndex 一起設成這個隨機挑到的
+      // 索引，讓下面「dvdEImageIndex === 0 才回填」的保底判斷、以及之後
+      // cycleDvdEImage() 撞牆換圖的起點，都跟畫面上實際顯示的這張圖對得上，
+      // 不會用「陣列第 0 張」這個過時假設去誤判或誤蓋掉使用者當下看到的圖。
+      const initialIndex = Math.floor(Math.random() * urls.length);
+      dvdEImageIndex = initialIndex;
+      const firstUrl = urls[initialIndex];
       dvdEImages = [{ src: firstUrl, scale: 1 }];
 
       // ---------- 修正「隔很久才出來」之一：第一次出現先用小尺寸縮圖 ----------
@@ -10183,7 +10293,7 @@
           // 再把畫面上已經換掉的圖蓋回這張第一張圖。
           trimTransparentImage(firstUrl).then(firstTrimmed => {
             dvdEImages[0] = { src: firstTrimmed.src, scale: 1 };
-            if(dvdEImageIndex === 0){
+            if(dvdEImageIndex === initialIndex){
               setDvdBounceImageSrc(firstTrimmed.src, 1);
             }
           });
