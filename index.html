@@ -10138,13 +10138,23 @@
       return trimDvdEImagesStaggered(urls).then(trimmedEntries => {
         dvdEImages = computeDvdAreaScales(trimmedEntries);
         preloadDvdEImages();
-        // 如果目前還停在剛剛快速顯示的第一張（使用者還沒撞牆換過圖），
-        // 把它的縮放倍率從暫時的 1 更新成整批算出來的正確倍率，讓大小
-        // 趨於一致；直接改 CSS 自訂屬性即可，不會有任何跳動或重新觸發
-        // 進場動畫。
-        if(dvdEImageIndex === 0 && dvdEImages.length && dvdBounceImgEl){
-          dvdBounceImgEl.style.setProperty('--dvd-area-scale', dvdEImages[0].scale);
-        }
+        // ---------- 修正：「lag完之後飄動物件忽然變大」 ----------
+        // 這裡原本假設「使用者還沒撞牆換過圖時，直接把目前這張的
+        // --dvd-area-scale 從暫時值 1 改成整批算出來的正確倍率，只是改一個
+        // CSS 自訂屬性，不會有任何跳動」——這個假設是錯的：.dvd-bounce-img
+        // 的 height 是 calc(...* var(--dvd-area-scale))，而且這條 height
+        // 本身完全沒有 transition（只有 transform／opacity 有），所以改這個
+        // 自訂屬性會讓瀏覽器立即、一次到位地套用新的高度，沒有任何過渡，
+        // 視覺上就是「忽然變大/變小」的一次瞬間跳動。而這整批圖片的抓取＋
+        // 裁切＋計算，正是使用者一開始說的「lag」那段背景運算，兩件事幾乎
+        // 同時發生，看起來就是「lag完，飄動物件緊接著忽然放大」。
+        // 修法：不要回頭去改「目前正在畫面上顯示」的這張圖——只需要把算好
+        // 的正確倍率留在 dvdEImages 這份資料裡即可（上面 computeDvdAreaScales()
+        // 已經做完），下一次飄動物件撞牆真的換到別張圖時，cycleDvdEImage()
+        // 本來就會用 dvdEImages[i].scale 帶出正確倍率、跟著「整張圖一起換掉」
+        // 一起出現，不會顯得突兀。目前這張最多就是暫時維持一開始的預設大小
+        // （scale 1）直到它下一次真的被換掉為止，肉眼幾乎感覺不到差異，總比
+        // 平白無故在原地忽然變大好。
       });
     }).catch(() => {
       // 圖片庫抓取或裁切整個失敗（資料夾沒設定、離線、空陣列等）：這裡
