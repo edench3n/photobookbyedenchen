@@ -6688,8 +6688,8 @@
   // 說明）：src 是可以直接當 <img src> 用的裁切後 data URL，scale 是這張
   // 圖依「實際有色面積」相對整批照片平均值算出來的顯示縮放倍率，換圖時
   // 兩個都要一起傳給 setDvdBounceImageSrc()。
-  // dvdEImageIndex：目前顯示到陣列中的第幾張，每次撞牆 +1，用取餘數的方式
-  // 繞回陣列開頭，達成「一直無限循環下去」。
+  // dvdEImageIndex：目前顯示到陣列中的第幾張。每次撞牆改用隨機挑選（見
+  // 下面 pickNextDvdEImageIndex() 的完整說明），不再是單純按順序 +1。
   let dvdEImages = [];
   let dvdEImageIndex = 0;
 
@@ -6850,9 +6850,9 @@
     });
   }
 
-  // 撞牆那一刻呼叫：換下一張圖，繞到陣列尾端就回到開頭，一直循環下去。
-  // 圖片庫是空的（資料夾沒設定、還沒抓回來、或抓取失敗）時直接不做任何事，
-  // 畫面上維持原本那張內建的圖，行為等同這個功能沒有啟用過。
+  // 撞牆那一刻呼叫：換下一張圖。圖片庫是空的（資料夾沒設定、還沒抓回來、
+  // 或抓取失敗）時直接不做任何事，畫面上維持原本那張內建的圖，行為等同
+  // 這個功能沒有啟用過。
   //
   // 快速連續撞擊的處理：跟上面 preview 頁「撞上/下緣切照片」用的是同一套
   // 規則（見 DVD_PREVIEW_RAPID_MS / handleDvdPreviewEdgeHit 那段的完整
@@ -6863,6 +6863,37 @@
   // 不會被逼著用比預期更快的速度狂閃過一整輪圖片庫。
   const DVD_E_IMAGE_RAPID_MS = 450;
   let dvdEImageLastChangeAt = 0;
+
+  // ---------- 換圖順序：從「照順序一張一張往下」改成「隨機挑，但最近
+  // DVD_E_IMAGE_NO_REPEAT_COUNT 張不重複」----------
+  // 使用者需求：每次撞牆想看到的下一張是隨機的，不要固定按陣列順序輪流；
+  // 但如果純粹每次都完全隨機（不排除任何東西），機率上很容易連續兩三次
+  // 撞到同一張、或同一批圖在短時間內反覆出現，使用者體感上會覺得「怎麼
+  // 又是這張」。這裡額外維護一個「最近顯示過的索引」小佇列
+  // （dvdEImageRecentHistory，最新的排在陣列尾端），每次要挑下一張時，先
+  // 把最近這幾張排除掉，再從剩下的裡面隨機挑一張——這樣「隨機」跟「四五
+  // 張之內不會重複到同一張」兩個需求可以同時滿足。
+  // DVD_E_IMAGE_NO_REPEAT_COUNT：要排除最近幾張，數字越大，重複到同一張
+  // 所需間隔的撞擊次數越多（也就是需要圖庫張數 > 這個數字，才排得出候選）。
+  // 圖庫張數不夠多（小於等於這個數字）時，excludeCount 會自動降低，最多
+  // 只排除到「陣列長度 - 1」張，保證永遠至少留一張可選、不會卡住。
+  const DVD_E_IMAGE_NO_REPEAT_COUNT = 6;
+  let dvdEImageRecentHistory = [];
+  function pickNextDvdEImageIndex(){
+    const n = dvdEImages.length;
+    if(n <= 1) return 0;
+    const excludeCount = Math.min(DVD_E_IMAGE_NO_REPEAT_COUNT, n - 1);
+    const excludeSet = new Set(dvdEImageRecentHistory.slice(-excludeCount));
+    // 理論上隨機挑幾次就會挑到不在排除名單裡的索引；guard 純粹防呆，避免
+    // 極端情況（理論上不會發生）造成無限迴圈。
+    let candidate = Math.floor(Math.random() * n);
+    let guard = 0;
+    while(excludeSet.has(candidate) && guard < 50){
+      candidate = Math.floor(Math.random() * n);
+      guard++;
+    }
+    return candidate;
+  }
   function cycleDvdEImage(){
     if(!dvdEImages.length || !dvdBounceImgEl) return;
     const now = performance.now();
@@ -6870,7 +6901,11 @@
       return; // 離上一次真正換圖太近，當作同一次連續撞擊，忽略、不換圖
     }
     dvdEImageLastChangeAt = now;
-    dvdEImageIndex = (dvdEImageIndex + 1) % dvdEImages.length;
+    dvdEImageIndex = pickNextDvdEImageIndex();
+    dvdEImageRecentHistory.push(dvdEImageIndex);
+    if(dvdEImageRecentHistory.length > DVD_E_IMAGE_NO_REPEAT_COUNT){
+      dvdEImageRecentHistory.shift(); // 只需要留最近這幾張，舊的自然淘汰
+    }
     const nextEntry = dvdEImages[dvdEImageIndex];
     setDvdBounceImageSrc(nextEntry.src, nextEntry.scale);
   }
