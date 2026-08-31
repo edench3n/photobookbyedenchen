@@ -1663,8 +1663,10 @@
   // 共用同一把 GOOGLE_API_KEY 即可（Google Drive API 的公開檔案清單查詢，
   // key 本身不綁定資料夾，同一把 key 可以查詢任何一個公開分享的資料夾）。
   const EDEN_E_FOLDER_ID = '1QXgbx5t6KC5q07gyhGL6tXqo_YUKzpKH';
-  const EDEN_E_CACHE_KEY = 'photobook-e-cache-v2:' + EDEN_E_FOLDER_ID; // v1→v2：來源縮圖尺寸從 =s240 改成 =s1600（見 fetchDvdEImages() 的說明），
-    // 版本號跟著换，才不會讓還留著舊版 sessionStorage 快取的使用者，繼續沿用裡面存的舊 =s240 網址而看不到畫質改善。
+  const EDEN_E_CACHE_KEY = 'photobook-e-cache-v3:' + EDEN_E_FOLDER_ID; // v1→v2：來源縮圖尺寸從 =s240 改成 =s1600；
+    // v2→v3：再從 =s1600 微調成 =s1400，理由同上一次升版——版本號跟著换，
+    // 才不會讓還留著舊版 sessionStorage 快取的使用者，繼續沿用裡面存的舊 =s1600 網址，完全吃不到這次調整的效果。
+    // （見 fetchDvdEImages() 內對應的完整說明）
   const EDEN_E_CACHE_TTL_MS = 10 * 60 * 1000;
   // 跟下面 photosPromise 的道理完全一樣：請求越早發出去越好，不要等整份
   // script 執行到 init() 才姍姍來遲——這裡先把 Promise 存起來，真正用到
@@ -2592,9 +2594,24 @@
       // （drive.google.com/uc?export=view）快很多、也不會被導去「無法
       // 掃描病毒」中介頁面。沒有 thumbnailLink 的檔案（極少數情況）退回
       // uc?export=view 當備援（原始檔案本身沒有這個尺寸限制問題）。
+      //
+      // ---------- 再往下修一點點：1600px → 1400px ----------
+      // trimLoadedImage() 裡真正花時間的幾步（drawImage 畫進 canvas、
+      // 最後 toDataURL('image/png') 編碼輸出）運算量是跟著來源圖的像素
+      // 總量线性增加的，1600px 改 1400px，像素量少了大約 24%
+      // （1400²/1600² ≈ 0.766），這幾步對應也會快上約兩到三成，網路
+      // 下載/解碼的時間同樣受惠。找邊界用的取樣（SCAN_MAX_DIM，見下面
+      // trimLoadedImage() 的說明）本來就已經統一縮到 400px 掃描，不受
+      // 來源解析度影響，所以這裡調整完全不影響「找留白邊界」的準確度。
+      // 只小幅下修（-12.5%），不是打回舊的 240px：1400px 疊上手機版
+      // 最大 656px 高、3x Retina（656 × 3 ≈ 1968px）雖然不像 1600px
+      // 那樣幾乎不用再放大，但仍然遠遠超出 240px 那次讓使用者反應「都
+      // 糊掉了」的程度，肉眼幾乎分辨不出跟 1600px 的差異，只有在「手機
+      // 版飄動物件剛好放到最大、又剛好是 3x 螢幕」這種最極端的情況下，
+      // 才有極輕微、幾乎看不出來的差距。
       const urls = data.files.map(file => {
         const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
-        return thumbBase ? (thumbBase + '=s1600') : `https://drive.google.com/uc?export=view&id=${file.id}`;
+        return thumbBase ? (thumbBase + '=s1400') : `https://drive.google.com/uc?export=view&id=${file.id}`;
       });
 
       writeDvdECache(urls);
@@ -10399,6 +10416,30 @@
           dvdReadyForInitialReveal = true;
           attemptInitialReveal();
         })
+        // ---------- 修正：「剛開始飄動物件還會小放大一下、還是lag卡頓」 ----------
+        // 成因：上面 attemptInitialReveal() 一放行，dvdBounce 就會立刻套用
+        // dvd-reveal 這個 class，開始跑 .6s 的回彈放大進場動畫（見 CSS
+        // .dvd-bounce.dvd-reveal 的說明，revealInitialChrome() 裡 650ms 後
+        // 才會拿掉這個 class）——但緊接在這個 .then() 之後，原本馬上就會
+        // 呼叫 trimDvdEImagesStaggered() 開始處理圖片庫第一張圖：這一步
+        // 底層 trimTransparentImage()／trimLoadedImage() 需要對 canvas 做
+        // drawImage、getImageData、以及最花時間的 toDataURL('image/png')
+        // 編碼，是一段會真的佔用主執行緒一小段時間的同步運算（見
+        // trimLoadedImage() 開頭「剛進站飄動物件很LAG」那段說明）。這段
+        // 運算實際開始的時間點取決於這張圖的網路下載／解碼何時完成，
+        // 完全是不確定的——如果剛好落在使用者正在看的這 0.6 秒回彈放大
+        // 動畫期間，主執行緒被佔住的那一小段時間，會讓同一時間跑著的
+        // RAF 物理迴圈（負責位置飄動）跟著卡一下、掉幾影格，使用者看到
+        // 的就是「放大到一半忽然頓一下」，跟純粹的回彈曲線本身無關。
+        // 修法：不改動 trimTransparentImage() 本身的運算（畫質、精確度都
+        // 不受影響），只是刻意把「整批圖片庫開始處理」這件事延後到回彈
+        // 動畫確定播完之後才開始（650ms 動畫時間 + 100ms 安全緩衝），
+        // 讓這段同步運算不會有機會跟使用者正在看的進場動畫搶主執行緒。
+        // 畫面上第一次看到的飄動物件，這段延遲期間仍然是用上面已經顯示
+        // 中的 quickUrl 小圖（=s400，早就載入完成），不會有任何空白或
+        // 卡住的狀態，只是「正式高畫質版本」的無縫替換稍微晚一點點才發生，
+        // 使用者不會感覺到差異。
+        .then(() => new Promise(resolve => setTimeout(resolve, 750)))
         .then(() => {
           let firstEntryApplied = false;
           return trimDvdEImagesStaggered(orderedUrls, (idx, result) => {
