@@ -1354,9 +1354,15 @@
      這個 class 存在與否不再造成任何視覺差異，比較保守、影響範圍最小。 */
   body.initial-reveal-pending .dvd-bounce-img{
     transition: none !important;
+    transform: none !important; /* 加強保險：不只關掉 transition，連 transform 本身
+      都直接鎖死成 none，不管是不是有其他規則（包含還沒被抓到的）想在這個階段
+      對這顆圖片套用任何縮放，這裡都會被 !important 蓋掉，徹底排除「由小放大」
+      在遮罩期間出現的任何可能性。 */
   }
   .dvd-bounce.dvd-reveal .dvd-bounce-img{
     transition: none !important;
+    transform: none !important; /* 同上，dvd-reveal 這個狀態（首次放行那一刻的
+      650ms 視窗期）也一併鎖死，理由同上一條規則。 */
   }
   /* ---------- 飄動物件：真正的照片庫圖片準備好之前，強制保持隱藏 ----------
      這個元素一進站就內建掛著這個 class（見 <body> 裡 <div class="dvd-bounce
