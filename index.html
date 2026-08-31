@@ -3340,14 +3340,46 @@
     let cursor = 0;
     let cellSide = null; // null 代表還沒量過；量過一次之後就固定沿用同一個數字
 
-    function processChunk(){
+    // ---------- 修正：「頭幾秒還是會lag」真正剩下的主因 ----------
+    // 上面幾輪已經把 renderGrid() 拆成一批批（GRID_RENDER_CHUNK_SIZE 張）
+    // 排進 requestIdleCallback，理論上「應該」只在瀏覽器真的閒下來時才做——
+    // 但這裡原本的 processChunk() 沒有實際去讀 requestIdleCallback 回傳的
+    // deadline 參數，不管這一次瀏覽器實際給了多少閒置時間，一律固定做滿
+    // GRID_RENDER_CHUNK_SIZE（40）張的 createElement／掛事件監聽器才交還
+    // 主執行緒。照片一多，這一批本身要花的時間很容易就超過瀏覽器單次真正
+    // 閒置的額度，等於「掛著 requestIdleCallback 的外皮，實際上還是會一次
+    // 卡住主執行緒一段肉眼看得到的時間」；加上原本 { timeout: 300 } 這個
+    // 保底，只要 300ms 內沒被判定為閒置，也會被強制執行，進一步失去「只
+    // 在真的空閒時做」的意義。這正是使用者形容「剛進站頭幾秒還是會卡一下」
+    // 剩下沒堵到的漏洞——時間點剛好就是網格在背景建置、飄動的 e 的 RAF
+    // 迴圈、字體 swap 重排等好幾件事一起搶主執行緒的那幾秒。
+    // 修法：processChunk 改成真的接住 deadline，每建完「一張」就檢查一次
+    // deadline.timeRemaining()，低於安全門檻（3ms，留一點緩衝給瀏覽器自己
+    // 排的其他工作）就立刻停手、把剩下的排進下一次 requestIdleCallback，
+    // 不再假設「一定做得完 40 張」；同時拿掉 timeout（改成不設逾時，真的
+    // 等到閒置才做——沒有 deadline 物件的環境，例如退回 setTimeout 那條路，
+    // 才維持原本固定小批次的保底行為，確保沒有這個 API 的瀏覽器至少還是
+    // 分批執行，不會整批同步跑完）。每批至少處理 1 張，避免 deadline 一
+    // 開始就幾乎見底時卡住不前進。
+    const GRID_IDLE_TIME_MARGIN_MS = 3;
+
+    function processChunk(deadline){
       const fragment = document.createDocumentFragment();
       const batchItems = [];
-      const end = Math.min(cursor + GRID_RENDER_CHUNK_SIZE, photos.length);
-      for(; cursor < end; cursor++){
+      while(cursor < photos.length){
         const item = buildGridItem(photos[cursor], cursor);
         fragment.appendChild(item); // 先放進記憶體中的 fragment，這一批內部讀寫都不會觸發版面重排
         batchItems.push(item);
+        cursor++;
+        // 沒有 deadline（不支援 requestIdleCallback、走 setTimeout 那條退場
+        // 路徑）時，維持原本固定小批次的行為，用 GRID_RENDER_CHUNK_SIZE 當
+        // 批次大小上限；有 deadline 時，改成動態依實際剩餘閒置時間決定，
+        // 不再受這個常數限制（但也不會無限做下去，见下面的 timeRemaining 檢查）。
+        if(!deadline){
+          if(batchItems.length >= GRID_RENDER_CHUNK_SIZE) break;
+        } else if(batchItems.length >= 1 && deadline.timeRemaining() < GRID_IDLE_TIME_MARGIN_MS){
+          break; // 閒置時間快用完了，先停手，剩下的排到下一次 idle callback
+        }
       }
       grid.appendChild(fragment); // 這一批一次加進真正的 DOM，只觸發一次版面重排
 
@@ -3364,7 +3396,7 @@
 
       if(cursor < photos.length){
         if('requestIdleCallback' in window){
-          requestIdleCallback(processChunk, { timeout: 300 });
+          requestIdleCallback(processChunk); // 不設 timeout，真的等到閒置才做，不再被強制提早執行
         } else {
           setTimeout(processChunk, 16);
         }
@@ -3373,7 +3405,11 @@
       if(typeof onComplete === 'function') onComplete();
     }
 
-    processChunk();
+    if('requestIdleCallback' in window){
+      requestIdleCallback(processChunk);
+    } else {
+      processChunk();
+    }
   }
 
   function computeSafeRandomPosition(excludeRect, boxW, boxH){
