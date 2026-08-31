@@ -2800,6 +2800,70 @@
     idx.style.top = top + 'px';
   }
 
+  // ---------- 修正「頭幾秒，飄動物件三不五時卡一下」的另一個成因：每張
+  // 照片各自的 load 事件也會造成 layout thrashing ---------- 上面
+  // positionAllGridIdx() 那次「保底補一次」的批次呼叫已經修好了（先全部
+  // 讀完，再全部寫），但每一張照片「正常」載入完成時，img 的 load 事件
+  // 監聽器（見下面 buildGridItem()）是直接呼叫 positionGridIdxItem(item)——
+  // 這是「單一格子」版本，本身就是「讀（thumbWrap/img 各一次
+  // getBoundingClientRect()）→寫（idx.style.left/top）」。單獨看一張圖片
+  // 觸發一次，成本很小；但照片庫的圖片並不是一張一張間隔很久才載入完成，
+  // 常常是一小串幾乎同時（例如同時從瀏覽器快取命中、或同一批網路請求前後
+  // 腳完成）——每一張圖片自己的 load 事件都各自立刻做一次「讀→寫」，
+  // 這一張的「寫」會讓下一張緊接著的「讀」必須先同步跑一次完整重排才拿得
+  // 到正確數字，變成跟 renderGrid()／positionAllGridIdx() 原本那個問題一模
+  // 一樣的 layout thrashing，只是這次是被「一連串幾乎同時觸發的 load
+  // 事件」而不是「一次性的 forEach 迴圈」引發的——實際錄製 Performance
+  // 效能紀錄可以看到，這正是「頭幾秒」這段時間內，一個一個接連出現、
+  // 每次都要 40~76 毫秒的 load 事件長任務，飄動物件的 requestAnimationFrame
+  // 迴圈被這些長任務一個接一個排在後面，肉眼看到的就是一陣一陣的卡頓。
+  // 修法：不要在每張圖片的 load 事件裡「立刻」呼叫 positionGridIdxItem()，
+  // 改成把這張圖片先丟進一個待處理清單，用 requestAnimationFrame 排一次
+  // （如果已經排過就不重複排）——同一影格內、幾乎同時觸發的好幾個 load
+  // 事件，都只會被塞進同一份待處理清單，等到這一影格真的要畫出來之前，
+  // 才一次性地「先把清單裡全部的圖片都讀完版面尺寸，再一次性全部寫入」，
+  // 這樣不管同時有幾張圖片剛好在同一小段時間內載入完成，一整批只會觸發
+  // 最多一次強制重排，不會再隨載入圖片的數量線性增加。
+  const pendingGridIdxPositionItems = new Set();
+  let pendingGridIdxPositionRAF = null;
+  function flushPendingGridIdxPositions(){
+    pendingGridIdxPositionRAF = null;
+    if(gridRevealInFlight){
+      // 放大進場動畫還在播，尺寸暫時不可靠（理由同 positionGridIdxItem()
+      // 內的判斷）——先不清空待處理清單，排到下一影格再檢查一次，動畫
+      // 播完之後這裡自然就會補上；真正的「動畫播完保底補一次」仍然是
+      // flushPendingGridIdxAfterReveal() 負責，這裡只是避免清單被誤清空。
+      pendingGridIdxPositionRAF = requestAnimationFrame(flushPendingGridIdxPositions);
+      return;
+    }
+    const items = Array.from(pendingGridIdxPositionItems);
+    pendingGridIdxPositionItems.clear();
+    const updates = [];
+    items.forEach(item => {
+      const thumbWrap = item.querySelector('.thumb-wrap');
+      const img = thumbWrap ? thumbWrap.querySelector('img') : null;
+      const idx = item.querySelector('.idx');
+      if(!thumbWrap || !img || !idx) return;
+      if(!img.classList.contains('loaded')) return;
+      const wrapRect = thumbWrap.getBoundingClientRect();
+      const imgRect = img.getBoundingClientRect();
+      if(!imgRect.width || !imgRect.height) return;
+      const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
+      const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
+      updates.push({ idx, left, top });
+    });
+    updates.forEach(({ idx, left, top }) => {
+      idx.style.left = left + 'px';
+      idx.style.top = top + 'px';
+    });
+  }
+  function scheduleGridIdxPosition(item){
+    if(!item) return;
+    pendingGridIdxPositionItems.add(item);
+    if(pendingGridIdxPositionRAF !== null) return; // 已經排過下一影格要處理，這張圖片搭同一班車就好，不用再排一次
+    pendingGridIdxPositionRAF = requestAnimationFrame(flushPendingGridIdxPositions);
+  }
+
   // 視窗尺寸改變（換欄數、橫直切換、雙指縮放結束…）會讓每張照片重新排版、
   // 實際渲染大小也會跟著變，所有已經渲染出來的編號都要一起重新算一次位置。
   // 這個函式會被排進跟其他版面對齊邏輯同一個入口 syncFixedChrome()（見下方），
@@ -3245,11 +3309,14 @@
     img.addEventListener('load', () => {
       img.classList.add('loaded');
       // 圖片這一刻才真正知道自己渲染出來的實際大小／位置，載入完成後
-      // 立刻把這張照片對應的編號（.idx）重新定位到「照片本身」的
-      // 右下角，見下面 positionGridIdxItem()（放大進場動畫播放中會被
-      // 該函式自己的 gridRevealInFlight 保護跳過，見下面 catchUpPendingGridIdx()
-      // 的說明）。
-      positionGridIdxItem(item);
+      // 要把這張照片對應的編號（.idx）重新定位到「照片本身」的右下角，
+      // 見上面 positionGridIdxItem()（放大進場動畫播放中會被該函式自己的
+      // gridRevealInFlight 保護跳過，見下面 catchUpPendingGridIdx() 的
+      // 說明）。改用 scheduleGridIdxPosition() 排隊＋批次處理（見該函式
+      // 上方的完整說明），不要在這裡直接呼叫 positionGridIdxItem()：一
+      // 連串幾乎同時載入完成的照片，各自立刻讀寫版面尺寸會造成 layout
+      // thrashing，這正是「頭幾秒飄動物件一陣一陣卡頓」的成因之一。
+      scheduleGridIdxPosition(item);
       catchUpPendingGridIdx(item);
     });
     if(i === 0 || i === 1 || i === 3){
@@ -6146,7 +6213,7 @@
   function trimLoadedImage(img, fallbackSrc){
     try{
       const w = img.naturalWidth, h = img.naturalHeight;
-      if(!w || !h) return { src: fallbackSrc, coverage: null };
+      if(!w || !h) return Promise.resolve({ src: fallbackSrc, coverage: null });
       const srcCanvas = document.createElement('canvas');
       srcCanvas.width = w; srcCanvas.height = h;
       // willReadFrequently:true：明確告訴瀏覽器這顆 canvas 接下來會被
@@ -6207,7 +6274,7 @@
       }
       // 整張圖都是透明（極端情況），直接用原圖，不用多包一層 canvas；也沒有
       // 任何有色像素可以算 coverage，回傳 null 讓這張圖不參與大小平均計算
-      if(maxX < minX || maxY < minY) return { src: fallbackSrc, coverage: null, aspect: null };
+      if(maxX < minX || maxY < minY) return Promise.resolve({ src: fallbackSrc, coverage: null, aspect: null });
 
       let coverageBg = null; // 若下面第二輪「純色背景」判斷真的被採用，記下
                               // 估計出來的背景色，之後算 coverage 時要沿用
@@ -6302,14 +6369,40 @@
       // 純色留白），直接用原圖即可，不用多包一層 canvas；coverage/aspect
       // 這裡算好的數值依然照樣回傳給呼叫端，不受這條「不用裁切」的捷徑影響。
       if(fullMinX === 0 && fullMinY === 0 && fullMaxX === w - 1 && fullMaxY === h - 1){
-        return { src: fallbackSrc, coverage, aspect };
+        return Promise.resolve({ src: fallbackSrc, coverage, aspect });
       }
       const outCanvas = document.createElement('canvas');
       outCanvas.width = trimW; outCanvas.height = trimH;
       outCanvas.getContext('2d').drawImage(srcCanvas, fullMinX, fullMinY, trimW, trimH, 0, 0, trimW, trimH);
-      return { src: outCanvas.toDataURL('image/png'), coverage, aspect };
+      // ---------- 修正：Performance 錄製檔案實測到的長任務主因 ----------
+      // 原本這裡用 outCanvas.toDataURL('image/png')：這是「同步」API，瀏覽器
+      // 必須在目前這一次函式呼叫、目前這一影格的主執行緒上，把整張裁切後的
+      // 圖（可能到 1400px 見方）完整編碼成 PNG，還要再把編碼結果轉成 base64
+      // 文字字串（多一道轉換、資料量還會膨脹約 33%）——實際錄製一段
+      // Performance 效能紀錄後發現，這一步正是整段「飄動物件出現時卡頓」
+      // 期間耗時最長的長任務之一（單次可到 90 毫秒），因為它是完全同步、
+      // 不能被瀏覽器打斷去畫下一影格的。
+      // 改用 outCanvas.toBlob()：這是非同步 API，瀏覽器可以把 PNG 編碼這段
+      // 運算挪到背景（通常是獨立的編碼執行緒）進行，不再佔用主執行緒、也
+      // 不用再多一道 base64 轉換，編碼完成才透過 callback 回傳一個
+      // Blob，這裡直接用 URL.createObjectURL() 包成一個可以當 <img src>
+      // 使用的網址（blob: 開頭，效果跟原本 data: 開頭的網址一樣可以正常
+      // 顯示、正常被畫進其他 canvas 使用，不會有跨網域限制問題，因為畫面
+      // 上這份像素資料本來就已經是解碼過的乾淨資料）。
+      // 呼叫端（trimViaFetchBlob() / trimViaCrossOriginImg()）已經一併改用
+      // .then() 銜接這個 Promise，對外行為完全等價，只是这段編碼工作不再
+      // 卡住畫面。這裡刻意不呼叫 URL.revokeObjectURL()：這個網址接下來要
+      // 一直被拿來當作看得見的 <img src> 長期使用（不是像 fetch 那邊那種
+      // 讀完像素就能馬上釋放的暫時性 blob），提前釋放反而會讓圖片顯示壞掉；
+      // 瀏覽器會在整個分頁關閉/reload 時自動回收，不會持續累積洩漏。
+      return new Promise(resolve => {
+        outCanvas.toBlob(blob => {
+          if(!blob){ resolve({ src: fallbackSrc, coverage, aspect }); return; }
+          resolve({ src: URL.createObjectURL(blob), coverage, aspect });
+        }, 'image/png');
+      });
     }catch(err){
-      return null; // tainted canvas 等讀取失敗，回傳 null 讓呼叫端知道要試下一種載入方式，不是「這張圖沒有留白可裁」
+      return Promise.resolve(null); // tainted canvas 等讀取失敗，回傳 null 讓呼叫端知道要試下一種載入方式，不是「這張圖沒有留白可裁」
     }
   }
 
@@ -6336,10 +6429,13 @@
     }).then(blob => {
       const blobUrl = URL.createObjectURL(blob);
       return loadImageEl(blobUrl, null).then(img => {
-        const trimmed = trimLoadedImage(img, src); // 現在回傳 {src, coverage} 物件，見 trimLoadedImage() 的說明
-        URL.revokeObjectURL(blobUrl); // 已經畫進 canvas 了，不再需要這個暫存網址，馬上釋放
-        if(trimmed === null) throw new Error('read pixels failed via blob');
-        return trimmed;
+        // trimLoadedImage() 現在改成回傳 Promise（見該函式內 toBlob() 那段
+        // 的完整說明），這裡跟著改用 .then() 銜接，行為對外完全等價。
+        return trimLoadedImage(img, src).then(trimmed => {
+          URL.revokeObjectURL(blobUrl); // 已經畫進 canvas、也已經編碼完成了，不再需要這個暫存網址，馬上釋放
+          if(trimmed === null) throw new Error('read pixels failed via blob');
+          return trimmed;
+        });
       }, err => { URL.revokeObjectURL(blobUrl); throw err; });
     });
   }
@@ -6348,9 +6444,12 @@
   // 再讀取。同樣讀取失敗就 reject，讓最外層的 catch 接手退回原圖。
   function trimViaCrossOriginImg(src){
     return loadImageEl(src, 'anonymous').then(img => {
-      const trimmed = trimLoadedImage(img, src); // 現在回傳 {src, coverage} 物件，見 trimLoadedImage() 的說明
-      if(trimmed === null) throw new Error('read pixels failed via crossOrigin img');
-      return trimmed;
+      // trimLoadedImage() 現在改成回傳 Promise（見該函式內 toBlob() 那段的
+      // 完整說明），這裡跟著改用 .then() 銜接，行為對外完全等價。
+      return trimLoadedImage(img, src).then(trimmed => {
+        if(trimmed === null) throw new Error('read pixels failed via crossOrigin img');
+        return trimmed;
+      });
     });
   }
 
