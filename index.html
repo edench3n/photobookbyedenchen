@@ -6707,7 +6707,7 @@
   // （跟原本 Promise.all 最終要做的事完全一樣），但攤開在一段時間裡進行，
   // 不會再有「集中在同一小段時間內」造成的明顯卡頓。跟上面 prefetchAllInBackground()
   // / prefetchHoverThumbsInBackground() 用的是同一套排隊手法。
-  function trimDvdEImagesStaggered(urls){
+  function trimDvdEImagesStaggered(urls, onItemReady){
     return new Promise(resolve => {
       const results = new Array(urls.length);
       let i = 0;
@@ -6716,6 +6716,11 @@
         const idx = i++;
         trimTransparentImage(urls[idx]).then(result => {
           results[idx] = result;
+          // onItemReady：每處理完一張就立刻通知呼叫端，不用等整批都跑完
+          // ——供下面 init() 的「已就緒池」機制使用，讓可以撞牆換到的圖庫
+          // 隨處理進度即時變多，不用整批處理完成才一次到位（完整成因、
+          // 設計理由見 init() 內對應的完整說明）。
+          if(onItemReady) onItemReady(idx, result);
           scheduleNext();
         });
       }
@@ -10305,59 +10310,49 @@
     dvdEImagesPromise.then(urls => {
       if(!urls.length) return Promise.reject(new Error('dvd e images empty'));
       // 每次進站隨機挑一張圖當作飄動物件的初始圖，而不是永遠固定用陣列
-      // 第一張（urls[0]）——同時把 dvdEImageIndex 一起設成這個隨機挑到的
-      // 索引，讓下面「dvdEImageIndex === 0 才回填」的保底判斷、以及之後
-      // cycleDvdEImage() 撞牆換圖的起點，都跟畫面上實際顯示的這張圖對得上，
-      // 不會用「陣列第 0 張」這個過時假設去誤判或誤蓋掉使用者當下看到的圖。
+      // 第一張（urls[0]）。
       const initialIndex = Math.floor(Math.random() * urls.length);
-      dvdEImageIndex = initialIndex;
       const firstUrl = urls[initialIndex];
-      // ---------- 修正：「隔了一陣子才開始有撞擊切照片」----------
-      // 成因：上一輪修正把過渡期的暫存陣列長度改成跟正式圖庫一致，解決了
-      // 索引脫鉤的問題，但陣列裡「每一項的內容」還是全部指向同一張
-      // firstUrl（因為當下只有這一張圖裁切好了）——邏輯上撞牆換圖時
-      // dvdEImageIndex 確實有在正常遞增／繞圈，但不管換到陣列裡哪一格，
-      // 讀到的 src 都是同一個網址，畫面上自然看不出「換了張不同的照片」。
-      // 要等下面背景把整批圖庫都裁切完成、逐一替換成各自對應的裁切版
-      // 之後，撞牆換圖才會真的顯示出不同照片——圖庫張數越多、裝置效能
-      // 越弱，這段「看起來沒在換」的空窗期就越長，正是使用者回報「隔了
-      // 一陣子才開始有效果」的成因。
-      // 修法：過渡期的每一項不要全部指向同一張佔位圖，改成直接指向圖庫
-      // 裡「各自對應」的原始網址（urls[i]，還沒裁切、可能帶一點透明留白，
-      // 但那只影響撞牆邊界貼不貼合圖案，不影響「是不是換到不同照片」這件
-      // 事）。這樣使用者從第一次撞牆開始，換到的就已經是貨真價實不同的
-      // 照片，不需要等背景裁切整批跑完；下面 trimDvdEImagesStaggered()
-      // 完成後，會逐張把這裡的原始網址無縫換成裁切、去背過的正式版本，
-      // 撞牆邊界會跟著變精準，但不影響「有沒有在換照片」這件事本身。
-      dvdEImages = urls.map(u => ({ src: u, scale: 1 }));
 
-      // ---------- 修正「隔很久才出來」之一：第一次出現先用小尺寸縮圖 ----------
-      // 圖片庫來源縮圖是 =s1600（見上面 EDEN_E_CACHE_KEY 的說明，畫質好但
-      // 檔案也大很多），使用者「這一刻馬上要看到」的其實只是一個小小的飄動
-      // 物件（畫面上最大也才 300~600px 高），用得到 1600px 完整畫質的時機，
-      // 其實是「已經在畫面上飄了一陣子」之後，不是「第一次出現」那一瞬間。
-      // 第一次顯示改成先跟 Google 圖片 CDN 要一份小很多的 =s400 版本（同一張
-      // 來源圖，只是換一個尺寸參數，不會另外多打一次 Drive API），下載量大幅
-      // 減少，網路慢的情況下能明顯縮短「第一次出現」要等的時間；等這張小圖
-      // 顯示出來、使用者已經看得到飄動物件之後，才在背景把完整的 1600px
-      // 版本下載＋裁切好，用 setDvdBounceImageSrc() 原本就有的「畫面外先解碼
-      // 好才切換」機制無縫換成正式畫質，使用者不會感覺到任何跳動。沒有
-      // =s 這個尺寸參數可以替換的網址（例如備援用的 uc?export=view）就直接
-      // 沿用原網址，不受影響。
+      // ---------- 修正：「一開始進去照片一股腦亂跳，且撞擊跟切換沒有
+      // 同步」----------
+      // 成因（前幾輪修正走過的彎路）：曾經試過讓過渡期的 dvdEImages 直接
+      // 指向圖庫「原始、還沒裁切」的網址，本意是解決「隔了一陣子才開始
+      // 有撞擊切照片」——但這麼做等於讓撞牆可以換到「根本還沒準備好」的
+      // 圖，帶出兩個新問題：① 原始網址是完全沒去背裁切的大圖，不同照片
+      // 留白、長寬比差異很大，直接顯示會忽大忽小、忽寬忽窄，肉眼看起來
+      // 就是「亂跳」；② 這些原始網址完全沒有預先解碼快取，撞牆的當下才
+      // 臨時下載＋解碼一張全新的大圖，這段跟網路速度有關的非同步等待，
+      // 跟「這一影格物理迴圈判定撞牆」這個瞬間動作對不上拍，就是撞擊跟
+      // 換圖「不同步」的成因。
+      // 修法（成熟、常見的漸進式預載作法）：dvdEImages 一開始是空陣列，
+      // 只有真的「裁切去背 + 解碼」都完成的照片，才會被 push 進來；
+      // cycleDvdEImage() 永遠只從這個「已就緒池」裡面選圖，保證撞牆的
+      // 當下能立即、無延遲地換上去（早就解碼快取好了），也保證每一張
+      // 顯示出來的都是已經去背裁切過、視覺大小經過統一計算的版本，不會
+      // 忽大忽小地亂跳。已就緒池會用背景 requestIdleCallback 逐張處理
+      // （見 trimDvdEImagesStaggered()），隨處理進度慢慢長大，從一開始
+      // 可能只有 1 張可選，隨時間增加到整個圖庫——這是「剛進站不要卡頓」
+      // 跟「撞牆換圖要可靠、即時」兩者之間常見的權衡，比起「假裝全部都
+      // 能選、但選到的其實還沒準備好」要正確、扎實得多。
+      // orderedUrls 刻意把 firstUrl 排在最前面優先處理——這樣使用者最早
+      // 能撞牆換到的第一張，會跟畫面上已經用快速小圖預覽過的那張是同一
+      // 張（只是換成裁切乾淨的正式版本），不會突然跳成完全不相關的另
+      // 一張。
+      const orderedUrls = [firstUrl].concat(urls.filter((_, i) => i !== initialIndex));
+
+      // ---------- 第一次出現先用小尺寸縮圖，不用等裁切完成 ----------
+      // 圖片庫來源縮圖是 =s1600（畫質好但檔案也大很多），使用者「這一刻
+      // 馬上要看到」的其實只是一個小小的飄動物件（畫面上最大也才
+      // 300~600px 高），用得到 1600px 完整畫質的時機，其實是「已經在
+      // 畫面上飄了一陣子」之後。第一次顯示改成先跟 Google 圖片 CDN 要一份
+      // 小很多的 =s400 版本（同一張來源圖，只是換一個尺寸參數，不會另外
+      // 多打一次 Drive API），下載量大幅減少；等這張小圖顯示出來、使用者
+      // 已經看得到飄動物件之後，才在下面背景把完整畫質下載＋裁切好，
+      // 用 setDvdBounceImageSrc() 原本就有的「畫面外先解碼好才切換」機制
+      // 無縫換成正式畫質，使用者不會感覺到任何跳動。
       const quickUrl = /=s\d+$/.test(firstUrl) ? firstUrl.replace(/=s\d+$/, '=s400') : firstUrl;
 
-      // ---------- 修正「隔很久才出來」之二：第一次顯示不用等裁切完成 ----------
-      // 原本這裡是「先呼叫 trimTransparentImage() 裁完透明留白，才把裁切後
-      // 的版本設成畫面上的 src、才 markDvdRealImageReady() 放行顯示」——使用者
-      // 要等：抓圖片庫清單 + 下載原圖 + decode + canvas 裁切（就算已經改成
-      // 縮小版掃描，仍然要多花一段時間）全部跑完，才看得到飄動物件第一次
-      // 出現。裁切本身完全不是「使用者需要馬上看到」的必要條件，只是讓撞牆
-      // 邊界更貼合圖案。改成：圖片庫清單一到手，馬上把上面那張小尺寸原圖
-      // （還沒裁切）設成畫面上的 src，decode 完成就直接放行顯示——使用者看到
-      // 的等待時間，縮短到只剩「下載這張小圖＋瀏覽器解碼」這個沒辦法再省的
-      // 最低限度，不再多等一次裁切運算。裁切、換上正式畫質，都留到下面背景
-      // 裡完成，完成後無縫換上去，使用者不會看到任何一次可以感覺得到的跳動
-      // 或閃爍。
       return setDvdBounceImageSrc(quickUrl, 1)
         .then(markDvdRealImageReady)
         .then(() => {
@@ -10369,54 +10364,40 @@
           attemptInitialReveal();
         })
         .then(() => {
-          // 背景把完整畫質的原圖（firstUrl，=s1600）下載＋裁切好，裁完就
-          // 無縫換上去（見上面的完整說明），不卡在使用者第一次看到飄動
-          // 物件之前。
-          // ---------- 修正：這裡原本寫死 dvdEImages[0]，但上面暫時陣列
-          // 已經改成跟正式圖庫同樣長度、每一項都先指到同一張 firstUrl
-          // （見上面的完整說明），firstUrl 真正對應的索引其實是
-          // initialIndex（隨機挑到的那一張），不一定是 0——寫死 0 只會
-          // 更新到陣列裡剛好排在第 0 位、但很可能根本不是這張圖的那個
-          // 位置，真正顯示中的 firstUrl 那個位置反而沒被更新到完整畫質。
-          // dvdEImageIndex === initialIndex 這層判斷維持原本的保底邏輯：
-          // 萬一使用者手腳超快、這段背景工作還沒做完就已經撞牆換到別張
-          // 圖，就不要再把畫面上已經換掉的圖蓋回這張第一張圖。
-          trimTransparentImage(firstUrl).then(firstTrimmed => {
-            dvdEImages[initialIndex] = { src: firstTrimmed.src, scale: 1 };
-            if(dvdEImageIndex === initialIndex){
-              setDvdBounceImageSrc(firstTrimmed.src, 1);
+          let firstEntryApplied = false;
+          return trimDvdEImagesStaggered(orderedUrls, (idx, result) => {
+            // 每處理完一張，立刻加進「已就緒池」——池子從空的開始，隨著
+            // 處理進度慢慢長大，cycleDvdEImage() 永遠只從裡面選，保證
+            // 每一次撞牆換到的都是已經準備好、能立即顯示的圖。
+            dvdEImages.push({ src: result.src, scale: 1 });
+            if(!firstEntryApplied){
+              firstEntryApplied = true;
+              // 池子裡第一個進來的，就是 orderedUrls 排在最前面的
+              // firstUrl——也正是畫面上目前用快速小圖顯示中的那張，這裡
+              // 無縫換成裁切乾淨的正式版本，撞牆邊界也才會準確貼合圖案。
+              setDvdBounceImageSrc(result.src, 1);
             }
+          }).then(trimmedEntries => {
+            // 整批都處理完成，統一重新算一次正確的面積縮放倍率（見
+            // computeDvdAreaScales() 的完整說明，需要整批照片的平均值
+            // 才能算），套用回已就緒池——trimmedEntries 跟 dvdEImages
+            // 是用同一份 orderedUrls、同樣的處理順序累積出來的，位置
+            // 一一對應，可以直接依索引寫回。
+            const scaled = computeDvdAreaScales(trimmedEntries);
+            scaled.forEach((entry, i) => {
+              // 跳過「目前正在畫面上顯示」的那一格：height 是套用
+              // --dvd-area-scale 算出來的，沒有 transition，直接改會讓
+              // 瀏覽器瞬間套用新高度、看起來像「忽然變大/變小」的跳動
+              // （完整成因見上面「lag完之後飄動物件忽然變大」這輪舊
+              // 修正的說明）。只更新 src/scale 都不影響、當下沒被看到的
+              // 其餘格子即可，下一次真的撞牆換到那一張時，正確倍率自然
+              // 隨著整張圖一起換上，不會顯得突兀。
+              if(i === dvdEImageIndex) return;
+              dvdEImages[i] = entry;
+            });
+            preloadDvdEImages();
           });
-          return urls;
         });
-    }).then(urls => {
-      // 背景把整批圖片庫（含剛剛已經顯示過的第一張）都裁切好，統一算出
-      // 正確的面積縮放倍率（見 computeDvdAreaScales() 的完整說明，需要
-      // 整批照片的平均值才能算）——使用者這時已經看得到飄動物件了，這裡
-      // 晚一點完成不影響第一次出現的時間點。改用 trimDvdEImagesStaggered()
-      // 一張一張排隊處理（見該函式上方的完整說明），避免整批圖片的裁切
-      // 運算擠在同一小段時間內、造成「剛出現又馬上LAG一下」。
-      return trimDvdEImagesStaggered(urls).then(trimmedEntries => {
-        dvdEImages = computeDvdAreaScales(trimmedEntries);
-        preloadDvdEImages();
-        // ---------- 修正：「lag完之後飄動物件忽然變大」 ----------
-        // 這裡原本假設「使用者還沒撞牆換過圖時，直接把目前這張的
-        // --dvd-area-scale 從暫時值 1 改成整批算出來的正確倍率，只是改一個
-        // CSS 自訂屬性，不會有任何跳動」——這個假設是錯的：.dvd-bounce-img
-        // 的 height 是 calc(...* var(--dvd-area-scale))，而且這條 height
-        // 本身完全沒有 transition（只有 transform／opacity 有），所以改這個
-        // 自訂屬性會讓瀏覽器立即、一次到位地套用新的高度，沒有任何過渡，
-        // 視覺上就是「忽然變大/變小」的一次瞬間跳動。而這整批圖片的抓取＋
-        // 裁切＋計算，正是使用者一開始說的「lag」那段背景運算，兩件事幾乎
-        // 同時發生，看起來就是「lag完，飄動物件緊接著忽然放大」。
-        // 修法：不要回頭去改「目前正在畫面上顯示」的這張圖——只需要把算好
-        // 的正確倍率留在 dvdEImages 這份資料裡即可（上面 computeDvdAreaScales()
-        // 已經做完），下一次飄動物件撞牆真的換到別張圖時，cycleDvdEImage()
-        // 本來就會用 dvdEImages[i].scale 帶出正確倍率、跟著「整張圖一起換掉」
-        // 一起出現，不會顯得突兀。目前這張最多就是暫時維持一開始的預設大小
-        // （scale 1）直到它下一次真的被換掉為止，肉眼幾乎感覺不到差異，總比
-        // 平白無故在原地忽然變大好。
-      });
     }).catch(() => {
       // 圖片庫抓取或裁切整個失敗（資料夾沒設定、離線、空陣列等）：這裡
       // 刻意不呼叫 markDvdRealImageReady()，飄動物件會維持隱藏、不會退回
