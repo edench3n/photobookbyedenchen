@@ -1338,26 +1338,25 @@
   .dvd-bounce.dvd-instant .dvd-bounce-img{
     transition: none !important;
   }
-  /* ---------- 飄動的 e：只在「網站第一次載入」時，照片一出現就跟著流暢地
-     縮放彈入 ---------- 這裡刻意掛在 body.initial-reveal-pending 這個既有的
-     機制上（見上面該 class 的完整說明：只在進站首次載入時存在一次，之後
-     使用者手動切換 preview／首頁都不會再出現），不需要另外新增一套判斷
-     「是不是第一次」的邏輯，天然保證這個彈入效果只會在第一次進站時發生，
-     其他所有情境（回首頁、再次打開 preview、切換照片等）完全不受影響、
-     繼續使用上面各自原有的 transition。
-     遮罩期間內層圖片維持 scale(0)（配合外層 .dvd-bounce 的 opacity:0），
-     等 revealInitialChrome() 同一刻拿掉 initial-reveal-pending、加上
-     dvd-reveal 這個過場專用 class 時，才用一段比平常抓放（.22s）更長、
-     更明顯的回彈曲線（.6s）放大彈出——效果會跟 header 文字、preview 照片
-     同一刻一起出現，但飄動的 e 是用「從無到有」的縮放彈出方式登場，比純
-     淡入更有份量、更流暢。播完之後 JS 會移除 dvd-reveal，之後恢復使用
-     .dvd-bounce-img 原本 .22s 的抓放／進出詳細頁 transition，不影響。 */
+  /* ---------- 飄動的 e：進站時「不要」有從小放大的彈入效果 ----------
+     這裡原本刻意掛在 body.initial-reveal-pending 這個既有的機制上（只在
+     進站首次載入時存在一次），讓遮罩期間內層圖片維持 scale(0)，等
+     revealInitialChrome() 放行時再用一段帶回彈的曲線（.6s）從無到有放大
+     彈出——這是刻意設計的進場效果，但使用者實際感受下來就是「一進站
+     還是會看到飄動物件從小變大」，跟他要的「進站就直接是完整大小」不
+     符，所以徹底拿掉這個縮放彈入效果，改成單純依賴外層 .dvd-bounce 原本
+     就有的 opacity .3s ease 淡入（見上面 .dvd-bounce 的說明）：遮罩期間
+     內層圖片維持「完整大小、只是被外層蓋住看不到」，放行的那一刻只有
+     透明度從 0 淡入到 1，不再有任何 transform/scale 的變化，畫面上看到
+     的就是「直接以完整大小淡入」，不會有從小長大的過程。
+     dvd-reveal 這個 class 目前 JS（revealInitialChrome()）還是會照常加上、
+     650ms 後拿掉，不需要另外改 JS——這裡只是把它對應的 CSS 規則清空，讓
+     這個 class 存在與否不再造成任何視覺差異，比較保守、影響範圍最小。 */
   body.initial-reveal-pending .dvd-bounce-img{
-    transform: scale(0);
     transition: none !important;
   }
   .dvd-bounce.dvd-reveal .dvd-bounce-img{
-    transition: transform .6s cubic-bezier(.22,1.61,.36,1), opacity .45s ease;
+    transition: none !important;
   }
   /* ---------- 飄動物件：真正的照片庫圖片準備好之前，強制保持隱藏 ----------
      這個元素一進站就內建掛著這個 class（見 <body> 裡 <div class="dvd-bounce
@@ -10418,25 +10417,21 @@
           dvdReadyForInitialReveal = true;
           attemptInitialReveal();
         })
-        // ---------- 修正：「剛開始飄動物件還會小放大一下、還是lag卡頓」 ----------
-        // 成因：上面 attemptInitialReveal() 一放行，dvdBounce 就會立刻套用
-        // dvd-reveal 這個 class，開始跑 .6s 的回彈放大進場動畫（見 CSS
-        // .dvd-bounce.dvd-reveal 的說明，revealInitialChrome() 裡 650ms 後
-        // 才會拿掉這個 class）——但緊接在這個 .then() 之後，原本馬上就會
-        // 呼叫 trimDvdEImagesStaggered() 開始處理圖片庫第一張圖：這一步
-        // 底層 trimTransparentImage()／trimLoadedImage() 需要對 canvas 做
+        // ---------- 讓「整批圖片庫開始處理」的重運算，稍微晚一點點才開始 ----------
+        // 上面 attemptInitialReveal() 一放行，除了飄動物件本身淡入之外，
+        // header 文字、preview 起始照片也會在同一刻一起出現，瀏覽器這一刻
+        // 通常還有其他排版／繪製工作要忙。緊接著如果馬上呼叫
+        // trimDvdEImagesStaggered() 開始處理圖片庫第一張圖，底層
+        // trimTransparentImage()／trimLoadedImage() 需要對 canvas 做
         // drawImage、getImageData、以及最花時間的 toDataURL('image/png')
         // 編碼，是一段會真的佔用主執行緒一小段時間的同步運算（見
         // trimLoadedImage() 開頭「剛進站飄動物件很LAG」那段說明）。這段
-        // 運算實際開始的時間點取決於這張圖的網路下載／解碼何時完成，
-        // 完全是不確定的——如果剛好落在使用者正在看的這 0.6 秒回彈放大
-        // 動畫期間，主執行緒被佔住的那一小段時間，會讓同一時間跑著的
-        // RAF 物理迴圈（負責位置飄動）跟著卡一下、掉幾影格，使用者看到
-        // 的就是「放大到一半忽然頓一下」，跟純粹的回彈曲線本身無關。
+        // 運算實際開始的時間點取決於這張圖的網路下載／解碼何時完成，是
+        // 不確定的——如果剛好落在使用者剛看到畫面淡入的這一刻，容易讓
+        // 同時跑著的 RAF 物理迴圈（負責位置飄動）跟著卡一下、掉幾影格。
         // 修法：不改動 trimTransparentImage() 本身的運算（畫質、精確度都
-        // 不受影響），只是刻意把「整批圖片庫開始處理」這件事延後到回彈
-        // 動畫確定播完之後才開始（650ms 動畫時間 + 100ms 安全緩衝），
-        // 讓這段同步運算不會有機會跟使用者正在看的進場動畫搶主執行緒。
+        // 不受影響），只是刻意把「整批圖片庫開始處理」這件事延後一小段
+        // 緩衝時間才開始，讓這段同步運算不會緊貼著淡入那一刻搶主執行緒。
         // 畫面上第一次看到的飄動物件，這段延遲期間仍然是用上面已經顯示
         // 中的 quickUrl 小圖（=s400，早就載入完成），不會有任何空白或
         // 卡住的狀態，只是「正式高畫質版本」的無縫替換稍微晚一點點才發生，
