@@ -6358,7 +6358,17 @@
   // 細節多細小，只要它在這個中繼解析度底下還佔得到至少一個像素，就一定
   // 會被保留下來，不會再被平均演算法稀釋消失——遮罩因此只會等於或略小於
   // 原本用平均值縮圖時的範圍，絕不會比圖案實際範圍更往內縮。
-  const PF_ALPHA_MASK_FULL_CAP_DIM = 800; // 中繼高解析度讀取的上限（長邊），只在建立遮罩時算一次，不影響每影格的撞牆運算量
+  // 中繼高解析度讀取的上限（長邊）：從 800 降到 560——最終遮罩本來就只有
+  // PF_ALPHA_MASK_MAX_DIM（72px）見方，800px 中繼解析度對這麼粗的最終
+  // 格數而言早就遠遠超過需要保留細節（樹枝細梢等）所需的程度，560px
+  // 依然遠大於 72px、足以保留同樣的邊緣細節，但 getImageData 要讀取＋
+  // 手動縮小迴圈要掃過的像素數量降到約原本的 1/2（560²／800²≈0.49），
+  // 讓上面 preloadDvdEImages() 背景暖機每一張圖的遮罩時，每一格
+  // requestIdleCallback 實際佔用的主執行緒時間更短，更不容易因為單一張
+  // 圖片的運算量超過瀏覽器分配的閒置時間額度而讓那一影格掉幀。只在
+  // 建立遮罩時算一次，不影響每影格的撞牆運算量（那是用建好之後的
+  // 72px 遮罩查詢，見 computeDvdPixelInsets()／pixelShapesOverlap()）。
+  const PF_ALPHA_MASK_FULL_CAP_DIM = 560;
   function buildAlphaMaskFromSource(source, naturalW, naturalH){
     if(!naturalW || !naturalH) return null;
     const fullScale = Math.min(1, PF_ALPHA_MASK_FULL_CAP_DIM / Math.max(naturalW, naturalH));
@@ -6635,6 +6645,26 @@
   // 同樣改成一張一張、用 requestIdleCallback 排隊處理（理由跟上面
   // trimDvdEImagesStaggered() 完全一樣：避免整批圖片同時觸發解碼，
   // 集中在同一小段時間內造成卡頓），不是一次把整批全部塞給瀏覽器。
+  // ---------- 修正：「初次進站撞牆換到新圖那一刻還是會頓一下，撞過一輪
+  // 之後就不會了」----------
+  // 成因：requestAlphaMask()（撞牆判斷要用的像素遮罩）原本只在
+  // setDvdBounceImageSrc() 真正換上一張新圖的當下才第一次被觸發建立——
+  // 也就是使用者眼前的飄動物件「剛好撞到牆、正在切換圖片」的那一瞬間，
+  // 才臨時去跑 buildAlphaMaskFromSource() 那段「畫 800px 見方的 canvas＋
+  // 完整讀取像素＋手動兩階段縮小」的同步運算，雖然本身已經包了一層
+  // requestIdleCallback（見 requestAlphaMask() 內的說明），但也代表這段
+  // 運算跟「畫面上物件正要開始新一段飄動」幾乎是同一時間發生，很容易
+  // 讓那一格動畫影格被延遲。圖片庫每張圖只要建立過一次遮罩就會永久
+  // 快取（pfAlphaMaskCache），所以撞過一輪、每張圖都至少被撞過一次
+  // 之後，之後同一批圖片重複出現就不會再觸發這段運算——這正是「漸漸
+  // 就不會了」的原因。
+  // 修法：不要被動等撞牆才建立，而是在這裡（圖片庫已經解碼完成、閒置
+  // 時間本來就要拿來暖機解碼快取）順便把每一張圖的像素遮罩也一起建立
+  // 好——用同一套 requestIdleCallback 節奏，一張圖解碼完成、順手觸發它
+  // 的遮罩建立，再排下一張，不會集中在同一小段時間內。等飄動物件真的
+  // 撞到這張圖時，遮罩早就已經在背景準備好了，不會再需要臨時運算，
+  // 「撞到新圖那一刻卡一下」的情況因此完全不會發生，而不是像原本那樣
+  // 只是「撞過一輪之後才不會」。
   function preloadDvdEImages(){
     let i = 0;
     function step(){
@@ -6649,8 +6679,15 @@
           setTimeout(step, 60);
         }
       };
-      if(im.decode){ im.decode().then(scheduleNext, scheduleNext); }
-      else { scheduleNext(); }
+      const afterDecode = () => {
+        // 遮罩建立本身已經包了一層 requestIdleCallback（見 requestAlphaMask()
+        // 內部），這裡呼叫只是「登記」，不會在這一刻同步跑重運算，可以
+        // 放心緊接著排下一張的解碼。
+        requestAlphaMask(entry.src, im);
+        scheduleNext();
+      };
+      if(im.decode){ im.decode().then(afterDecode, afterDecode); }
+      else { afterDecode(); }
     }
     step();
   }
@@ -7187,6 +7224,35 @@
     if(dvdDragging){
       dvdRAF = null;
       dvdLastTime = null;
+      return;
+    }
+
+    // ---------- 修正：「初次進入網頁時飄動物件還是會有點卡頓，漸漸的就
+    // 不會了」----------
+    // 成因：startDvdBounce() 在 init() 一開始就呼叫，這套 RAF 物理迴圈
+    // 因此從第一影格就開始跑——但這個階段畫面上飄動物件其實整個被
+    // body.initial-reveal-pending 這層遮罩蓋住（opacity:0 / scale(0)，
+    // 見上面 CSS 那段說明），使用者完全看不到它，直到 revealInitialChrome()
+    // 真正放行才會拿掉這個 class。也就是說，這幾秒使用者看不到的期間，
+    // 底下卻完整跑著每一影格的碰撞判斷（getObstacleRects／
+    // resolveDvdObstacleCollision）、撞牆換圖（cycleDvdEImage → 觸發
+    // 新圖的 alpha mask 建立排程）、computeDvdPixelInsets() 逐點旋轉
+    // 運算等一整套「肉眼看不到、卻還是要吃主執行緒時間」的工作——而這幾秒
+    // 剛好也是 renderGrid() 分批建置網格 DOM、字體換裝、preview 起始
+    // 照片解碼等其他初始化工作最密集搶主執行緒的時間點。多個「使用者
+    // 這一刻其實看不到」的工作疊在一起競爭同一條主執行緒，就是「剛
+    // 進站還會卡頓一下，等這些背景工作都做完（網格建好、字體穩定）才
+    // 漸漸不會」的成因，跟前面幾輪已經修過的「同步運算太重」是不同來源
+    // 的同一類症狀。
+    // 修法：只要 body 還帶著 initial-reveal-pending（代表這個元素這一刻
+    // 對使用者來說根本不存在），就跳過整套移動／撞牆／旋轉運算，只保留
+    // RAF 鏈不中斷——把這幾影格能省下來的主執行緒時間，讓給使用者真正
+    // 看得到的首屏渲染工作。dvdLastTime 順便清成 null，等真的被放行看得
+    // 見的那一刻，第一影格的 dt 會重新從 0 起算，不會因為這段跳過期間
+    // 沒有更新 dvdLastTime，一放行就補一大段位移、瞬間跳一下。
+    if(document.body.classList.contains('initial-reveal-pending')){
+      dvdLastTime = null;
+      dvdRAF = requestAnimationFrame(stepDvdBounce);
       return;
     }
 
