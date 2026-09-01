@@ -1673,6 +1673,58 @@
 <script>
 (function(){
 
+  // =====================================================================
+  // 手機版「剛進站還會卡」優化：統一閒置排程 + 裝置能力偵測
+  // =====================================================================
+  // 背景：下面很多地方都是「有 requestIdleCallback 就用，沒有就退回
+  // setTimeout」這個判斷式，原本各自獨立寫一份。這裡集中成同一個工具
+  // 函式，方便統一維護、統一改善，不影響任何一處呼叫端原本各自設定的
+  // 延遲時間／逾時秒數，也完全不動飄動物件本身的物理／碰撞／旋轉規則，
+  // 純粹是「什麼時候該執行這段背景/暖機工作」這件事的排程機制。
+  //
+  // 真正動機：Safari（不管桌機還是 iOS，包含 LINE / Threads 等 App 內建
+  // 的 WebKit WebView）目前完全沒有原生 requestIdleCallback（截至目前
+  // 仍只藏在「實驗性功能」開關後面，一般使用者不會手動開啟）。原本每
+  // 一處的退場寫法幾乎都是 setTimeout(fn, 0)——這幾乎等於「馬上就執
+  // 行」，完全沒有「讓開給更優先的畫面工作」這層效果，等於在 Safari
+  // 上，所有原本設計成「背景才做」的工作，實際上還是會擠在使用者剛
+  // 進站、畫面最忙的那幾秒同步跑掉；桌機常見的 Chrome/Edge 因為真的
+  // 支援這個 API，同一批工作會被排到瀏覽器真正閒下來才執行，這正是
+  // 「電腦版不會卡、手機版還是會卡」的其中一個主要成因。
+  //
+  // scheduleIdle() 在真的有這個 API 時，行為完全不變（原封不動轉呼叫
+  // requestIdleCallback，各自的 timeout 數值也照樣傳進去，包含呼叫端
+  // 依賴的 deadline 參數，例如 renderGrid() 的 processChunk()，一樣會
+  // 正常收到）；只有在沒有這個 API 時，才把退場路徑從「馬上執行」改成
+  // 「先等這一影格真的畫完（requestAnimationFrame），再排到下一輪巨集
+  // 任務才執行」——雖然仍然沒辦法像原生 API 一樣精準量出「現在到底有
+  // 多閒」，但至少能保證不會搶在畫面剛畫完的那一刻之前卡住主執行緒，
+  // 是沒有這個瀏覽器功能之下能做到的最佳近似。各呼叫端原本個別調校過
+  // 的 fallback 延遲數值（例如 60ms、120ms、2000ms 這些）一樣可以透過
+  // fallbackDelay 傳進來，行為不變，只是多了「先等一幀畫完」這一層。
+  function scheduleIdle(fn, opts){
+    const hasTimeout = opts && typeof opts.timeout === 'number';
+    const fallbackDelay = (opts && typeof opts.fallbackDelay === 'number') ? opts.fallbackDelay : 0;
+    if('requestIdleCallback' in window){
+      return hasTimeout ? requestIdleCallback(fn, { timeout: opts.timeout }) : requestIdleCallback(fn);
+    }
+    return requestAnimationFrame(() => setTimeout(fn, fallbackDelay));
+  }
+
+  // 是否具備「真正會依閒置狀態決定執行時機」的排程能力——沒有
+  // requestIdleCallback（目前等於 Safari／WebKit 系統）都算在內。下面
+  // 撞牆換圖要建立的像素遮罩（見 buildAlphaMaskFromSourceChunked() 一
+  // 段），會依這個旗標決定要不要進一步縮小運算的解析度，讓「同一件事
+  // 在效能較弱、或排程精細度較差的裝置上，本身要做的工作量就先變
+  // 少」，跟上面 scheduleIdle() 是兩個獨立、互補的優化方向：一個決定
+  // 「何時做」，一個決定「做多少」。
+  // navigator.hardwareConcurrency 在部分瀏覽器可能是 undefined，這裡
+  // 當「未知」處理、不觸發降級（維持原本畫質），避免誤判效能較弱的
+  // 裝置。
+  const DVD_HAS_REAL_IDLE_CALLBACK = ('requestIdleCallback' in window);
+  const DVD_LOW_POWER_DEVICE = !DVD_HAS_REAL_IDLE_CALLBACK ||
+    (typeof navigator.hardwareConcurrency === 'number' && navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4);
+
   const GOOGLE_DRIVE_FOLDER_ID = '1wQI2MMoORB78XoC8E5GnxKkLLUEZsxPn';
   const GOOGLE_API_KEY = 'AIzaSyDoTpWEZ-UGEhOm3HScpL2mTlwc7tYiiNg';
 
@@ -3501,11 +3553,7 @@
       }
 
       if(cursor < photos.length){
-        if('requestIdleCallback' in window){
-          requestIdleCallback(processChunk); // 不設 timeout，真的等到閒置才做，不再被強制提早執行
-        } else {
-          setTimeout(processChunk, 16);
-        }
+        scheduleIdle(processChunk, { fallbackDelay: 16 }); // 不設 timeout，真的等到閒置才做，不再被強制提早執行
         return;
       }
       if(typeof onComplete === 'function') onComplete();
@@ -5829,11 +5877,7 @@
       if(tinyStep >= allForTiny.length) return;
       warmPreviewTiny(allForTiny[tinyStep]);
       tinyStep++;
-      if('requestIdleCallback' in window){
-        requestIdleCallback(warmTinyStep, { timeout: 1000 });
-      } else {
-        setTimeout(warmTinyStep, 80);
-      }
+      scheduleIdle(warmTinyStep, { timeout: 1000, fallbackDelay: 80 });
     }
     warmTinyStep();
   }
@@ -6497,7 +6541,14 @@
   // 判斷只需要「有沒有碰到」這種程度的精確度，不需要跟原圖一樣細；縮小
   // 解析度換來的是每一影格取樣時的運算量大幅降低，物件飛得再快也不會
   // 拖慢畫面。
-  const PF_ALPHA_MASK_MAX_DIM = 72; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能
+  // 效能較弱裝置（見上面 DVD_LOW_POWER_DEVICE 的完整說明）把遮罩取樣
+  // 格數上限調降一階：這個數字連同下面 PF_ALPHA_MASK_FULL_CAP_DIM 是
+  // buildAlphaMaskFromSourceChunked() 要讀取／掃描的像素總量的主要決定
+  // 因素（大致是這兩個數字的平方量級），調降能讓每一次建立遮罩的運算
+  // 量明顯減少，換來的精細度差異在撞牆判斷這個用途上肉眼感覺不出來。
+  // 桌機、或原本就有真正 requestIdleCallback 且核心數足夠的裝置，維持
+  // 原本數值不變，畫質/精細度完全不受影響。
+  const PF_ALPHA_MASK_MAX_DIM = DVD_LOW_POWER_DEVICE ? 48 : 72; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能
   const PF_ALPHA_MASK_THRESHOLD = 10; // 跟 DVD_TRIM_ALPHA_THRESHOLD 用同一個容忍值，判斷是否為「有畫到東西」
 
   // src -> {mask:Uint8Array(0/1), w, h}｜null（讀取失敗，永久視為沒有遮罩可用）。
@@ -6542,9 +6593,39 @@
   // 圖片的運算量超過瀏覽器分配的閒置時間額度而讓那一影格掉幀。只在
   // 建立遮罩時算一次，不影響每影格的撞牆運算量（那是用建好之後的
   // 72px 遮罩查詢，見 computeDvdPixelInsets()／pixelShapesOverlap()）。
-  const PF_ALPHA_MASK_FULL_CAP_DIM = 560;
-  function buildAlphaMaskFromSource(source, naturalW, naturalH){
-    if(!naturalW || !naturalH) return null;
+  const PF_ALPHA_MASK_FULL_CAP_DIM = DVD_LOW_POWER_DEVICE ? 360 : 560; // 效能較弱裝置調降中繼解析度，理由同上面 PF_ALPHA_MASK_MAX_DIM 的說明
+  // ---------- 手機優化：把這段最重的同步運算拆成多個小批 ----------
+  // drawImage／getImageData 這兩步是瀏覽器原生實作，耗時已經被上面的
+  // 解析度上限（PF_ALPHA_MASK_FULL_CAP_DIM／PF_ALPHA_MASK_MAX_DIM）限制
+  // 住，不是主要問題；真正花時間的是後面「手動兩階段縮小」那個雙層
+  // 迴圈——它會掃過中繼解析度（最大到 560×560，效能較弱裝置降到
+  // 360×360）底下的每一個像素，運算量隨中繼解析度的面積線性成長，桌機
+  // CPU 快、感覺不出來，換到手機較弱的 CPU 上，這段迴圈本身就可能單獨
+  // 佔用主執行緒好幾十毫秒，而且不管有沒有包 requestIdleCallback，這
+  // 整段運算從呼叫到回傳都是「一次做完」，中途沒有機會把主執行緒還給
+  // 瀏覽器去處理畫面更新／觸控——這正是撞牆換圖那一刻手機上仍會感覺到
+  // 頓一下的直接原因。
+  // 修法：把外層迴圈（依縮小後的「列」my）拆成一批批處理，每批之間主動
+  // 讓出主執行緒——有真正的 requestIdleCallback 時，用它回傳的
+  // deadline.timeRemaining() 動態決定這一批能做多少列（跟上面
+  // renderGrid() 的 processChunk() 用同一套手法）；沒有的話（Safari 退場
+  // 路徑），改成每批固定只做一小段（PF_ALPHA_MASK_ROWS_PER_CHUNK 列）就
+  // 透過 scheduleIdle() 排下一批，不再假設一次就能做完整份。這樣不管
+  // 裝置效能好壞、瀏覽器支不支援 requestIdleCallback，單一次執行都只會
+  // 卡住主執行緒很短一段時間，最終算出來的遮罩內容跟原本完全一樣，只是
+  // 攤開在好幾個影格裡完成，不會再讓使用者感覺到明顯的一次性卡頓。
+  // 呼叫端（requestAlphaMask()）本來就已經是非同步、可以容忍「晚一點才
+  // 就緒」的設計（遮罩沒準備好之前一律優雅退回矩形碰撞），這裡讓建立
+  // 過程本身也攤開成好幾步，跟既有的容忍機制完全相容，不需要改動任何
+  // 呼叫端的碰撞／物理判斷邏輯，飄動物件跑動的規則（速度、反彈、旋轉
+  // 衝量等）完全不受影響。
+  // 呼叫端改用 callback 接收結果（原本是直接 return），draw／
+  // getImageData 這段可能丟出的例外（tainted canvas）維持同步丟出，
+  // 交給呼叫端原本的 try/catch 處理，行為跟原本完全一致。
+  const PF_ALPHA_MASK_ROWS_PER_CHUNK = 12; // 沒有 requestIdleCallback 時，每批固定處理的「列」數，抓一個經驗上足夠短、不會讓單批卡住太久的數字
+  const PF_ALPHA_MASK_IDLE_TIME_MARGIN_MS = 3; // 跟 renderGrid() 的 GRID_IDLE_TIME_MARGIN_MS 同一個道理，留一點緩衝給瀏覽器自己排的其他工作
+  function buildAlphaMaskFromSourceChunked(source, naturalW, naturalH, callback){
+    if(!naturalW || !naturalH){ callback(null); return; }
     const fullScale = Math.min(1, PF_ALPHA_MASK_FULL_CAP_DIM / Math.max(naturalW, naturalH));
     const fullW = Math.max(1, Math.round(naturalW * fullScale));
     const fullH = Math.max(1, Math.round(naturalH * fullScale));
@@ -6552,50 +6633,69 @@
     fullCanvas.width = fullW; fullCanvas.height = fullH;
     const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
     fullCtx.drawImage(source, 0, 0, fullW, fullH);
-    const fullData = fullCtx.getImageData(0, 0, fullW, fullH).data; // tainted canvas 的話，錯誤會在這一行丟出
+    const fullData = fullCtx.getImageData(0, 0, fullW, fullH).data; // tainted canvas 的話，錯誤會在這一行丟出，交給呼叫端的 try/catch 處理
 
     const scale = Math.min(1, PF_ALPHA_MASK_MAX_DIM / Math.max(fullW, fullH));
     const maskW = Math.max(2, Math.round(fullW * scale));
     const maskH = Math.max(2, Math.round(fullH * scale));
     const mask = new Uint8Array(maskW * maskH);
-    for(let my = 0; my < maskH; my++){
-      const sy0 = Math.floor(my * fullH / maskH);
-      const sy1 = Math.max(sy0 + 1, Math.floor((my + 1) * fullH / maskH));
-      for(let mx = 0; mx < maskW; mx++){
-        const sx0 = Math.floor(mx * fullW / maskW);
-        const sx1 = Math.max(sx0 + 1, Math.floor((mx + 1) * fullW / maskW));
-        let solid = 0;
-        for(let sy = sy0; sy < sy1 && !solid; sy++){
-          const rowBase = sy * fullW;
-          for(let sx = sx0; sx < sx1; sx++){
-            if(fullData[(rowBase + sx) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD){ solid = 1; break; }
+
+    let my = 0;
+    function processRows(deadline){
+      let rowsDoneThisBatch = 0;
+      while(my < maskH){
+        const sy0 = Math.floor(my * fullH / maskH);
+        const sy1 = Math.max(sy0 + 1, Math.floor((my + 1) * fullH / maskH));
+        for(let mx = 0; mx < maskW; mx++){
+          const sx0 = Math.floor(mx * fullW / maskW);
+          const sx1 = Math.max(sx0 + 1, Math.floor((mx + 1) * fullW / maskW));
+          let solid = 0;
+          for(let sy = sy0; sy < sy1 && !solid; sy++){
+            const rowBase = sy * fullW;
+            for(let sx = sx0; sx < sx1; sx++){
+              if(fullData[(rowBase + sx) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD){ solid = 1; break; }
+            }
           }
+          mask[my * maskW + mx] = solid;
         }
-        mask[my * maskW + mx] = solid;
+        my++;
+        rowsDoneThisBatch++;
+        if(deadline){
+          if(deadline.timeRemaining() < PF_ALPHA_MASK_IDLE_TIME_MARGIN_MS) break; // 真的有 deadline 時，動態依剩餘閒置時間決定這一批做到哪
+        } else if(rowsDoneThisBatch >= PF_ALPHA_MASK_ROWS_PER_CHUNK){
+          break; // 沒有 deadline（Safari 退場路徑），固定小批次，確保單批執行時間有上限
+        }
       }
-    }
-    // 額外找出遮罩的「輪廓像素」（供下面 computeDvdPixelInsets() 用來算
-    // 撞螢幕邊界時的實際圖案最外緣，完整理由見該函式上方的說明）：只挑
-    // 「自己是實心、但上下左右四個相鄰格至少一格不是實心（含超出遮罩
-    // 範圍）」的格子——也就是圖案邊緣上的像素。不管圖案怎麼旋轉，內部
-    // 被完全包住的實心像素永遠不可能變成最外緣，篩掉它們可以把之後每一
-    // 影格要做的旋轉運算量，從整個面積的規模降到只剩周長的規模。座標
-    // 存成 0~1 的正規化比例（對齊遮罩寬高），跟 sampleAlphaMaskSolid()
-    // 用的座標系一致。
-    const boundaryPts = [];
-    for(let y = 0; y < maskH; y++){
-      const rowBase = y * maskW;
-      for(let x = 0; x < maskW; x++){
-        if(mask[rowBase + x] !== 1) continue;
-        const left = x > 0 ? mask[rowBase + x - 1] : 0;
-        const right = x < maskW - 1 ? mask[rowBase + x + 1] : 0;
-        const up = y > 0 ? mask[rowBase - maskW + x] : 0;
-        const down = y < maskH - 1 ? mask[rowBase + maskW + x] : 0;
-        if(left === 1 && right === 1 && up === 1 && down === 1) continue; // 四周都是實心＝內部像素，不可能是最外緣，跳過
-        boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
+      if(my < maskH){
+        scheduleIdle(processRows, { timeout: 400, fallbackDelay: 0 });
+        return;
       }
+      finishMask();
     }
-    return { mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts) };
+
+    function finishMask(){
+      // 額外找出遮罩的「輪廓像素」（供 computeDvdPixelInsets() 用來算撞
+      // 螢幕邊界時的實際圖案最外緣，完整理由見上面原本的說明）：這段只
+      // 掃過已經縮小完成的 maskW×maskH 網格（最大 72×72＝5184 格，效能
+      // 較弱裝置只有 48×48＝2304 格），運算量遠小於上面掃描中繼解析度
+      // 那段，維持一次做完，不需要額外分批。
+      const boundaryPts = [];
+      for(let y = 0; y < maskH; y++){
+        const rowBase = y * maskW;
+        for(let x = 0; x < maskW; x++){
+          if(mask[rowBase + x] !== 1) continue;
+          const left = x > 0 ? mask[rowBase + x - 1] : 0;
+          const right = x < maskW - 1 ? mask[rowBase + x + 1] : 0;
+          const up = y > 0 ? mask[rowBase - maskW + x] : 0;
+          const down = y < maskH - 1 ? mask[rowBase + maskW + x] : 0;
+          if(left === 1 && right === 1 && up === 1 && down === 1) continue; // 四周都是實心＝內部像素，不可能是最外緣，跳過
+          boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
+        }
+      }
+      callback({ mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts) });
+    }
+
+    scheduleIdle(processRows, { timeout: 400, fallbackDelay: 0 });
   }
 
   // 觸發（或直接沿用快取）某張圖片的像素遮罩建立，非同步、不阻塞呼叫端——
@@ -6630,11 +6730,17 @@
       // 一定是這種——這裡最快，不需要多一輪 fetch）。跨網域圖片如果沒有通過
       // CORS 檢查，這裡會直接丟出例外，走下面 fetch 備援，跟 trimTransparentImage()
       // 的兩階段策略同樣的道理。
+      // buildAlphaMaskFromSourceChunked() 內部把最重的那段迴圈拆成好幾批
+      // 執行（完整理由見該函式上方的說明），這裡呼叫時只有「畫布繪製＋
+      // getImageData」這一小段是同步的、可能丟出 tainted canvas 例外，
+      // 之後的分批運算都是非同步透過 callback 回傳結果，因此用一個旗標
+      // 記錄「這一次呼叫本身有沒有同步丟出例外」，藉此判斷要不要繼續走
+      // 下面的 fetch 備援，行為跟原本完全對應。
+      let threwSync = false;
       try{
-        const result = buildAlphaMaskFromSource(imgEl, imgEl.naturalWidth, imgEl.naturalHeight);
-        finish(result);
-        return;
-      }catch(err){ /* tainted canvas，繼續往下試 fetch+blob */ }
+        buildAlphaMaskFromSourceChunked(imgEl, imgEl.naturalWidth, imgEl.naturalHeight, finish);
+      }catch(err){ threwSync = true; /* tainted canvas，繼續往下試 fetch+blob */ }
+      if(!threwSync) return;
 
       fetch(src, { mode: 'cors' }).then(res => {
         if(!res.ok) throw new Error('fetch failed: ' + res.status);
@@ -6643,20 +6749,21 @@
         const blobUrl = URL.createObjectURL(blob);
         const img = new Image();
         img.onload = () => {
-          let result = null;
-          try{ result = buildAlphaMaskFromSource(img, img.naturalWidth, img.naturalHeight); }catch(err){}
-          URL.revokeObjectURL(blobUrl);
-          finish(result);
+          try{
+            buildAlphaMaskFromSourceChunked(img, img.naturalWidth, img.naturalHeight, (result) => {
+              URL.revokeObjectURL(blobUrl);
+              finish(result);
+            });
+          }catch(err){
+            URL.revokeObjectURL(blobUrl);
+            finish(null);
+          }
         };
         img.onerror = () => { URL.revokeObjectURL(blobUrl); finish(null); };
         img.src = blobUrl;
       }).catch(() => finish(null)); // 兩種方式都失敗，標記成「沒有遮罩」，撞牆判斷永久退回矩形版本，不會讓功能壞掉
     };
-    if('requestIdleCallback' in window){
-      requestIdleCallback(run, { timeout: 500 });
-    } else {
-      setTimeout(run, 0);
-    }
+    scheduleIdle(run, { timeout: 500, fallbackDelay: 0 });
   }
 
   // 讀取快取——回傳三種狀態，呼叫端要分開處理：
@@ -6847,11 +6954,7 @@
       const im = new Image();
       im.src = entry.src;
       const scheduleNext = () => {
-        if('requestIdleCallback' in window){
-          requestIdleCallback(step, { timeout: 600 });
-        } else {
-          setTimeout(step, 60);
-        }
+        scheduleIdle(step, { timeout: 600, fallbackDelay: 60 });
       };
       const afterDecode = () => {
         // 遮罩建立本身已經包了一層 requestIdleCallback（見 requestAlphaMask()
@@ -6899,11 +7002,7 @@
         });
       }
       function scheduleNext(){
-        if('requestIdleCallback' in window){
-          requestIdleCallback(step, { timeout: 600 });
-        } else {
-          setTimeout(step, 60);
-        }
+        scheduleIdle(step, { timeout: 600, fallbackDelay: 60 });
       }
       scheduleNext();
     });
@@ -8334,6 +8433,56 @@
     // 隱藏狀態（dvd-hidden）時，它的邊界框只是停在最後位置的「隱形」
     // 矩形，不該繼續攔截落在它範圍內的點擊/觸控，直接放行。
     if(dvdBounce.classList.contains('dvd-hidden')) return;
+
+    // ---------- 修正：「手機版兩指抓住飄動的 e 一定要先單指抓住、再用
+    // 第二指旋轉才行，沒辦法一開始就兩指同時按住直接同步拖曳＋旋轉」
+    // ----------
+    // 成因：抓取這件事本身是延後 commit 的（見上面 dvdPointerDown() 開頭
+    // 的完整說明：按下當下只記錄「候選」pointerId／座標，要等
+    // dvdPointerMove() 裡偵測到位移真的超過 DVD_TAP_MAX_MOVE 才會呼叫
+    // commitDvdDrag() 正式把 dvdDragging 設成 true）——目的是避免單純點一下
+    // 或雙擊也被誤判成一次微小的拖曳。這表示「兩指幾乎同時按下」時，第一
+    // 根手指這一刻通常都還停在原地（連候選都還沒滿足位移門檻，更別說正式
+    // commit），dvdDragging 仍然是 false。下面緊接著的
+    // `if(dvdDragging && e.pointerId !== dvdPointerId)` 這個分支因此完全
+    // 不會被吃到，第二根手指的這次按下會直接落到再下面的「一般流程」，
+    // 把 dvdDragCandidatePointerId／dvdDragCandidateStartX/Y 整組直接覆寫
+    // 成第二根手指自己的資料——等於悄悄丟掉第一根手指原本的候選資格。
+    // 結果就是使用者感受到的「一定要先讓其中一指真的滑動一小段、確立成
+    // 拖曳之後，才能補上第二指觸發旋轉；如果兩指幾乎同時按下，永遠只會
+    // 變成『重新用第二指單指候選』，兩指同時按住完全沒有反應」。
+    // 修法：這裡補一個分支，專門處理「還沒 commit、但已經有另一根手指是
+    // 候選人」的情況——只要這一下落下的手指也命中飄動字的觸控熱區，就
+    // 不必等第一根手指自己動起來，直接：
+    //   1) 用第一根手指候選時記下的起點座標（dvdDragCandidateStartX/Y），
+    //      比照 commitDvdDrag() 原本會做的事，把它 promote 成正式拖曳
+    //      ——因為手指幾乎沒動過，這個座標此刻仍然等同它的實際位置；
+    //   2) 這一根手指緊接著直接呼叫 startDvdRotateGesture() 接手旋轉，
+    //      跟下面「已經在拖曳」那個既有分支收尾時做的事完全一樣。
+    // 這樣兩指幾乎同時按住飄動的 e，會在同一個事件循環裡「一步到位」——
+    // 第一指負責位置、第二指立刻開始旋轉，不需要使用者刻意先拖動一小段
+    // 才能觸發，也不會影響「先單指拖曳、之後才補第二指」這個原本就正常
+    // 的既有路徑（那條路徑這裡完全沒有動到，走的還是下面原本那個分支）。
+    if(!dvdDragging && dvdDragCandidatePointerId !== null && e.pointerId !== dvdDragCandidatePointerId && dvdRotatePointerId === null){
+      const candRect = dvdBounce.getBoundingClientRect();
+      if(dvdHitTest(candRect, e.clientX, e.clientY, DVD_GRAB_PADDING_TOUCH)){
+        const firstPointerId = dvdDragCandidatePointerId;
+        const firstX = dvdDragCandidateStartX;
+        const firstY = dvdDragCandidateStartY;
+        // 注意：dvdDragCandidatePointerId 這裡刻意不清空、也不改動——它在
+        // 正常流程裡本來就是「從第一根手指按下那一刻起，一路維持到它真的
+        // pointerup 才清空」（見 dvdPointerDown()／commitDvdDrag()：後者
+        // 完全不會去動這個變數），dvdPointerUp() 開頭正是靠這個值來比對
+        // 「這次放開的是不是原本那根拖曳手指」。這裡只是把 commitDvdDrag()
+        // 提前呼叫，第一根手指本身的候選狀態／pointerId 不應該有任何變化，
+        // 清成 null 會讓它之後真正放開時 dvdPointerUp() 的比對失敗、整段
+        // 收尾邏輯被跳過。
+        commitDvdDrag({ pointerId: firstPointerId, clientX: firstX, clientY: firstY });
+        startDvdRotateGesture(e);
+        dvdSuppressNextClick = true;
+        return;
+      }
+    }
 
     // 已經有一根手指在拖曳飄動的 e（dvdDragging 為 true），這一下如果是
     // 另一根手指落下：不能讓它跟下面一般流程一樣被當成「新的一次拖曳
@@ -10968,11 +11117,7 @@
       prefetchAllInBackground();
       prefetchHoverThumbsInBackground();
     };
-    if('requestIdleCallback' in window){
-      requestIdleCallback(buildGridDeferred, { timeout: 1200 });
-    } else {
-      setTimeout(buildGridDeferred, 0);
-    }
+    scheduleIdle(buildGridDeferred, { timeout: 1200, fallbackDelay: 0 });
 
     // 背景閒置時間先把 Matter.js 預先載入＋剖析好（不等使用者真的雙擊
     // 飄動的 e 才臨時去下載）：原本 loadMatterJS() 只在 enterPhotoFallMode()
@@ -10988,11 +11133,7 @@
     // enterPhotoFallMode() 本來就有自己的 loadMatterJS() 失敗處理／重試
     // 路徑，這裡只是「能先準備就先準備」的加分項，不是必要條件。
     const warmMatterJS = () => { loadMatterJS().catch(() => {}); };
-    if('requestIdleCallback' in window){
-      requestIdleCallback(warmMatterJS, { timeout: 4000 });
-    } else {
-      setTimeout(warmMatterJS, 2000);
-    }
+    scheduleIdle(warmMatterJS, { timeout: 4000, fallbackDelay: 2000 });
 
     // ---------- 進站預設先看到 preview 頁，點一下才到首頁 ----------
     // 原本只有網址是 #preview 時才會自動開 preview；現在改成不管網址有沒有
@@ -11079,11 +11220,7 @@
       if(i >= photos.length) return;
       prefetchOne(photos[i].detailUrlMobile || photos[i].detailUrl || photos[i].url, true);
       i++;
-      if('requestIdleCallback' in window){
-        requestIdleCallback(step, { timeout: 800 });
-      } else {
-        setTimeout(step, 120);
-      }
+      scheduleIdle(step, { timeout: 800, fallbackDelay: 120 });
     }
     step();
   }
@@ -11112,11 +11249,7 @@
         else if(loader.complete && loader.naturalWidth > 0){ store(); }
         else { loader.onload = store; }
       }
-      if('requestIdleCallback' in window){
-        requestIdleCallback(step, { timeout: 1500 });
-      } else {
-        setTimeout(step, 200);
-      }
+      scheduleIdle(step, { timeout: 1500, fallbackDelay: 200 });
     }
     step();
   }
