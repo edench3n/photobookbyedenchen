@@ -6289,232 +6289,6 @@
   // 畫面的照片 coverage 會接近 1。coverage 算不出來的情況（讀取像素失敗、
   // 整張圖完全透明等）一律回傳 null，呼叫端會把這張圖從「平均值」的計算
   // 中排除、维持縮放倍率 1，不受影響。
-  // ---------- 修正：「圖片庫背景裁切造成的 lag，剛好跟第一次真正換圖同一刻
-  // 發生」----------
-  // 成因：上面 trimLoadedImage() 這段 canvas 運算（drawImage／getImageData／
-  // 兩輪逐像素掃描）雖然已經透過縮小取樣（SCAN_MAX_DIM）、改用非同步
-  // toBlob() 編碼做過好幾輪優化，但終究還是在「主執行緒」上跑——使用者
-  // 回報「一開始撞牆都不會換照片，直到它突然 lag 一下、些微放大之後才
-  // 正常」，正是「已就緒池」（dvdEImages）從 1 張長到 2 張的那個瞬間：
-  // 池子只有 1 張時，撞牆其實有換，只是換來換去都是同一張，肉眼看不出來；
-  // 真正讓使用者「看得出來換了」的那一刻，恰好就是這段同步 canvas 運算
-  // 剛跑完、把第二張圖 push 進池子的同一時間點——運算佔用主執行緒的那一
-  // 下，跟畫面上圖片高度改變（--dvd-area-scale 重新計算）疊在同一影格，
-  // 就算 CSS 本來就有 .32s 的 height transition，主執行緒忙著跑這段運算時
-  // 也沒辦法把過渡動畫的每一影格準時畫出來，看起來就變成「卡一下、跳一下」
-  // 而不是平滑放大。
-  // 修法：把整段裁切運算（下載→畫進 canvas→掃描找邊界→裁切→編碼）搬進
-  // 一個背景 Web Worker，用 OffscreenCanvas（worker 內建、不需要 DOM）＋
-  // createImageBitmap()（worker 內建的圖片解碼 API，取代 worker 裡用不了的
-  // <img>／Image()）完整重現一模一樣的演算法（逐行對照 trimLoadedImage()，
-  // 門檻值、縮小取樣策略、coverage／aspect 計算方式完全相同，只是換一個
-  // 執行緒跑），這樣不管圖片庫有幾張、裁切要花多久，都不會再佔用主執行緒
-  // 一絲一毫，飄動物件的位移動畫、CSS transition 全程不會被這段運算卡到。
-  // OffscreenCanvas／createImageBitmap／Worker 是現代瀏覽器（含 iOS Safari
-  // 16.4 以後）都支援的標準 API，這裡先做能力偵測，不支援的瀏覽器（極少數
-  // 較舊的 Safari／WebView）會在下面 trimTransparentImage() 直接退回原本
-  // 主執行緒的 fetch-blob／cross-origin img 兩段式流程，行為、輸出結果
-  // 完全不變，只是少了這一層背景加速，不會整個功能壞掉。
-  const DVD_TRIM_WORKER_SUPPORTED = (typeof Worker !== 'undefined') &&
-    (typeof OffscreenCanvas !== 'undefined') &&
-    (typeof createImageBitmap === 'function');
-
-  // Worker 內部程式碼故意寫成字串、用 Blob URL 建立，而不是另外存成獨立的
-  // .js 檔案——這個專案是單一 index.html 部署，不想因為這個優化多一個要
-  // 額外上傳、額外維護路徑的檔案。跟主執行緒版本 trimLoadedImage() 的唯一
-  // 差異：讀圖用 createImageBitmap(blob) 取代 <img>／Image().decode()（worker
-  // 環境沒有 DOM，這是 worker 裡對應的標準解碼 API）；canvas 全部改用
-  // OffscreenCanvas；輸出用 convertToBlob() 取代 toBlob()（前者是回傳
-  // Promise 的版本，後者是主執行緒才有的 callback 版本）。像素掃描找邊界、
-  // 背景色估計、coverage／aspect 計算這三段核心演算法逐行照抄，確保裁出來
-  // 的結果、算出來的縮放倍率跟主執行緒版本完全一致，只是換了執行緒跑。
-  const DVD_TRIM_WORKER_SOURCE = [
-    'const DVD_TRIM_ALPHA_THRESHOLD = 10;',
-    'const DVD_TRIM_BG_COLOR_THRESHOLD = 26;',
-    'const SCAN_MAX_DIM = 400;',
-    'function estimateEdgeBackgroundColor(data, w, h){',
-    '  const counts = new Map();',
-    '  const step = Math.max(1, Math.floor(Math.min(w, h) / 60));',
-    '  function sample(x, y){',
-    '    const idx = (y * w + x) * 4;',
-    '    const key = (data[idx] << 16) | (data[idx + 1] << 8) | data[idx + 2];',
-    '    counts.set(key, (counts.get(key) || 0) + 1);',
-    '  }',
-    '  for(let x = 0; x < w; x += step){ sample(x, 0); sample(x, h - 1); }',
-    '  for(let y = 0; y < h; y += step){ sample(0, y); sample(w - 1, y); }',
-    '  let bestKey = null, bestCount = -1;',
-    '  counts.forEach((count, key) => { if(count > bestCount){ bestCount = count; bestKey = key; } });',
-    '  if(bestKey === null) return null;',
-    '  return { r: (bestKey >> 16) & 255, g: (bestKey >> 8) & 255, b: bestKey & 255 };',
-    '}',
-    'function trimBitmap(bitmap){',
-    '  const w = bitmap.width, h = bitmap.height;',
-    '  if(!w || !h) return { trimmed: false, coverage: null, aspect: null };',
-    '  const srcCanvas = new OffscreenCanvas(w, h);',
-    '  const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });',
-    '  srcCtx.drawImage(bitmap, 0, 0);',
-    '  const scanScale = Math.min(1, SCAN_MAX_DIM / Math.max(w, h));',
-    '  const sw = Math.max(1, Math.round(w * scanScale));',
-    '  const sh = Math.max(1, Math.round(h * scanScale));',
-    '  const scanCanvas = new OffscreenCanvas(sw, sh);',
-    '  const scanCtx = scanCanvas.getContext("2d", { willReadFrequently: true });',
-    '  scanCtx.drawImage(srcCanvas, 0, 0, sw, sh);',
-    '  const data = scanCtx.getImageData(0, 0, sw, sh).data;',
-    '  let minX = sw, minY = sh, maxX = -1, maxY = -1;',
-    '  let hasRealTransparency = false;',
-    '  for(let y = 0; y < sh; y++){',
-    '    const rowBase = y * sw * 4;',
-    '    for(let x = 0; x < sw; x++){',
-    '      if(data[rowBase + x * 4 + 3] <= DVD_TRIM_ALPHA_THRESHOLD){',
-    '        hasRealTransparency = true;',
-    '        continue;',
-    '      }',
-    '      if(x < minX) minX = x;',
-    '      if(x > maxX) maxX = x;',
-    '      if(y < minY) minY = y;',
-    '      if(y > maxY) maxY = y;',
-    '    }',
-    '  }',
-    '  if(maxX < minX || maxY < minY) return { trimmed: false, coverage: null, aspect: null };',
-    '  let coverageBg = null;',
-    '  if(!hasRealTransparency){',
-    '    const bg = estimateEdgeBackgroundColor(data, sw, sh);',
-    '    if(bg){',
-    '      let cMinX = sw, cMinY = sh, cMaxX = -1, cMaxY = -1;',
-    '      for(let y = 0; y < sh; y++){',
-    '        const rowBase = y * sw * 4;',
-    '        for(let x = 0; x < sw; x++){',
-    '          const idx = rowBase + x * 4;',
-    '          const dr = data[idx] - bg.r, dg = data[idx + 1] - bg.g, db = data[idx + 2] - bg.b;',
-    '          if((dr * dr + dg * dg + db * db) <= (DVD_TRIM_BG_COLOR_THRESHOLD * DVD_TRIM_BG_COLOR_THRESHOLD)){',
-    '            continue;',
-    '          }',
-    '          if(x < cMinX) cMinX = x;',
-    '          if(x > cMaxX) cMaxX = x;',
-    '          if(y < cMinY) cMinY = y;',
-    '          if(y > cMaxY) cMaxY = y;',
-    '        }',
-    '      }',
-    '      if(cMaxX >= cMinX && cMaxY >= cMinY && !(cMinX === 0 && cMinY === 0 && cMaxX === sw - 1 && cMaxY === sh - 1)){',
-    '        minX = cMinX; minY = cMinY; maxX = cMaxX; maxY = cMaxY;',
-    '        coverageBg = bg;',
-    '      }',
-    '    }',
-    '  }',
-    '  let coverage = 1;',
-    '  {',
-    '    const boxW = maxX - minX + 1, boxH = maxY - minY + 1;',
-    '    if(boxW > 0 && boxH > 0 && (hasRealTransparency || coverageBg)){',
-    '      let coloredCount = 0;',
-    '      for(let y = minY; y <= maxY; y++){',
-    '        const rowBase = y * sw * 4;',
-    '        for(let x = minX; x <= maxX; x++){',
-    '          const idx = rowBase + x * 4;',
-    '          if(hasRealTransparency){',
-    '            if(data[idx + 3] > DVD_TRIM_ALPHA_THRESHOLD) coloredCount++;',
-    '          } else {',
-    '            const dr = data[idx] - coverageBg.r, dg = data[idx + 1] - coverageBg.g, db = data[idx + 2] - coverageBg.b;',
-    '            if((dr * dr + dg * dg + db * db) > (DVD_TRIM_BG_COLOR_THRESHOLD * DVD_TRIM_BG_COLOR_THRESHOLD)) coloredCount++;',
-    '          }',
-    '        }',
-    '      }',
-    '      coverage = coloredCount / (boxW * boxH);',
-    '    }',
-    '  }',
-    '  const invScale = 1 / scanScale;',
-    '  const pad = Math.max(1, Math.ceil(invScale));',
-    '  const fullMinX = Math.max(0, Math.floor(minX * invScale) - pad);',
-    '  const fullMinY = Math.max(0, Math.floor(minY * invScale) - pad);',
-    '  const fullMaxX = Math.min(w - 1, Math.ceil((maxX + 1) * invScale) + pad - 1);',
-    '  const fullMaxY = Math.min(h - 1, Math.ceil((maxY + 1) * invScale) + pad - 1);',
-    '  const trimW = fullMaxX - fullMinX + 1;',
-    '  const trimH = fullMaxY - fullMinY + 1;',
-    '  const aspect = trimW / trimH;',
-    '  if(fullMinX === 0 && fullMinY === 0 && fullMaxX === w - 1 && fullMaxY === h - 1){',
-    '    return { trimmed: false, coverage, aspect };',
-    '  }',
-    '  const outCanvas = new OffscreenCanvas(trimW, trimH);',
-    '  outCanvas.getContext("2d").drawImage(srcCanvas, fullMinX, fullMinY, trimW, trimH, 0, 0, trimW, trimH);',
-    '  return { trimmed: true, canvas: outCanvas, coverage, aspect };',
-    '}',
-    'self.onmessage = async function(e){',
-    '  const id = e.data.id, src = e.data.src;',
-    '  try{',
-    '    const res = await fetch(src, { mode: "cors" });',
-    '    if(!res.ok) throw new Error("fetch failed: " + res.status);',
-    '    const blob = await res.blob();',
-    '    const bitmap = await createImageBitmap(blob);',
-    '    let result;',
-    '    try{ result = trimBitmap(bitmap); } finally { bitmap.close(); }',
-    '    if(!result.trimmed){',
-    '      self.postMessage({ id: id, ok: true, trimmed: false, coverage: result.coverage, aspect: result.aspect });',
-    '      return;',
-    '    }',
-    '    const outBlob = await result.canvas.convertToBlob({ type: "image/png" });',
-    '    self.postMessage({ id: id, ok: true, trimmed: true, blob: outBlob, coverage: result.coverage, aspect: result.aspect });',
-    '  }catch(err){',
-    '    self.postMessage({ id: id, ok: false, error: (err && err.message) || String(err) });',
-    '  }',
-    '};'
-  ].join('\n');
-
-  // worker 真的建立失敗（例如企業瀏覽器政策擋掉 blob: worker、或極端的
-  // CSP 限制）就整段標記成「壞掉」，之後不再嘗試、直接固定走主執行緒
-  // 路徑——避免每張圖都白白多花一次「試著建立 worker」又失敗的開銷。
-  let dvdTrimWorker = null;
-  let dvdTrimWorkerBroken = false;
-  let dvdTrimWorkerReqId = 0;
-  const dvdTrimWorkerPending = new Map(); // id -> {resolve, reject}
-
-  function getDvdTrimWorker(){
-    if(!DVD_TRIM_WORKER_SUPPORTED || dvdTrimWorkerBroken) return null;
-    if(dvdTrimWorker) return dvdTrimWorker;
-    try{
-      const blob = new Blob([DVD_TRIM_WORKER_SOURCE], { type: 'application/javascript' });
-      const worker = new Worker(URL.createObjectURL(blob));
-      worker.onmessage = (e) => {
-        const pending = dvdTrimWorkerPending.get(e.data.id);
-        if(!pending) return; // 這個 id 已經被下面 onerror 統一 reject 過，或呼叫端已經不再關心，忽略即可
-        dvdTrimWorkerPending.delete(e.data.id);
-        pending.resolve(e.data);
-      };
-      // worker 整體壞掉（不是「這一張圖」處理失敗，是 worker 這個背景執行緒
-      // 本身出問題，例如沙盒限制、記憶體不足）：所有還在等待的請求全部視為
-      // 失敗，讓各自呼叫端照下面 trimTransparentImage() 原本設計的 catch
-      // 鏈退回主執行緒重試；同時標記 dvdTrimWorkerBroken，之後這次瀏覽器
-      // session 都不再嘗試用 worker，直接固定走主執行緒路徑，避免同一個
-      // 壞掉的 worker 被重複使用、後續每一張圖都注定失敗又要多等一輪
-      // 才能退回主執行緒。
-      worker.onerror = () => {
-        dvdTrimWorkerBroken = true;
-        dvdTrimWorkerPending.forEach(p => p.reject(new Error('dvd trim worker crashed')));
-        dvdTrimWorkerPending.clear();
-      };
-      dvdTrimWorker = worker;
-    }catch(err){
-      dvdTrimWorkerBroken = true;
-      return null;
-    }
-    return dvdTrimWorker;
-  }
-
-  // 回傳值形狀跟主執行緒版本的 trimViaFetchBlob()／trimViaCrossOriginImg()
-  // 完全一致（{src, coverage, aspect}），呼叫端（trimTransparentImage()）
-  // 不需要區分結果到底是哪一條路徑跑出來的。
-  function trimViaWorker(src){
-    const worker = getDvdTrimWorker();
-    if(!worker) return Promise.reject(new Error('dvd trim worker unavailable'));
-    const id = ++dvdTrimWorkerReqId;
-    return new Promise((resolve, reject) => {
-      dvdTrimWorkerPending.set(id, { resolve, reject });
-      worker.postMessage({ id, src });
-    }).then(data => {
-      if(!data.ok) throw new Error(data.error || 'dvd trim worker failed');
-      if(!data.trimmed) return { src, coverage: data.coverage, aspect: data.aspect }; // 沒有留白可裁，照原網址使用，跟主執行緒版本行為一致
-      return { src: URL.createObjectURL(data.blob), coverage: data.coverage, aspect: data.aspect };
-    });
-  }
-
   function trimLoadedImage(img, fallbackSrc){
     try{
       const w = img.naturalWidth, h = img.naturalHeight;
@@ -6763,13 +6537,7 @@
   // 只是不參與下面「依實際有色面積平均大小」的計算，縮放倍率維持預設的 1，
   // 不影響原本「這張圖壞不掉整個功能」的行為。
   function trimTransparentImage(src){
-    // 優先交給背景 Worker（見上面 DVD_TRIM_WORKER_SUPPORTED 旁的完整說明）；
-    // Worker 不支援、建立失敗、或這次處理本身失敗（例如這張圖的來源不允許
-    // fetch，需要退回 <img crossorigin> 那條路徑），都會 reject，接住之後
-    // 照原本的順序退回主執行緒重試，行為、輸出結果跟修改前完全一致，只是
-    // 多了一層優先嘗試、不佔用主執行緒的路徑。
-    return trimViaWorker(src)
-      .catch(() => trimViaFetchBlob(src))
+    return trimViaFetchBlob(src)
       .catch(() => trimViaCrossOriginImg(src))
       .catch(() => ({ src, coverage: null, aspect: null }));
   }
@@ -8346,17 +8114,19 @@
     // 經過這裡，兩者不會互相干擾。留著這段判斷反而會繼續誤傷手機版剛
     // 進站那幾秒的正常撞擊，這裡整段拿掉，直接落到下面一般的移動＋撞牆
     // 流程處理。
-    if(dvdX < minX || dvdX > maxX || dvdY < minY || dvdY > maxY){
-      dvdX = clampDvd(dvdX, minX, maxX);
-      dvdY = clampDvd(dvdY, minY, maxY);
-      // 不改動 dvdWasScreenEdgeCollidedLastFrame：維持它原本的值，球下一次
-      // 真的用自己的移動撞上邊界時，判斷邏輯才不會被這次的靜默修正干擾。
-      stepDvdRotation(dt); // 純位置修正，不是真的撞擊，但累積的旋轉衝量一樣要繼續平滑衰減
-      dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
-      dvdRAF = requestAnimationFrame(stepDvdBounce);
-      return;
-    }
-    // 不是視窗縮小、純粹是旋轉造成內縮值變動：什麼都不用特別做，直接落到
+    // ---------- 修正：「撞到邊界後偶爾會黏住、不會反彈」 ----------
+    // 這裡原本還留著一段「dvdX/dvdY 落在邊界外就靜默夾回＋直接 return，
+    // 跳過下面移動＋撞牆反彈流程」的判斷式（舊註解仍保留在上面，記錄
+    // 這段的完整歷史成因）。上面的說明其實已經講清楚：改成讀
+    // dvdSettledViewportW/H 這份快照之後，這個判斷式唯一還會被觸發的
+    // 原因只剩「物件持續旋轉，導致 computeDvdPixelInsets() 逐影格算出
+    // 的內縮值跟著抖動」——這跟真正的視窗縮放已經無關。物件貼在邊界附近
+    // 又還在旋轉時，這段會每影格反覆觸發、每次都直接 return，完整跳過
+    // 下面「移動→撞牆→翻轉方向→觸發反彈」的程式碼，畫面上就是「撞到牆
+    // 之後卡住不動」，只有某一影格內縮值剛好變動方向對了才會鬆開——這正
+    // 是「偶爾黏在牆壁上不會反彈」的成因。
+    // 修法：如同上面舊註解最後那段結論，把這個判斷式整段拿掉（先前只
+    // 改了說明文字、沒有真的刪掉程式碼），直接落到
     // 下面正常的「移動→撞牆判斷」流程即可——就算這一影格開始前球剛好落在
     // 新邊界外一點點，下面的撞牆判斷本來就會用同一組 minX/maxX/minY/maxY
     // 正常抓到、正常夾回、該反彈就反彈，不需要另外搶在前面處理，也不會
