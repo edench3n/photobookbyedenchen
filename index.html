@@ -3487,7 +3487,7 @@
   // 全部照片都處理完。「量第一個格子寬度、套用到全部格子」這件事只需要
   // 做一次（見下面 cellSide 變數），第一批處理完、量出寬度之後，直接
   // 沿用同一個數字套用到後面每一批新建立的格子，不用每批都重新量一次。
-  const GRID_RENDER_CHUNK_SIZE = 40; // 每一批處理的照片張數：數字越小，單批卡住主執行緒的時間越短，但要更多批次才能建完整個網格
+  const GRID_RENDER_CHUNK_SIZE = 15; // 每一批處理的照片張數（只有沒有真正 requestIdleCallback 的裝置才會用到這個保底上限，見上面完整說明）：數字越小，單批卡住主執行緒的時間越短，但要更多批次才能建完整個網格
   // onComplete：所有批次都建置完成才會呼叫一次（選填）。因為現在
   // renderGrid() 本身變成分批、非同步完成，呼叫端原本緊接在 renderGrid()
   // 後面做的「補一次全網格的動作」（例如下面 positionAllGridIdx() 那個
@@ -11117,7 +11117,18 @@
       prefetchAllInBackground();
       prefetchHoverThumbsInBackground();
     };
-    scheduleIdle(buildGridDeferred, { timeout: 1200, fallbackDelay: 0 });
+    // 見上面「使用者根本還看不到」那段既有的理由：網格建置＋背景預抓可以
+    // 慢一點才開始，換來的是「飄動物件剛出現、自己的圖片庫也才剛要開始
+    // 暖機」這最關鍵的頭幾秒，不用被網格搶掉閒置時間（完整成因見上面
+    // 這段新補的說明）。1500ms 抓一個大概的緩衝——比 dvdEImages 那邊
+    // 自己「顯示完 quickUrl 之後延遲 750ms 才開始整批裁切」略長一點，
+    // 確保網格開始排隊搶閒置時間的時候，飄動的 e 那邊已經至少把最初
+    // 幾張圖處理得差不多了；不是等它整個圖片庫都跑完才開始（圖片庫大小
+    // 不固定，等到跑完可能要好幾十秒，那樣拖慢網格出現的時間反而得不
+    // 償失，1500ms 只是換一個起跑順序，不是排隊等待完成）。
+    setTimeout(() => {
+      scheduleIdle(buildGridDeferred, { timeout: 1200, fallbackDelay: 0 });
+    }, 1500);
 
     // 背景閒置時間先把 Matter.js 預先載入＋剖析好（不等使用者真的雙擊
     // 飄動的 e 才臨時去下載）：原本 loadMatterJS() 只在 enterPhotoFallMode()
