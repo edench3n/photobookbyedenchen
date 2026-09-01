@@ -7344,8 +7344,29 @@
     if((now - dvdEImageLastChangeAt) < DVD_E_IMAGE_RAPID_MS){
       return; // 離上一次真正換圖太近，當作同一次連續撞擊，忽略、不換圖
     }
+    // ---------- 修正：「手機版剛進站，撞第二三下畫面忽然放大（沒真的換
+    // 照片）」----------
+    // 成因：已就緒池（dvdEImages）剛開始只有 1 筆——使用者這一刻正在看
+    // 的那張，一開始寫進去的是沒去背、保留留白的 quickUrl；背景裁切完成
+    // 後才會把去背乾淨的正式版本悄悄寫回同一格，刻意留給「下一次真的
+    // 撞牆」才套用，避免顯示中的圖片憑空跳動（見 init() 內 dvdEImages[idx]
+    // 賦值那段的完整說明）。但 pickNextDvdEImageIndex() 在池子只有 1 張
+    // 時，沒有其他候選，只能永遠選回同一個 index（見該函式 n<=1 的分支）
+    // ——於是「使用者這幾秒撞的其實都是同一張、根本沒換」的這幾次撞擊，
+    // 會被這裡當成一次正常換圖執行，套用到的剛好是背景剛裁切完成、拿掉
+    // 透明留白的正式版本：畫面高度（--dvd-area-scale）沒有變，但去背後
+    // 的圖案直接塞滿整個框，肉眼看起來就是「同一張照片忽然放大」，而不是
+    // 真的換了一張——這正是這次回報的成因，只有等池子真的長大到有第二張
+    // 候選、選圖邏輯選到不同的 index，才會是一次貨真價實的換圖。
+    // 修法：池子只有 1 張、又選回目前正在顯示的同一個 index 時，代表這
+    // 不是真正的換圖，直接跳過、不觸發顯示更新（也不要打亂
+    // dvdEImageLastChangeAt／history 的節奏），讓背景剛寫回的正式版本
+    // 安靜留在陣列裡；真的等池子長大、換到別張照片時才自然帶出來，不會
+    // 再有「沒換照片卻忽然放大」的空窗期。
+    const nextIndex = pickNextDvdEImageIndex();
+    if(dvdEImages.length <= 1 && nextIndex === dvdEImageIndex) return;
     dvdEImageLastChangeAt = now;
-    dvdEImageIndex = pickNextDvdEImageIndex();
+    dvdEImageIndex = nextIndex;
     dvdEImageRecentHistory.push(dvdEImageIndex);
     if(dvdEImageRecentHistory.length > DVD_E_IMAGE_NO_REPEAT_COUNT){
       dvdEImageRecentHistory.shift(); // 只需要留最近這幾張，舊的自然淘汰
