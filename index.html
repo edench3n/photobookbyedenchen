@@ -6984,21 +6984,104 @@
   // （跟原本 Promise.all 最終要做的事完全一樣），但攤開在一段時間裡進行，
   // 不會再有「集中在同一小段時間內」造成的明顯卡頓。跟上面 prefetchAllInBackground()
   // / prefetchHoverThumbsInBackground() 用的是同一套排隊手法。
+  // ---------- 修正：「還是會卡卡的」剩下的主因——網路下載整個被序列化了
+  // ----------
+  // 上面幾輪修正（去背裁切本身改用縮小版取樣掃邊界、PNG 編碼改走非同步
+  // toBlob()、遮罩建立拆成一批批列）都已經把「裁切運算」這件事本身的
+  // 主執行緒成本壓得很低了；但這裡原本 step() 是「這一張完整處理完（含
+  // 網路下載＋解碼＋裁切）才透過 scheduleIdle() 排下一張」——網路下載
+  // 本身完全被綁進這條序列化的鏈子裡，圖片庫張數一多，光是「一張一張
+  // 排隊等網路來回」加總起來的時間，就可能是使用者形容「剛進站還會卡
+  // 好一陣子」的主要來源：不是裁切運算真的卡住主執行緒那麼久，是「整批
+  // 圖片庫要花多久才全部準備好」這件事本身被網路延遲拖得很長，而飄動
+  // 物件在這整段「還沒準備好」的期間，撞牆用的像素遮罩、換圖用的裁切
+  // 版本都還沒完全就緒，跟這段期間內其他背景工作（網格建置、預抓等）
+  // 的執行時間點又常常重疊，加起来就是「頓一下」的次数、感受到的时长
+  // 都偏多。
+  // 修法：把「下載」跟「裁切」拆成兩件事分開處理——
+  //   ① 下載（fetch＋轉成 blob URL＋等圖片真的解碼完成）：改用一個固定
+  //      大小的「預抓視窗」（DVD_E_PREFETCH_LOOKAHEAD 張）主動提前搶跑，
+  //      不受 scheduleIdle() 的閒置節奏限制。這一段主要是在「等網路」，
+  //      不吃主執行緒的運算時間，多開幾張平行下載並不會讓飄動物件更卡，
+  //      純粹是縮短「整批圖片庫準備好」所需的總時間。
+  //   ② 真正花 CPU 的裁切運算（trimLoadedImage()）：完全維持原本一張
+  //      一張、透過 scheduleIdle() 排隊執行的節奏不變——這一段才是真的
+  //      會讓主執行緒卡住一下的部分，繼續攤開執行，不因為下載變快了就
+  //      跟著變得更密集，飄動物件單次頓挫的幅度不會因此變得更明顯。
+  // 兩者疊加：下載時間被「平行、提前」蓋掉大半，真正決定「整批準備好」
+  // 所需總長的變成裁切運算本身（本來就已經很輕量）＋ scheduleIdle() 的
+  // 排隊間隔，可以明顯縮短；但每一批裁切運算單獨造成的頓挫幅度完全沒變，
+  // 不會有「總時間變短、但同一段時間內卡得更密集」這種副作用。
+  // 下載失敗（網路錯誤、CORS 等）時退回呼叫原本的 trimTransparentImage()
+  // 整套容錯路徑（重新 fetch 一次、失敗再試 crossOrigin img、最後真的
+  // 不行就用原圖），行為跟原本完全一致，只是這種情況下沒辦法享受到
+  // 預抓帶來的時間縮短。
   function trimDvdEImagesStaggered(urls, onItemReady){
     return new Promise(resolve => {
       const results = new Array(urls.length);
       let i = 0;
+
+      const DVD_E_PREFETCH_LOOKAHEAD = 3; // 同時間最多幾張圖片在搶跑下載，抓一個不會對行動網路造成太大負擔、又足夠蓋掉單張下載時間的數字
+      const prefetchCache = new Map(); // idx -> Promise，resolve 成 { img, blobUrl }（下載＋解碼成功）或 null（失敗，裁切階段會改用 trimTransparentImage() 的完整容錯路徑重新讀取）
+
+      function prefetchDvdEBlob(idx){
+        if(idx >= urls.length || prefetchCache.has(idx)) return;
+        const url = urls[idx];
+        prefetchCache.set(idx, fetch(url, { mode: 'cors' }).then(res => {
+          if(!res.ok) throw new Error('fetch failed: ' + res.status);
+          return res.blob();
+        }).then(blob => {
+          const blobUrl = URL.createObjectURL(blob);
+          return loadImageEl(blobUrl, null).then(
+            img => ({ img, blobUrl }),
+            err => { URL.revokeObjectURL(blobUrl); throw err; }
+          );
+        }).catch(() => null));
+      }
+
+      // 一開始先把最前面這一批填滿預抓視窗，讓最先要用到的幾張圖立刻
+      // 開始搶跑下載，不用等第一次 scheduleIdle() 真的觸發才開始。
+      for(let p = 0; p < DVD_E_PREFETCH_LOOKAHEAD; p++) prefetchDvdEBlob(p);
+
       function step(){
         if(i >= urls.length){ resolve(results); return; }
         const idx = i++;
-        trimTransparentImage(urls[idx]).then(result => {
-          results[idx] = result;
+        const url = urls[idx];
+        // 這一張正式輪到處理了，順手把預抓視窗往後推一格，讓還沒被排到
+        // 的下一張圖片也提前開始下載，維持視窗大小（同時在搶跑下載的
+        // 張數）不變，形成一個持續往前滑動的下載視窗。
+        prefetchDvdEBlob(idx + DVD_E_PREFETCH_LOOKAHEAD);
+
+        const afterTrim = (trimmed) => {
+          results[idx] = trimmed;
           // onItemReady：每處理完一張就立刻通知呼叫端，不用等整批都跑完
           // ——供下面 init() 的「已就緒池」機制使用，讓可以撞牆換到的圖庫
           // 隨處理進度即時變多，不用整批處理完成才一次到位（完整成因、
           // 設計理由見 init() 內對應的完整說明）。
-          if(onItemReady) onItemReady(idx, result);
+          if(onItemReady) onItemReady(idx, trimmed);
           scheduleNext();
+        };
+
+        (prefetchCache.get(idx) || Promise.resolve(null)).then(entry => {
+          if(!entry){
+            // 預抓失敗，或這張圖片還沒被提前排進視窗（理論上不會發生，
+            // 保底而已）：退回原本整套容錯路徑重新讀取。
+            trimTransparentImage(url).then(afterTrim);
+            return;
+          }
+          // 下載＋解碼多半這時候已經在背景完成了，這裡才真正花 CPU 做
+          // 裁切運算——只有這一步會被計入 scheduleIdle() 的排隊節奏。
+          trimLoadedImage(entry.img, url).then(trimmed => {
+            URL.revokeObjectURL(entry.blobUrl);
+            if(trimmed === null){
+              // 理論上不太會發生（blob: URL 屬於同源，不該有跨網域限制
+              // 讀取像素失敗的問題）：保底跟原本 trimTransparentImage() 一樣，
+              // 改走完整的容錯路徑重新讀取。
+              trimTransparentImage(url).then(afterTrim);
+            } else {
+              afterTrim(trimmed);
+            }
+          });
         });
       }
       function scheduleNext(){
