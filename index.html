@@ -6550,6 +6550,7 @@
   // 原本數值不變，畫質/精細度完全不受影響。
   const PF_ALPHA_MASK_MAX_DIM = DVD_LOW_POWER_DEVICE ? 48 : 72; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能
   const PF_ALPHA_MASK_THRESHOLD = 10; // 跟 DVD_TRIM_ALPHA_THRESHOLD 用同一個容忍值，判斷是否為「有畫到東西」
+  const PF_ALPHA_MASK_CELL_MAJORITY = 0.5; // 縮小成遮罩格子時，這一格裡「有畫到東西」的像素要佔多少比例才算整格實心——見下面 buildAlphaMaskFromSourceChunked() 內的完整說明，避免只沾到一點顏色的邊緣格被整格補滿，讓遮罩邊界比原圖實際邊緣多凸出一圈
 
   // src -> {mask:Uint8Array(0/1), w, h}｜null（讀取失敗，永久視為沒有遮罩可用）。
   // 沒有這個 key 代表「還沒開始建立」；建立中的狀態另外用 Set 追蹤，避免
@@ -6649,14 +6650,27 @@
         for(let mx = 0; mx < maskW; mx++){
           const sx0 = Math.floor(mx * fullW / maskW);
           const sx1 = Math.max(sx0 + 1, Math.floor((mx + 1) * fullW / maskW));
-          let solid = 0;
-          for(let sy = sy0; sy < sy1 && !solid; sy++){
+          // ---------- 修正「撞牆其實是用圖片旁邊的空白在撞」 ----------
+          // 原本這裡只要縮小前的這一小格範圍內，有「任何一個」像素 alpha
+          // 超過門檻，就把整格判定成實心（"any"／OR 邏輯）。缺角、羽化邊緣
+          // 這種每一格只有一小角落沾到顏色的情況，會被這個 OR 邏輯直接
+          // 「補滿」成整格實心——等於把遮罩的可視範圍往外撐大了最多將近
+          // 一整格的寬度（72 格解析度下，一格約等於原圖寬度的 1/72）。使用者
+          // 撞牆時看到的「明明是空白卻撞到」，正是因為遮罩在那一小圈邊緣
+          // 本來就多算了一圈「其實透明」的格子當作實心。
+          // 改成算這一格範圍內「真正有畫到東西」的像素比例，超過一半
+          // （PF_ALPHA_MASK_CELL_MAJORITY）才算這一格實心——這樣遮罩的
+          // 邊界會落在「這一格大部分是不是有顏色」的中線附近，貼齊原圖
+          // 實際去背邊緣的視覺重心，不會再系統性地把邊界往外膨脹一整格。
+          let solidCount = 0, totalCount = 0;
+          for(let sy = sy0; sy < sy1; sy++){
             const rowBase = sy * fullW;
             for(let sx = sx0; sx < sx1; sx++){
-              if(fullData[(rowBase + sx) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD){ solid = 1; break; }
+              totalCount++;
+              if(fullData[(rowBase + sx) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD) solidCount++;
             }
           }
-          mask[my * maskW + mx] = solid;
+          mask[my * maskW + mx] = (totalCount > 0 && solidCount / totalCount >= PF_ALPHA_MASK_CELL_MAJORITY) ? 1 : 0;
         }
         my++;
         rowsDoneThisBatch++;
@@ -7852,6 +7866,32 @@
     // 限制單幀最大時間差，避免分頁切到背景、幾秒後切回來時，元素瞬間跳一大段
     const dt = Math.min(48, timestamp - dvdLastTime) / 1000;
     dvdLastTime = timestamp;
+
+    // ---------- 修正「照片已經延伸出去邊界才有撞擊」 ----------
+    // dvdW/dvdH 原本只在少數幾個時間點（換圖、resize、抓放結束……見上面
+    // measureDvdSize() 呼叫點）重新量測一次，量到之後就快取著，之後每一
+    // 影格的撞牆／邊界判斷都直接沿用那個快取值。問題是 .dvd-bounce-img
+    // 的 height 現在有一條 .32s 的 CSS transition（見上面 CSS 該條規則的
+    // 完整說明）——撞牆換上新一張圖時，圖片的「實際顯示大小」會在接下來
+    // 這 0.32 秒內連續變化（從舊圖的高度平滑滑到新圖依 --dvd-area-scale
+    // 算出來的目標高度），但 measureDvdSize() 只在換圖那一瞬間量了一次，
+    // 量到的通常還是動畫「起點」附近的大小，接下來這 0.32 秒畫面上圖片
+    // 明明還在繼續放大／縮小，撞牆用的 dvdW/dvdH 卻整段時間都凍結在那個
+    // 起點值不動——這正是「圖片肉眼看起來已經超出邊界了，卻還沒被判定成
+    // 撞牆」（新圖比起點大，視覺尺寸領先撞牆框）、或反過來「明明看起來
+    // 還沒碰到，卻已經撞牆」（新圖比起點小，撞牆框比視覺尺寸領先）這兩種
+    // 症狀共同的成因：只要換圖，接下來 0.32 秒內撞牆判斷用的框，跟畫面上
+    // 真正看得到的圖片邊緣就是兩個不同、對不起來的尺寸。
+    // 修法：每一影格都重新呼叫 measureDvdSize()，讓 dvdW/dvdH 隨時貼著
+    // offsetWidth/offsetHeight 當下（不管有沒有正在過渡中）的即時排版
+    // 尺寸——跟上面 computeDvdPixelInsets() 因為物件持續旋轉、選擇「每一
+    // 影格重新算一次」是同一個道理。offsetWidth/offsetHeight 不受
+    // transform（旋轉、抓取縮放）影響（見 measureDvdSize() 上方原本的
+    // 說明），只會反映 height 這條 transition 當下真正算出來的排版高度，
+    // 所以這裡逐影格重新量測，量到的就是動畫過程中「這一瞬間」真正的
+    // 顯示尺寸，撞牆框全程跟畫面上的圖片邊緣同步，不會再有這段追不上的
+    // 空窗期。
+    measureDvdSize();
 
     // 正在快速滑出障礙物（見 resolveDvdObstacleCollision 裡修正距離太大的
     // 分支）：這幾影格單純沿著滑出的軌跡跑到目標位置，不疊加下面一般的
