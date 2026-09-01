@@ -7065,6 +7065,143 @@
   let dvdDragCandidatePointerId = null;
   let dvdDragCandidateStartX = 0, dvdDragCandidateStartY = 0;
 
+  // ---------- 手機／觸控：抓住飄動的 e 之後，補上第二根手指可以旋轉它 ----------
+  // 需求：使用者用一根手指抓住飄動的 e（已經走上面 commitDvdDrag() 那套
+  // 拖曳邏輯）之後，再補上第二根手指，兩指像轉盤子一樣繞著轉，e 的角度
+  // 要跟著即時旋轉；放開的時候如果兩指還帶著轉動的速度，要像位置的
+  // 「甩出去」（見下面 dvdPointerUp 內 DVD_FLING_WINDOW_MS 那段）一樣，讓它
+  // 帶著這股角速度繼續自己轉一段時間、自然衰減停下來，也就是「轉一下把它
+  // 丟出去」的手感。
+  //
+  // 做法：不新開一套獨立的手勢系統，而是接到既有的 dvdRotationDeg／
+  // dvdRotationVel／stepDvdRotation() 這一套「角度＋角速度＋摩擦力衰減」
+  // 基礎設施上（原本只有撞牆會呼叫 kickDvdRotation() 疊加角速度）——兩指
+  // 旋轉手勢進行中，直接用兩指連線角度的變化量即時改寫 dvdRotationDeg；
+  // 放開時則反過來，算出最後一小段時間的角速度回填進 dvdRotationVel，
+  // 之後不管是主迴圈 stepDvdBounce()（放開拖曳之後）還是下面另外補的
+  // dvdDragRotRAF 小迴圈（還在拖曳、但旋轉手指先放開的期間），都只要
+  // 照常呼叫 stepDvdRotation() 就會自動接手衰減，不需要另外寫一套收尾
+  // 動畫。
+  let dvdRotatePointerId = null; // 目前負責旋轉手勢的第二根手指 pointerId；null 代表沒有在做旋轉手勢
+  let dvdRotateLastAngle = 0; // 上一次量到的「兩指連線」角度（弧度）。逐影格算跟上一次的差值來累加，
+    // 不是拿目前角度去減一個固定不變的起始角度——手指持續繞圈時，差值
+    // 累加法完全不會受 atan2() 回傳範圍只有 -PI~PI 這件事影響（角度繞過
+    // ±180° 那一刻也不會瞬間跳一大圈），跟位置那邊用「增量」而不是「絕對值」
+    // 累加的精神是一致的。
+  let dvdRotateSamples = []; // 最近的 {t, deg} 取樣，放開旋轉手指時用來算「甩轉」瞬間的角速度，寫法比照 dvdMoveSamples／DVD_FLING_WINDOW_MS 那一套
+  const DVD_ROTATE_FLING_WINDOW_MS = 80; // 跟 DVD_FLING_WINDOW_MS 同一個概念、同一個時長，只是換成角度的版本
+  let dvdPrimaryTouchX = 0, dvdPrimaryTouchY = 0; // 目前負責拖曳位置的第一根手指／滑鼠最新的螢幕座標，算「兩指連線角度」要用這個當其中一個端點
+  let dvdDragRotRAF = null; // 專門給「還在拖曳位置，但旋轉手指已經放開」這段期間用的小迴圈：
+    // 主迴圈 stepDvdBounce() 只要偵測到 dvdDragging 就整個暫停（見該函式
+    // 最上面的 guard），放開拖曳之前不會有任何人繼續呼叫 stepDvdRotation()
+    // 讓角速度衰減、畫面也不會更新，甩轉的動作會卡住不動——這個小迴圈就是
+    // 補這段空窗期，跟主迴圈用同一顆 stepDvdRotation()，只是各自負責不同的
+    // 時間區段，兩者不會同時跑（見下面 guard）。
+  let dvdDragRotLastTime = null;
+
+  // 把「這一刻」累積的旋轉取樣，換算成放開當下的瞬時角速度（度／秒），
+  // 回填進 dvdRotationVel——邏輯完全比照 dvdPointerUp() 內算位置末速度的
+  // 那一段（見該處對 DVD_FLING_WINDOW_MS 的完整說明：只看放開前這個窗口
+  // 內、相對放開當下回推的取樣，快速轉動→停住→放開才會正確算出趨近 0
+  // 的角速度，不會被停住前的舊資料誤判成還在高速旋轉）。
+  function finalizeDvdRotateVelocity(){
+    const now = performance.now();
+    dvdRotateSamples.push({ t: now, deg: dvdRotationDeg });
+    while(dvdRotateSamples.length > 1 && now - dvdRotateSamples[0].t > DVD_ROTATE_FLING_WINDOW_MS){
+      dvdRotateSamples.shift();
+    }
+    const first = dvdRotateSamples[0];
+    const last = dvdRotateSamples[dvdRotateSamples.length - 1];
+    const dt = Math.max(1, last.t - first.t) / 1000;
+    const angularVel = (last.deg - first.deg) / dt;
+    // 上限抓寬鬆一點（DVD_ROTATION_MAX_VEL 的兩倍）：撞牆的旋轉衝量本來
+    // 就是很輕巧的力道，兩指旋轉是使用者主動、明確的手勢，容許轉得更快，
+    // 純粹保底避免觸控座標量測雜訊在極端情況下算出離譜的數值。
+    dvdRotationVel = Math.max(-DVD_ROTATION_MAX_VEL * 2, Math.min(DVD_ROTATION_MAX_VEL * 2, angularVel));
+  }
+
+  // 拖曳位置期間，旋轉手指放開後如果還留有角速度，起這個小迴圈接手讓它
+  // 自然衰減；一旦真的放開整個拖曳、或使用者重新按上旋轉手指，就讓出
+  // 控制權（見下面 guard），不會跟主迴圈或手動旋轉互相打架。
+  function startDvdDragRotationDecay(){
+    if(dvdDragRotRAF) return; // 已經在跑了
+    dvdDragRotLastTime = null;
+    dvdDragRotRAF = requestAnimationFrame(stepDvdDragRotationDecay);
+  }
+  function stepDvdDragRotationDecay(timestamp){
+    if(!dvdDragging || dvdRotatePointerId !== null){
+      // 已經放開整個拖曳（交給主迴圈 stepDvdBounce 接手）、或又重新按上
+      // 旋轉手指（角度改由手勢直接控制，不需要這裡的自動衰減）：停止。
+      dvdDragRotRAF = null;
+      dvdDragRotLastTime = null;
+      return;
+    }
+    if(dvdDragRotLastTime === null) dvdDragRotLastTime = timestamp;
+    const dt = Math.min(48, timestamp - dvdDragRotLastTime) / 1000;
+    dvdDragRotLastTime = timestamp;
+    stepDvdRotation(dt);
+    dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
+    if(dvdRotationVel === 0){
+      // 已經自然衰減到 0，不用繼續空轉這個迴圈，等下一次真的又有新的旋轉
+      // 動作（重新抓旋轉手指、或再放開一次）才會重新啟動。
+      dvdDragRotRAF = null;
+      dvdDragRotLastTime = null;
+      return;
+    }
+    dvdDragRotRAF = requestAnimationFrame(stepDvdDragRotationDecay);
+  }
+
+  // 第二根手指落下、確定要開始兩指旋轉手勢：記錄基準角度（跟第一根手指
+  // 目前位置連線的角度），之後 dvdRotatePointerMove() 只需要逐影格算跟
+  // 上一次的差值疊加上去即可（見上面 dvdRotateLastAngle 的完整說明）。
+  function startDvdRotateGesture(e){
+    dvdRotatePointerId = e.pointerId;
+    try{ dvdBounce.setPointerCapture(e.pointerId); }catch(err){}
+    // 開始手動旋轉的當下，先把殘留的物理旋轉角速度（例如剛撞完牆還沒轉完）
+    // 歸零，改成完全交給手勢直接控制角度，避免兩者疊加造成轉速異常、或者
+    // 手一放開又混雜了撞牆殘留的角速度，跟使用者這一下的手勢完全對不上。
+    dvdRotationVel = 0;
+    dvdRotateLastAngle = Math.atan2(e.clientY - dvdPrimaryTouchY, e.clientX - dvdPrimaryTouchX);
+    dvdRotateSamples = [{ t: performance.now(), deg: dvdRotationDeg }];
+  }
+
+  function dvdRotatePointerMove(e){
+    if(e.pointerId !== dvdRotatePointerId) return;
+    e.preventDefault();
+    const angle = Math.atan2(e.clientY - dvdPrimaryTouchY, e.clientX - dvdPrimaryTouchX);
+    let deltaRad = angle - dvdRotateLastAngle;
+    // 正規化到 -PI ~ PI：兩指連線角度剛好跨過 180° 那一瞬間，直接相減會
+    // 從接近 +PI 瞬間跳到接近 -PI（或反過來），這裡修正回「這一影格實際
+    // 轉動的最短角度」，物件才不會在那一刻無故瞬間轉一大圈。
+    while(deltaRad > Math.PI) deltaRad -= Math.PI * 2;
+    while(deltaRad < -Math.PI) deltaRad += Math.PI * 2;
+    dvdRotateLastAngle = angle;
+    dvdRotationDeg += deltaRad * 180 / Math.PI;
+    dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
+
+    const now = performance.now();
+    dvdRotateSamples.push({ t: now, deg: dvdRotationDeg });
+    while(dvdRotateSamples.length > 2 && now - dvdRotateSamples[0].t > DVD_ROTATE_FLING_WINDOW_MS){
+      dvdRotateSamples.shift();
+    }
+  }
+
+  // 結束旋轉手勢（放開手指、手勢被系統取消、或主要拖曳手指先放開）共用
+  // 的收尾：算出甩轉的角速度、釋放 pointer capture，並視情況啟動上面的
+  // 拖曳期間自動衰減小迴圈。
+  function endDvdRotateGesture(pointerId){
+    if(dvdRotatePointerId === null || pointerId !== dvdRotatePointerId) return;
+    try{ dvdBounce.releasePointerCapture(dvdRotatePointerId); }catch(err){}
+    dvdRotatePointerId = null;
+    finalizeDvdRotateVelocity();
+    startDvdDragRotationDecay();
+  }
+
+  function dvdRotatePointerUp(e){
+    if(e.pointerId !== dvdRotatePointerId) return;
+    endDvdRotateGesture(e.pointerId);
+  }
+
   // ---------- 飄動的「e」撞擊時的旋轉 ----------
   // 每次真的撞到東西（螢幕邊界或頁面內的圖片）就給一個角速度衝量，之後
   // 不是瞬間停掉，而是跟現有的風力／甩動系統（dvdNudgeVY）同一種寫法：
@@ -7851,6 +7988,10 @@
     dvdGrabOffsetX = e.clientX - dvdX;
     dvdGrabOffsetY = e.clientY - dvdY;
     dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
+    // 記下這根手指目前的座標，供之後補第二根手指做兩指旋轉時，拿來當
+    // 「兩指連線」的其中一個端點（見上面 startDvdRotateGesture() 的說明）。
+    dvdPrimaryTouchX = e.clientX;
+    dvdPrimaryTouchY = e.clientY;
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
   }
 
@@ -7873,6 +8014,11 @@
     const maxX = dvdBoundMaxX(), maxY = dvdBoundMaxY();
     dvdX = clampDvd(e.clientX - dvdGrabOffsetX, minX, maxX);
     dvdY = clampDvd(e.clientY - dvdGrabOffsetY, minY, maxY);
+    // 隨時更新這根手指目前的座標，讓正在進行中的兩指旋轉手勢（如果有）
+    // 拿到的「連線角度」永遠是相對這根手指最新位置算出來的，位置拖曳跟
+    // 兩指旋轉可以同時進行，不會互相干擾。
+    dvdPrimaryTouchX = e.clientX;
+    dvdPrimaryTouchY = e.clientY;
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
 
     const now = performance.now();
@@ -7899,6 +8045,15 @@
       return;
     }
     if(e.pointerId !== dvdPointerId) return;
+
+    // 主要拖曳手指放開時，如果另一根手指還按著在做兩指旋轉，這根旋轉手指
+    // 也一併視為結束：用它「這一刻」的角速度當最終甩轉速度（見
+    // endDvdRotateGesture／finalizeDvdRotateVelocity 的說明），跟下面算
+    // 位置末速度是同一套「放開當下的瞬時狀態決定甩出去的力道」的精神。
+    // 結束後主迴圈 stepDvdBounce()（下面 dvdRAF 重新排入）會自然接手繼續
+    // 讓這股角速度衰減，不需要另外處理。
+    if(dvdRotatePointerId !== null) endDvdRotateGesture(dvdRotatePointerId);
+
     dvdDragging = false;
     dvdBounce.classList.remove('dvd-grabbing'); // 放開，觸發同一段 transition 平滑放大回原尺寸
     try{ dvdBounce.releasePointerCapture(e.pointerId); }catch(err){}
@@ -7976,6 +8131,14 @@
   dvdBounce.addEventListener('pointermove', dvdPointerMove);
   dvdBounce.addEventListener('pointerup', dvdPointerUp);
   dvdBounce.addEventListener('pointercancel', dvdPointerUp);
+  // 兩指旋轉手勢用的第二個 pointerId，寫法比照上面三行：固定綁在 dvdBounce
+  // 本身，靠 startDvdRotateGesture() 裡呼叫的 setPointerCapture() 把這個
+  // pointerId 之後的事件直接指定送過來，函式內部再各自比對是不是自己在
+  // 追蹤的那個 pointerId（見 dvdRotatePointerMove／dvdRotatePointerUp
+  // 開頭的判斷），不會跟上面負責位置拖曳的那一組互相干擾。
+  dvdBounce.addEventListener('pointermove', dvdRotatePointerMove);
+  dvdBounce.addEventListener('pointerup', dvdRotatePointerUp);
+  dvdBounce.addEventListener('pointercancel', dvdRotatePointerUp);
   // 額外保險：桌機／平板用滑鼠拖曳時，比手機觸控更容易發生「放開的那一刻
   // 事件根本沒送達」的情況——例如把滑鼠拖出瀏覽器視窗範圍外才放開按鍵、
   // 切換分頁／視窗（alt-tab）、或瀏覽器基於某些理由自己收回了 pointer
@@ -7990,10 +8153,21 @@
   //   2) 分頁/視窗失去焦點（blur）：使用者切走了，理論上滑鼠按鍵狀態
   //      已經跟目前的頁面無關，一律當作已經放開處理
   dvdBounce.addEventListener('lostpointercapture', (e) => {
+    // 先比對是不是旋轉手指弄丟了 capture（例如系統手勢打斷）：這根手指
+    // 跟負責拖曳位置的那根是各自獨立的 pointerId，要各自收尾，不能被下面
+    // 「只看 dvdDragging」那個分支誤判、或蓋掉旋轉手指自己的結束流程。
+    if(dvdRotatePointerId !== null && e.pointerId === dvdRotatePointerId){
+      endDvdRotateGesture(e.pointerId);
+      return;
+    }
     if(dvdDragging) dvdPointerUp(e);
     else if(dvdDragCandidatePointerId === e.pointerId) dvdDragCandidatePointerId = null;
   });
   window.addEventListener('blur', () => {
+    // 分頁／視窗失去焦點：旋轉手指跟拖曳手指都視同已經放開，各自走各自的
+    // 收尾流程（順序上先結束旋轉，讓 dvdPointerUp() 裡「主要手指放開時
+    // 順便處理還沒放開的旋轉手指」那段判斷維持單純，這裡先處理掉即可）。
+    if(dvdRotatePointerId !== null) endDvdRotateGesture(dvdRotatePointerId);
     if(dvdDragging) dvdPointerUp({ pointerId: dvdPointerId });
     else dvdDragCandidatePointerId = null;
   });
@@ -8086,6 +8260,24 @@
     // 隱藏狀態（dvd-hidden）時，它的邊界框只是停在最後位置的「隱形」
     // 矩形，不該繼續攔截落在它範圍內的點擊/觸控，直接放行。
     if(dvdBounce.classList.contains('dvd-hidden')) return;
+
+    // 已經有一根手指在拖曳飄動的 e（dvdDragging 為 true），這一下如果是
+    // 另一根手指落下：不能讓它跟下面一般流程一樣被當成「新的一次拖曳
+    // candidate」（那樣會覆蓋掉 dvdDragCandidatePointerId，打斷正在進行
+    // 中的拖曳），改成試著接手當「兩指旋轉」的第二根手指。只有還沒有
+    // 別的手指在做旋轉手勢（dvdRotatePointerId === null）、且這一下確實
+    // 落在飄動字的容錯熱區內，才真的啟動旋轉；不管有沒有命中，這一下都
+    // 直接 return，不會落到下面繼續被當一般拖曳／點擊處理。
+    if(dvdDragging && e.pointerId !== dvdPointerId){
+      if(dvdRotatePointerId === null){
+        const rotRect = dvdBounce.getBoundingClientRect();
+        if(dvdHitTest(rotRect, e.clientX, e.clientY, DVD_GRAB_PADDING_TOUCH)){
+          startDvdRotateGesture(e);
+        }
+      }
+      return;
+    }
+
     const rect = dvdBounce.getBoundingClientRect();
     // 滑鼠（pointerType === 'mouse'）用比較窄的桌機容錯；觸控／筆這類準度
     // 較低的輸入方式一律用比較寬的觸控容錯，跟上面 touchstart 監聽器判斷
@@ -8582,6 +8774,12 @@
     if(dvdRAF){ cancelAnimationFrame(dvdRAF); dvdRAF = null; }
     dvdDragging = false;
     dvdBounce.classList.remove('dvd-grabbing');
+    // 保險：萬一雙擊觸發堆疊模式那一刻，剛好還有兩指旋轉手勢殘留在進行中
+    // （理論上雙擊本身要求原地沒有明顯位移才會判定成立，機率極低，但這裡
+    // 不假設一定不會發生），強制結束掉，避免遺留的 pointerId 之後繼續收到
+    // 事件、跟物理堆疊模式的 transform 控制權互搶。
+    if(dvdRotatePointerId !== null) endDvdRotateGesture(dvdRotatePointerId);
+    if(dvdDragRotRAF){ cancelAnimationFrame(dvdDragRotRAF); dvdDragRotRAF = null; }
 
     // 原本 e 是等首頁縮圖收起的 PHOTO_FALL_SHRINK_MS（420ms）過完，才跟 15
     // 張照片一起被丟進物理世界，這段空檔它已經停止飄動、卻還沒開始受重力，
@@ -9621,6 +9819,9 @@
     if(dvdRAF){ cancelAnimationFrame(dvdRAF); dvdRAF = null; }
     dvdDragging = false;
     dvdBounce.classList.remove('dvd-grabbing');
+    // 保險同上（見 enterPhotoFallMode 內對應那段的說明）。
+    if(dvdRotatePointerId !== null) endDvdRotateGesture(dvdRotatePointerId);
+    if(dvdDragRotRAF){ cancelAnimationFrame(dvdDragRotRAF); dvdDragRotRAF = null; }
     const Matter = window.Matter;
     if(Matter && pfEngine){
       if(!pfDvdItem){
