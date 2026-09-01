@@ -7043,7 +7043,21 @@
   // 圖庫張數不夠多（小於等於這個數字）時，excludeCount 會自動降低，最多
   // 只排除到「陣列長度 - 1」張，保證永遠至少留一張可選、不會卡住。
   const DVD_E_IMAGE_NO_REPEAT_COUNT = 6;
-  let dvdEImageRecentHistory = [];
+  // ---------- 修正「剛打開網站，馬上就撞到跟現在畫面上同一張」----------
+  // 成因：dvdEImageIndex 預設是 0，而 0 這個位置永遠對應「使用者進站當下
+  // 已經在畫面上看到的那張初始圖」（見上面 dvdEImagesPromise.then() 內
+  // firstUrl／orderedUrls 的說明：firstUrl 一定被排在 orderedUrls 最前面、
+  // 準備好之後寫進 dvdEImages[0]，也就是 dvdEImageIndex 對應到的那一格）。
+  // 但這裡原本是空陣列——「最近顯示過」這份紀錄完全沒有把「使用者這一刻
+  // 正在看的這張」算進去，於是使用者進站後第一次撞牆，pickNextDvdEImageIndex()
+  // 排除名單是空的，機率上完全有可能又隨機挑回同一張（也就是索引 0），
+  // 使用者體感上就是「剛打開就馬上重複兩張一樣的」，「六張內不重複」這條
+  // 規則實質上從一進站就被繞過了一次。
+  // 修法：初始值直接放進 0，等同「開場那張已經算用過一次」，跟之後每次
+  // cycleDvdEImage() 真的換圖時會把新索引 push 進來的做法完全一致，第一次
+  // 撞牆自然就會排除掉使用者剛剛已經看過的這張，規則從進站第一刻就生效，
+  // 不會有例外的第一次。
+  let dvdEImageRecentHistory = [0];
   function pickNextDvdEImageIndex(){
     const n = dvdEImages.length;
     if(n <= 1) return 0;
