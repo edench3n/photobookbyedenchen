@@ -7741,8 +7741,52 @@
   // 不需要額外的透明熱區，撞牆判斷也因此精準貼合圖片實際邊緣而不是熱區。
   function dvdBoundMinX(){ return 0; }
   function dvdBoundMinY(){ return 0; }
-  function dvdBoundMaxX(){ return Math.max(0, window.innerWidth - dvdW); }
-  function dvdBoundMaxY(){ return Math.max(0, window.innerHeight - dvdH); }
+  // ---------- 修正：「手機版剛進站，飄動物件撞邊界卻不會切換照片」 ----------
+  // 成因：這兩個函式原本直接讀 window.innerWidth/innerHeight，每一影格都
+  // 是「當下這一刻」的即時視窗尺寸。手機瀏覽器（尤其 iOS/Android 上的
+  // Safari／各種 App 內建 WebView）在頁面剛載入的頭 1~2 秒，網址列收合／
+  // 展開的排版動畫幾乎必然會讓 innerWidth/innerHeight 連續變動好幾次——
+  // 桌機完全沒有這個現象，這正是「手機版特別明顯、桌機偶爾也有（字體
+  // swap 造成的一次性 reflow）、但都只發生在剛進站那幾秒」的成因。
+  // 下面 stepDvdBounce() 原本有一段「這一影格視窗尺寸如果跟上一影格不同，
+  // 就當成外部原因造成邊界縮小，靜默夾回、不觸發撞牆」的保護邏輯（是為了
+  // 修另一個問題：手機網址列收合造成的假撞牆）——但這段邏輯只看「尺寸
+  // 有沒有變」，沒辦法分辨「這是瀏覽器 UI 自己在收合動畫」還是「球這一
+  // 影格真的自己飄過去撞上邊界，剛好跟視窗尺寸變動同一影格發生」，剛進站
+  // 那幾秒兩者幾乎必然疊在一起，導致第一次撞擊被誤判成外部原因而整個
+  // 吞掉、不切照片，等 chrome 動畫穩定下來才恢復正常——完全對上回報的
+  // 症狀。
+  // 修法：撞牆邊界不再逐影格直接讀即時視窗尺寸，改成永遠讀一份「已穩定」
+  // 的快照（dvdSettledViewportW/H）；這份快照只在下面 scheduleDvdViewportSettle()
+  // 判定視窗尺寸真的穩定下來之後才更新一次（並透過 clampDvdIntoViewport()
+  // 把目前位置安靜地夾回新邊界，不觸發撞牆、不隨機重新定位）。這樣一來，
+  // 剛進站那幾秒 chrome 還在抖動的期間，物理迴圈看到的邊界完全不變，球
+  // 自己飄過去撞上「穩定邊界」照樣正常觸發撞牆換圖，不會再被第一次的
+  // 視窗抖動吞掉；等 chrome 真的穩定，才會有一次邊界更新，行為模式跟
+  // 現有的橫直轉向／視窗拖曳處理一致。
+  let dvdSettledViewportW = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+  let dvdSettledViewportH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  function dvdBoundMaxX(){ return Math.max(0, dvdSettledViewportW - dvdW); }
+  function dvdBoundMaxY(){ return Math.max(0, dvdSettledViewportH - dvdH); }
+  // resize／visualViewport resize 事件觸發後，等一段時間沒有再變化才真的
+  // 更新上面的「已穩定」快照——跟 scheduleViewportSettle()（見該函式旁的
+  // 完整說明，這裡是同一套 debounce 手法，用在飄動物件的撞牆邊界上）是
+  // 同一個道理，故意抓比它的 150ms 略長一點（180ms）：飄動物件邊界的
+  // 正確性優先於反應速度，寧可多等一點點，也不要在瀏覽器 UI 動畫還沒
+  // 收尾前就提早採信一個過渡態的尺寸。
+  let dvdViewportSettleDebounce = null;
+  const DVD_VIEWPORT_SETTLE_MS = 180;
+  function scheduleDvdViewportSettle(){
+    clearTimeout(dvdViewportSettleDebounce);
+    dvdViewportSettleDebounce = setTimeout(() => {
+      // 雙指縮放中途 visualViewport.width/height 反映的是縮放後的畫面，
+      // 不是真正的版面尺寸，這裡沿用 scheduleViewportSettle() 同一套
+      // 「還在縮放就先不採信、等下一次 resize 事件再判斷」的判斷式。
+      const stillZoomed = window.visualViewport && Math.abs(window.visualViewport.scale - 1) > 0.01;
+      if(stillZoomed) return;
+      clampDvdIntoViewport(); // 內部會把 dvdSettledViewportW/H 同步成當下最新尺寸，並把位置安靜地夾回新邊界
+    }, DVD_VIEWPORT_SETTLE_MS);
+  }
 
   function clampDvd(v, min, max){ return v < min ? min : (v > max ? max : v); }
 
@@ -7906,11 +7950,6 @@
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
   }
 
-  // 追蹤飄動迴圈自己上一次看到的視窗尺寸——只用來判斷「這一影格視窗是不是
-  // 真的被外部（例如手機網址列收合、瀏覽器介面重新排版）縮小過」，見下面
-  // stepDvdBounce() 裡「像素內縮值」分開判斷那段的完整說明。
-  let dvdLastViewportW = window.innerWidth, dvdLastViewportH = window.innerHeight;
-
   function stepDvdBounce(timestamp){
     // dvdDragging 在被指標（手指／滑鼠）抓著的時候會是 true——這種情況
     // 元素位置是直接被對應的 pointer 事件寫 transform 控制，物理迴圈本來
@@ -8054,10 +8093,28 @@
     // 生效；純粹因為旋轉造成的內縮值變動，不能再觸發這個分支——直接讓
     // 它落到下面正常的移動＋撞牆流程處理，該撞牆就正常撞牆、該繼續飄就
     // 繼續飄，不會有任何一影格被跳過不動。
-    const dvdViewportResizedThisFrame = window.innerWidth !== dvdLastViewportW || window.innerHeight !== dvdLastViewportH;
-    dvdLastViewportW = window.innerWidth;
-    dvdLastViewportH = window.innerHeight;
-    if(dvdViewportResizedThisFrame && (dvdX < minX || dvdX > maxX || dvdY < minY || dvdY > maxY)){
+    //
+    // ---------- 後續修正：這個判斷本身在手機版剛進站時反而誤傷正常撞擊
+    // ----------
+    // 上面兩段成因說明都成立，但「逐影格比較 window.innerWidth/innerHeight」
+    // 這個判斷式有個更根本的副作用：手機瀏覽器剛載入頁面的頭 1~2 秒，
+    // 網址列收合／展開的排版動畫幾乎必然會讓 innerWidth/innerHeight 連續
+    // 變動好幾影格，這段期間只要球剛好自己飄過去撞上邊界，也會被這裡
+    // 一併誤判成「外部原因」而靜默吸收、不觸發撞牆換圖——這正是「手機版
+    // 剛進站，撞邊界卻不會切照片，頂多發生一次、之後就正常」的成因（桌機
+    // 沒有網址列收合動畫，只有字體 swap 那一次性的 reflow 會偶爾觸發，
+    // 出現機率低很多）。
+    // 真正的修法是從源頭讓 dvdBoundMaxX()/dvdBoundMaxY() 不要再逐影格
+    // 直接讀即時視窗尺寸，改成讀一份只在真正穩定下來才更新的快照（見上面
+    // dvdBoundMaxX() 旁 dvdSettledViewportW/H 的完整說明）——邊界因此不會
+    // 再被 chrome 收合動畫這種「跟球的移動完全無關」的抖動牽動，這裡原本
+    // 「視窗尺寸變了就靜默夾回」的判斷式也就不再需要：邊界只有在
+    // clampDvdIntoViewport() 被明確呼叫時才會變（debounce 確定穩定後，或
+    // 橫直轉向輪詢），而那個函式本來就會自己直接把位置夾回新邊界、不會
+    // 經過這裡，兩者不會互相干擾。留著這段判斷反而會繼續誤傷手機版剛
+    // 進站那幾秒的正常撞擊，這裡整段拿掉，直接落到下面一般的移動＋撞牆
+    // 流程處理。
+    if(dvdX < minX || dvdX > maxX || dvdY < minY || dvdY > maxY){
       dvdX = clampDvd(dvdX, minX, maxX);
       dvdY = clampDvd(dvdY, minY, maxY);
       // 不改動 dvdWasScreenEdgeCollidedLastFrame：維持它原本的值，球下一次
@@ -8259,6 +8316,14 @@
     // 才是由物理迴圈接管；已經脫離物理世界、恢復飄動的狀態下，視窗尺寸
     // 改變還是要正常夾回新的邊界內，不能被 photoFallModeActive 擋住。
     if(photoFallModeActive && pfDvdItem) return; // 物理堆疊模式期間，飄動字的 transform 改由物理迴圈接管，這裡不能插手覆寫
+    // 這個函式代表呼叫端已經確定「現在該用最新的視窗尺寸了」（不管是
+    // debounce 判定穩定、還是橫直轉向輪詢的每一步），所以在這裡把上面
+    // dvdBoundMaxX()/dvdBoundMaxY() 依賴的 dvdSettledViewportW/H 同步成
+    // 當下真正的視窗尺寸，下面算出來的邊界才會是最新的；stepDvdBounce()
+    // 逐影格的撞牆判斷則完全不會走到這裡，繼續沿用同一份快照，兩者互不
+    // 干擾。
+    dvdSettledViewportW = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+    dvdSettledViewportH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
     measureDvdSize();
     dvdEscaping = false; // 視窗尺寸一變，舊的滑出目標位置可能已經不對，直接取消，改用下面重新夾回邊界的結果
     // 跟 stepDvdBounce()／dvdPointerMove() 用同一套像素級邊界（見
@@ -8823,9 +8888,17 @@
     e.preventDefault();
   }, true);
 
-  window.addEventListener('resize', clampDvdIntoViewport);
+  // 這裡原本是直接綁 clampDvdIntoViewport，resize 事件一觸發就立刻拿當下
+  // 即時的視窗尺寸重新夾一次邊界——手機版剛進站那幾秒，網址列收合動畫
+  // 會連續觸發好幾次 resize，等於連續好幾次都拿「過渡態」的尺寸更新
+  // dvdSettledViewportW/H（見上面該變數旁的完整說明），boundary 因此還是
+  // 會抖動，跟這裡想解決的問題沒有真正脫鉤。改成綁定 scheduleDvdViewportSettle()：
+  // 每次 resize 都重新起算一段等待時間，只有真正停止變化一段時間之後，
+  // 才會呼叫一次 clampDvdIntoViewport() 用「這時候」的（已經穩定的）尺寸
+  // 更新邊界，中途的過渡態尺寸完全不會被採信。
+  window.addEventListener('resize', scheduleDvdViewportSettle);
   if(window.visualViewport){
-    window.visualViewport.addEventListener('resize', clampDvdIntoViewport);
+    window.visualViewport.addEventListener('resize', scheduleDvdViewportSettle);
   }
 
   // ================= 照片物理掉落堆疊模式（雙擊飄動的 e 觸發／收起） =================
