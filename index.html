@@ -11214,6 +11214,34 @@
       return setDvdBounceImageSrc(quickUrl, 1)
         .then(markDvdRealImageReady)
         .then(() => {
+          // ---------- 修正：「手機版剛打開網頁，飄動物件第一次撞牆時圖案
+          // 完全沒反應（要等一陣子才會開始換）」----------
+          // 成因：cycleDvdEImage() 一開頭就是 `if(!dvdEImages.length) return;`
+          // ——撞牆當下如果 dvdEImages 還是空陣列，就直接整個no-op、畫面上
+          // 什麼都不會發生。但 dvdEImages 原本要等下面 trimDvdEImagesStaggered()
+          // 這條背景流程真的處理完「至少一張」（下載＋canvas 裁切透明留白）
+          // 才會 push 進第一筆，這是一段跟網路/裝置效能有關、長短不定的
+          // 非同步等待；而飄動物件本身（帶著 quickUrl 這張小圖）在這之前
+          // 就已經可以開始移動、開始撞牆了——中間這段「已經在飄、但圖片庫
+          // 還是空的」的空窗期，正是使用者回報「剛打開網頁時撞牆都不會換
+          // 圖案，過一陣子才正常」的成因。也正因為是「等圖片庫背景填滿」
+          // 這件事，不是一次性的初始化 bug，所以只要使用者稍微等一下（或
+          // 像離開 preview 頁再回來這種、中間隔了幾秒的操作）就會「自己
+          // 變正常」——池子這時多半已經被填了至少一筆。
+          // 另外下面 pickNextDvdEImageIndex() 旁的說明也已經預先假設了
+          // 「dvdEImages[0] 一定對應使用者這一刻已經在畫面上看到的初始圖」
+          // （dvdEImageRecentHistory 初始值是 [0]，等同把這張算成「已經
+          // 用過一次」）——但實際上 dvdEImages[0] 要等背景裁切完成才會真的
+          // 被寫入，在那之前陣列根本是空的，等於這個假設有一段時間對不上
+          // 實際狀態。
+          // 修法：這裡不等背景裁切，直接就地把「使用者這一刻已經看到的
+          // quickUrl 小圖」當成 dvdEImages[0] 先寫進去，讓撞牆判斷從一開始
+          // 就有「至少一張」可以用，不會再整個 no-op。之後 orderedUrls 的
+          // 背景裁切流程處理到第一張（同一張圖、裁切乾淨的正式版本）時，
+          // 原本就有的 `if(idx === dvdEImageIndex)` 分支會自動接手、換上
+          // 正式版本，不會被這裡的暫時寫入影響、也不會重複觸發跳動。
+          dvdEImages[0] = { src: quickUrl, scale: 1 };
+
           // 飄動物件這邊也準備好了：舉手告訴 attemptInitialReveal()，
           // 讓它跟 preview 照片那邊的旗標一起判斷，確保兩者是同一刻
           // 一起放行、一起出現，而不是各自獨立放行（完整說明見上面
@@ -11263,7 +11291,21 @@
             // 每處理完一張，立刻加進「已就緒池」——池子從空的開始，隨著
             // 處理進度慢慢長大，cycleDvdEImage() 永遠只從裡面選，保證
             // 每一次撞牆換到的都是已經準備好、能立即顯示的圖。
-            dvdEImages.push({ src: result.src, scale: 1 });
+            //
+            // 注意：這裡改成依 idx 直接指定位置（原本是 .push()）——因為
+            // 上面新增的「先用 quickUrl 暫時佔住 dvdEImages[0]」那段修正
+            // （見 dvdEImagesPromise.then() 內對應的完整說明）會讓陣列在
+            // 這段背景流程開始之前就已經有 1 筆暫時資料，如果這裡繼續用
+            // .push()（永遠加到陣列尾端），idx=0 處理完成時會被誤塞進
+            // dvdEImages[1]，導致「idx 對應 orderedUrls 第幾張」跟「這筆
+            // 資料實際落在 dvdEImages 陣列的第幾格」整個錯位一格——後面
+            // `idx === dvdEImageIndex`（目前正在顯示哪一格）的判斷、以及
+            // 下面 computeDvdAreaScales() 算完後 `dvdEImages[i] = entry`
+            // 依索引寫回的邏輯，都會全部跟著對不上。改成直接依 idx 指定
+            // 位置，不管陣列是從空的開始、還是已經預先塞了第 0 格，都能
+            // 保證 dvdEImages[idx] 永遠對應 orderedUrls[idx] 這一張，兩邊
+            // 索引不會再錯位。
+            dvdEImages[idx] = { src: result.src, scale: 1 };
             if(!firstEntryApplied){
               firstEntryApplied = true;
               // ---------- 修正「剛進網頁時還是會卡頓式稍微放大」----------
