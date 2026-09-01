@@ -2683,9 +2683,29 @@
       // 糊掉了」的程度，肉眼幾乎分辨不出跟 1600px 的差異，只有在「手機
       // 版飄動物件剛好放到最大、又剛好是 3x 螢幕」這種最極端的情況下，
       // 才有極輕微、幾乎看不出來的差距。
+      //
+      // ---------- 手機版再往下修一截：1400px → 1000px ----------
+      // 承上面「手機版剛進站，撞沒幾次就又看到同一張照片」那輪修正
+      // （見 trimDvdEImagesStaggered() 內 scheduleNext() 的完整說明）：
+      // 那輪只收緊了排程的「等待間隔」，但每一張圖真正要花的下載時間、
+      // 以及 trimLoadedImage() 內 drawImage／getImageData／toDataURL 這幾步
+      // 運算時間，都是隨來源圖「像素量」線性增加的，光壓縮排隊間隔碰不到
+      // 這一塊——這正是使用者反應「剛進站頭幾次撞擊、飄動物件依然完全
+      // 不會換圖」在收緊排程間隔之後仍然存在的原因：真正的硬傷是這幾步
+      // 運算本身要花的時間，不是排隊排太久。
+      // 修法：比照專案裡其他地方（見 supportsTouch 判斷各處：detailUrlMobile
+      // 用 =s1200、previewUrl 手機用 =s850）已經在用的「手機版用較小尺寸」
+      // 做法，這批「e」圖片庫也一樣，手機改抓 =s1000（桌機維持 1400 不變）。
+      // 1000²/1400² ≈ 0.51，下載量、以及 trimLoadedImage() 這幾步運算量
+      // 都減少約一半，直接讓已就緒池在手機上長大快將近一倍，是使用者
+      // 同意接受的畫質換速度取捨；1000px 疊上手機版飄動物件最大 656px、
+      // 2x Retina（656 × 2 ≈ 1312px）仍然夠用，只有在最大顯示尺寸疊上
+      // 3x 螢幕這種較少見的組合時，才會比原本 1400px 略為軟一點，肉眼
+      // 差異不算明顯，換來的是進站頭幾秒撞牆就能正常換圖。
       const urls = data.files.map(file => {
         const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
-        return thumbBase ? (thumbBase + '=s1400') : `https://drive.google.com/uc?export=view&id=${file.id}`;
+        const size = supportsTouch ? '=s1000' : '=s1400';
+        return thumbBase ? (thumbBase + size) : `https://drive.google.com/uc?export=view&id=${file.id}`;
       });
 
       writeDvdECache(urls);
@@ -7116,8 +7136,27 @@
         // 真正花 CPU 的裁切運算內容或畫質；跟「頭幾秒還是會頓一下」這件事
         // 的取捨關係，已就緒池更快長大、使用者更快能撞到新照片，優先順序
         // 排在前面。桌機（有真正的 requestIdleCallback）維持原本數值不變。
+        //
+        // ---------- 再修正：「手機版剛進站，撞沒幾次就又看到同一張照片」----------
+        // 成因：pickNextDvdEImageIndex() 的「最近 N 張不重複」規則，排除
+        // 張數會被「目前已就緒池的張數」限制住（見該函式上方完整說明：
+        // excludeCount = min(6, 池子張數 - 1)）。剛進站的頭幾秒，池子還在
+        // 從 0 開始一張一張長大，張數本身就很小（例如只有 2、3 張），這時候
+        // 排除名單自然也只能排除 1、2 張——不是隨機挑圖出包，是「防重複」
+        // 這條規則在池子太小時本來就排不出更長的間隔，使用者這段時間內
+        // 撞兩三次就看到同一張，機率上是必然的。上面 250ms/20ms 這組數值
+        // 已經是「頭一次讓手機版撞牆就有反應」那輪修正調出來的，但填滿
+        // 整批圖庫仍需要「張數 × 這組間隔」的時間，圖庫張數稍多時，這個
+        // 「池子還很小」的窗口期依然有感。
+        // 修法：把這類裝置的排程間隔再收更緊（timeout 降到 80、fallbackDelay
+        // 降到 0）。trimLoadedImage() 真正花 CPU 的裁切運算完全不受影響
+        // （這裡調的純粹是「排隊等待」的節奏），fallbackDelay:0 仍然是透過
+        // setTimeout 排到下一個巨集任務、會先讓瀏覽器有機會畫面、處理觸控
+        // 等更優先的事，不會變成真正的同步阻塞迴圈；只是不再額外多等那
+        // 20ms，讓池子長大的速度更接近「網路下載＋裁切本身需要的時間」，
+        // 盡量壓縮「池子太小、防重複規則形同虛設」這段窗口期的長度。
         scheduleIdle(step, DVD_LOW_POWER_DEVICE
-          ? { timeout: 250, fallbackDelay: 20 }
+          ? { timeout: 80, fallbackDelay: 0 }
           : { timeout: 600, fallbackDelay: 60 });
       }
       scheduleNext();
