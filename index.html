@@ -7099,7 +7099,26 @@
         });
       }
       function scheduleNext(){
-        scheduleIdle(step, { timeout: 600, fallbackDelay: 60 });
+        // ---------- 修正：「手機版一開始撞牆都不會變照片，一陣子後才會」
+        // （承上面 init() 內那段 750ms 緩衝的說明，這裡是同一個症狀的
+        // 另一半成因）----------
+        // 成因：這裡原本不分裝置一律用 { timeout:600, fallbackDelay:60 }
+        // 排下一張。有原生 requestIdleCallback 的桌機瀏覽器，這只是「最晚
+        // 600ms 內一定會排到」的保底，實際多半更快觸發；但沒有原生 API
+        // 的裝置（DVD_LOW_POWER_DEVICE，見上面 scheduleIdle() 旁的完整
+        // 說明），會固定走「等一影格畫完＋再等 fallbackDelay」這條路徑，
+        // 每一張圖之間都會確實吃到這 60ms，圖庫張數一多，光是排隊等待
+        // 本身累積起來就是好幾百毫秒——這段時間裡「已就緒池」張數增加得
+        // 很慢，使用者連續撞牆時常常還是命中同一張還沒被裁切好的位置，
+        // 感覺就是「一開始都不會變、要等好一陣子」。
+        // 修法：這類裝置改用更緊的排程間隔（timeout 降到 250、fallbackDelay
+        // 降到 20），縮短的只是「排隊等待」本身，不影響 trimLoadedImage()
+        // 真正花 CPU 的裁切運算內容或畫質；跟「頭幾秒還是會頓一下」這件事
+        // 的取捨關係，已就緒池更快長大、使用者更快能撞到新照片，優先順序
+        // 排在前面。桌機（有真正的 requestIdleCallback）維持原本數值不變。
+        scheduleIdle(step, DVD_LOW_POWER_DEVICE
+          ? { timeout: 250, fallbackDelay: 20 }
+          : { timeout: 600, fallbackDelay: 60 });
       }
       scheduleNext();
     });
@@ -7605,15 +7624,35 @@
     if(minX > maxX || minY > maxY){
       return { left: 0, right: 0, top: 0, bottom: 0 };
     }
-    // 換算成「外框四邊各自內縮了多少距離」：理論上都會 >=0（旋轉不會讓
-    // 圖案的像素跑到外框範圍以外），Math.max(0, …) 純粹保底，避免極端
-    // 浮點數誤差算出負值。
+    // 換算成「外框四邊各自內縮了多少距離」。
+    //
+    // ---------- 修正：「圖片已經跑出邊界才有反彈」的真正殘餘成因 ----------
+    // 這裡原本用 Math.max(0, …) 把結果強制夾成不小於 0，理由寫的是「旋轉
+    // 不會讓圖案的像素跑到外框範圍以外」——這句話只有在「外框」指的是
+    // getBoundingClientRect() 那種隨旋轉一起撐大的外接矩形時才成立；但這裡
+    // minX/maxX 是拿 dvdW/dvdH（offsetWidth/offsetHeight，永遠是未旋轉的
+    // 原始寬高，理由見 measureDvdSize() 的說明）當半寬高在換算 inset，兩者
+    // 不是同一個框。圖案的可視像素只要夠靠近去背後的四個角（絕大多數照片
+    // 裁切完都會有像素貼到至少某個角落附近），旋轉 45 度左右時，那個角上
+    // 的像素離中心的距離會比 halfW/halfH 更遠——也就是 minX 真的可能小於
+    // -halfW（或 maxX 大於 halfW），算出來的 inset 本來就應該是負的：
+    // 代表圖案此刻的實際輪廓，比「未旋轉時的框邊」還要更往外凸出。
+    // 把這種負值夾成 0，等於告訴下面 stepDvdBounce()「框邊碰到螢幕邊界時
+    // 才反彈就好」，但實際上圖案的像素在框邊碰到之前，就已經先一步凸出
+    // 螢幕外了——這正是「圖片已經跑出邊界才有反彈」在像素遮罩上線之後
+    // 依然存在的根本原因：問題不是遮罩不準，而是這裡把「應該更早反彈」
+    // 的負值訊號整個丟棄了。
+    // 修法：不再夾成 0，讓 inset 可以是負值，交給下面 stepDvdBounce()／
+    // clampDvdIntoViewport() 的 minX/maxX 算式自然把允許的活動範圍收緊
+    // （負的 inset 會讓邊界往內縮，逼反彈提早在框邊碰到螢幕邊界之前觸發，
+    // 跟圖案肉眼看到的實際邊緣同步）。極端浮點數誤差可能讓數值出現微小的
+    // 正負抖動，這裡不用特別處理，量級遠小於一個像素，不影響觀感。
     const halfW = dvdW / 2, halfH = dvdH / 2;
     return {
-      left: Math.max(0, minX + halfW),
-      right: Math.max(0, halfW - maxX),
-      top: Math.max(0, minY + halfH),
-      bottom: Math.max(0, halfH - maxY)
+      left: minX + halfW,
+      right: halfW - maxX,
+      top: minY + halfH,
+      bottom: halfH - maxY
     };
   }
 
@@ -7928,8 +7967,14 @@
     // computeDvdPixelInsets() 的完整說明）：每一影格重新算一次，是因為
     // 飄動物件會持續旋轉，圖案最外緣的位置會跟著即時改變。
     const dvdPixelInsets = computeDvdPixelInsets();
-    const minX = dvdBoundMinX() - dvdPixelInsets.left, minY = dvdBoundMinY() - dvdPixelInsets.top;
-    const maxX = dvdBoundMaxX() + dvdPixelInsets.right, maxY = dvdBoundMaxY() + dvdPixelInsets.bottom;
+    let minX = dvdBoundMinX() - dvdPixelInsets.left, minY = dvdBoundMinY() - dvdPixelInsets.top;
+    let maxX = dvdBoundMaxX() + dvdPixelInsets.right, maxY = dvdBoundMaxY() + dvdPixelInsets.bottom;
+    // insets 現在可能是負值（見 computeDvdPixelInsets() 上方的修正說明），
+    // 理論上正常情況下 min 不會超過 max，這裡純粹保底：極窄視窗疊加極端
+    // 旋轉角度、insets 兩邊都很大的負值時，避免 min > max 讓後面的
+    // clampDvd／碰撞判斷出現無意義的區間，直接退回成一個點（區間中點）。
+    if(minX > maxX){ const mid = (minX + maxX) / 2; minX = maxX = mid; }
+    if(minY > maxY){ const mid = (minY + maxY) / 2; minY = maxY = mid; }
 
     // 視窗尺寸如果剛好在這個時間點縮小（例如手機網址列從收起變成重新展開、
     // 或者鎖住捲動之後瀏覽器介面重新排版——這在剛點進 preview 頁、body 被
@@ -8166,9 +8211,14 @@
     if(photoFallModeActive && pfDvdItem) return; // 物理堆疊模式期間，飄動字的 transform 改由物理迴圈接管，這裡不能插手覆寫
     measureDvdSize();
     dvdEscaping = false; // 視窗尺寸一變，舊的滑出目標位置可能已經不對，直接取消，改用下面重新夾回邊界的結果
-    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
-    const maxX = Math.max(minX, dvdBoundMaxX());
-    const maxY = Math.max(minY, dvdBoundMaxY());
+    // 跟 stepDvdBounce()／dvdPointerMove() 用同一套像素級邊界（見
+    // computeDvdPixelInsets() 的完整說明），resize 時才不會把物件多夾回來
+    // 一圈去背後的空白，或反過來允許圖案的像素露在視窗外面。
+    const dvdResizePixelInsets = computeDvdPixelInsets();
+    const rawMinX = dvdBoundMinX() - dvdResizePixelInsets.left, rawMinY = dvdBoundMinY() - dvdResizePixelInsets.top;
+    const rawMaxX = dvdBoundMaxX() + dvdResizePixelInsets.right, rawMaxY = dvdBoundMaxY() + dvdResizePixelInsets.bottom;
+    const minX = Math.min(rawMinX, rawMaxX), maxX = Math.max(rawMinX, rawMaxX);
+    const minY = Math.min(rawMinY, rawMaxY), maxY = Math.max(rawMinY, rawMaxY);
     dvdX = clampDvd(dvdX, minX, maxX);
     dvdY = clampDvd(dvdY, minY, maxY);
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
@@ -8306,10 +8356,27 @@
     }
     if(!dvdDragging || e.pointerId !== dvdPointerId) return;
     e.preventDefault();
-    const minX = dvdBoundMinX(), minY = dvdBoundMinY();
-    const maxX = dvdBoundMaxX(), maxY = dvdBoundMaxY();
-    dvdX = clampDvd(e.clientX - dvdGrabOffsetX, minX, maxX);
-    dvdY = clampDvd(e.clientY - dvdGrabOffsetY, minY, maxY);
+    // ---------- 修正：「用滑鼠／觸控拖曳時，卡在一個空白區域邊界，而不是
+    // 實際去背後邊界」----------
+    // 這裡原本只拿 dvdBoundMinX()/dvdBoundMaxX() 這組「未去背裁切、單純
+    // 矩形外框」的邊界去 clamp 拖曳座標——跟 stepDvdBounce() 那套飄動／
+    // 撞牆物理迴圈不是同一組邊界：後者早就有 computeDvdPixelInsets() 算出
+    // 的像素級 inset（見該函式的完整說明），拖曳這裡卻完全沒有套用，等於
+    // 放開手指飄走時用的是「圖案實際邊緣」，用手指／滑鼠拖曳時卻仍然被
+    // 矩形外框卡住——這正是使用者回報「拖曳到網頁邊界時，被一個空白的
+    // 區域邊界卡住，而不是實際去背後邊界」的成因：矩形外框比圖案實際可視
+    // 範圍多留了一圈透明空白，拖曳時手還沒真的把圖案本身的像素拖到螢幕
+    // 邊緣，就已經被這圈空白卡住、拖不動了。
+    // 修法：拖曳時也套用同一套 computeDvdPixelInsets()，跟飄動物理迴圈用
+    // 完全相同的一組邊界，讓拖曳能一路拖到圖案本身的像素貼齊螢幕邊緣為止，
+    // 不會再被外框的透明留白提前卡住。旋轉角度在拖曳全程本來就是抓取當下
+    // 的固定值（見 commitDvdDrag() 裡把 dvdRotationVel 歸零的說明），這裡
+    // 不需要額外處理旋轉變化，直接呼叫即可。
+    const dvdDragPixelInsets = computeDvdPixelInsets();
+    const minX = dvdBoundMinX() - dvdDragPixelInsets.left, minY = dvdBoundMinY() - dvdDragPixelInsets.top;
+    const maxX = dvdBoundMaxX() + dvdDragPixelInsets.right, maxY = dvdBoundMaxY() + dvdDragPixelInsets.bottom;
+    dvdX = clampDvd(e.clientX - dvdGrabOffsetX, Math.min(minX, maxX), Math.max(minX, maxX));
+    dvdY = clampDvd(e.clientY - dvdGrabOffsetY, Math.min(minY, maxY), Math.max(minY, maxY));
     // 隨時更新這根手指目前的座標，讓正在進行中的兩指旋轉手勢（如果有）
     // 拿到的「連線角度」永遠是相對這根手指最新位置算出來的，位置拖曳跟
     // 兩指旋轉可以同時進行，不會互相干擾。
@@ -11123,7 +11190,23 @@
         // 中的 quickUrl 小圖（=s400，早就載入完成），不會有任何空白或
         // 卡住的狀態，只是「正式高畫質版本」的無縫替換稍微晚一點點才發生，
         // 使用者不會感覺到差異。
-        .then(() => new Promise(resolve => setTimeout(resolve, 750)))
+        // ---------- 修正：「手機版一開始撞牆都不會變照片，一陣子後才會」----------
+        // 成因：這段緩衝原本固定 750ms，目的是避開「整批圖片庫開始處理」
+        // 這件事跟剛淡入畫面那一刻的排版／繪製工作撞在一起（見上面這段
+        // 開頭的完整說明）。但在沒有原生 requestIdleCallback、或核心數較少
+        // 的裝置上（DVD_LOW_POWER_DEVICE，目前幾乎等於手機 Safari／LINE、
+        // Threads 等內建 WebKit 瀏覽器），下面 trimDvdEImagesStaggered()
+        // 本身要把「已就緒池」填滿就已經比桌機慢很多（見該函式
+        // scheduleNext() 內對應的說明）；在這之前又先固定多等 750ms 才
+        // 「開始」處理，等於雪上加霜——使用者這段時間內每一次撞牆，
+        // cycleDvdEImage() 看到的 dvdEImages 都還是空陣列，直接被
+        // `if(!dvdEImages.length) return;` 擋掉、畫面上完全沒有變化，
+        // 體感就是「撞了好幾次都沒反應，過一陣子才忽然開始正常」。
+        // 這類裝置改用短很多的緩衝（200ms）：仍然足夠讓淡入那一刻最急迫
+        // 的排版工作先跑完、不會整批疊在同一影格，但不再讓使用者白白
+        // 多等大半秒才開始建池；桌機（有真正的 requestIdleCallback，
+        // 原本就比較不受這段延遲影響）維持原本 750ms 不變，不動既有手感。
+        .then(() => new Promise(resolve => setTimeout(resolve, DVD_LOW_POWER_DEVICE ? 200 : 750)))
         .then(() => {
           let firstEntryApplied = false;
           return trimDvdEImagesStaggered(orderedUrls, (idx, result) => {
