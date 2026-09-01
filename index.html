@@ -11307,6 +11307,57 @@
       // 無縫換成正式畫質，使用者不會感覺到任何跳動。
       const quickUrl = /=s\d+$/.test(firstUrl) ? firstUrl.replace(/=s\d+$/, '=s400') : firstUrl;
 
+      // ---------- 修正：「手機版剛進站，第一次撞牆永遠不會換照片」----------
+      // 成因：撞牆真的能換到「不一樣的一張」，前提是已就緒池
+      // （dvdEImages）裡至少要有 2 張——1 張沒得選，pickNextDvdEImageIndex()
+      // 只能選回原本那張（見該函式 n<=1 的分支，以及上面 cycleDvdEImage()
+      // 內對應的 guard）。但原本池子裡的「第二張」，一律要等
+      // trimDvdEImagesStaggered() 這條背景流程排到 orderedUrls[1]（還要先
+      // 經過下面那段 200ms/750ms 緩衝，再加上下載原始大圖＋canvas 裁切去背
+      // 這段真正花時間的運算）才會真的補進 dvdEImages[1]。使用者從進站、
+      // 畫面淡入、飄動物件開始飄，到第一次真的撞到牆，往往用不到一兩秒，
+      // 手機處理器又比桌機慢上不少——「第一次撞牆」幾乎必然發生在「背景
+      // 裁切還沒排到第二張」之前。這是撞牆換圖需要「至少 2 張候選」跟湊出
+      // 第 2 張候選要等一整條慢流程，這兩件事天生對不上拍的結構性問題，
+      // 不是參數調得不夠、guard 加得不夠多的問題——只要換圖的先決條件是
+      // 「背景裁切排到第 2 張」，這個空窗期就一定存在，難怪怎麼改都還是
+      // 會發生。
+      // 修法：比照上面 quickUrl 的做法，對 orderedUrls[1]（圖庫「第二張」）
+      // 也額外要一份 =s400 小尺寸縮圖，進站當下就跟第一張平行送出下載
+      // 請求，解碼成功就直接補進 dvdEImages[1]（scale 先用預設值 1，跟
+      // dvdEImages[0] 一開始的暫時值一致）——不等待、不卡住上面的 initial
+      // reveal 流程（reveal 只看第一張是否就緒，這裡純粹是背景並行預抓）。
+      // 只是一張小圖平行下載，遠比「排隊等到背景裁切流程處理到第二張」
+      // 快上很多，池子從一開始就有 2 張可選，大幅縮小、甚至消除「第一次
+      // 撞牆沒反應」的空窗期。之後 orderedUrls[1] 一樣會被
+      // trimDvdEImagesStaggered() 正常裁切去背、依 idx 寫回 dvdEImages[1]
+      // （見下面該處說明）：如果那時使用者已經撞牆換到這張在看，一樣走
+      // 「至少 2 張時不會自我重選」這條既有保護（見上面 cycleDvdEImage()
+      // 的完整說明），不會有忽然放大的問題；如果還沒被撞到，正式版本
+      // 安靜更新，行為跟其他張完全一致。下載失敗（離線、CORS 等）就直接
+      // 放棄這條快速路徑，交給下面完整的裁切流程（本身就有重試機制）
+      // 補上，不強行顯示一張可能是破圖的縮圖。
+      if(orderedUrls.length > 1){
+        const secondUrl = orderedUrls[1];
+        const quickUrl2 = /=s\d+$/.test(secondUrl) ? secondUrl.replace(/=s\d+$/, '=s400') : secondUrl;
+        const offscreen2 = new Image();
+        offscreen2.src = quickUrl2;
+        const markSecondReady = () => {
+          // 背景裁切流程如果剛好比這裡快、已經把正式版本寫進
+          // dvdEImages[1]，就不要用這張還沒去背的快速縮圖蓋掉已經更好
+          // 的版本。
+          if(!dvdEImages[1]){
+            dvdEImages[1] = { src: quickUrl2, scale: 1 };
+          }
+        };
+        if(offscreen2.decode){
+          offscreen2.decode().then(markSecondReady, () => {}); // 失敗就放棄這條快速路徑，交給下面完整流程處理
+        } else {
+          offscreen2.onload = markSecondReady;
+          offscreen2.onerror = () => {};
+        }
+      }
+
       return setDvdBounceImageSrc(quickUrl, 1)
         .then(markDvdRealImageReady)
         .then(() => {
