@@ -1288,9 +1288,24 @@
        逐幀精準同步，縮放則是平滑的 transition。
        這裡也順便加上 opacity 的 transition（跟 transform 同一段時間曲線），
        給下面「進入照片詳細頁」用的淡出/淡入效果共用同一顆元素、同一條
-       過渡規則，不用另外拆一顆變數。 */
+       過渡規則，不用另外拆一顆變數。
+       另外加上 height 的 transition：撞牆換下一張圖時（見 cycleDvdEImage()／
+       setDvdBounceImageSrc()），--dvd-area-scale 會跟著新圖重新算過一次
+       （見上面 computeDvdAreaScales() 的完整說明），兩張圖的縮放倍率通常
+       不會完全一樣。原本沒有這條 transition，height 是直接瞬間跳到新的
+       數值——就算上面已經把倍率之間的落差收斂得更接近了，「換圖的同時
+       尺寸也瞬間跳一下」還是會有一點點「喀」一聲切換的生硬感。加上這條
+       之後，換圖那一刻大小是平滑地滑到新的高度，跟拿到新圖案這件事融合
+       成同一個柔和的過渡，不會有生硬的瞬間跳動。用比較短、不帶回彈的
+       ease-out 曲線（跟下面 transform 的回彈曲線刻意分開）：高度變化是
+       「換上新內容」的一部分，該是穩重地過渡過去，不需要 transform 那種
+       抓放互動要的Q彈回饋感。進站首次顯示、抓放縮放、隱藏／恢復等場景
+       原本就各自有 transition:none !important 蓋掉整段過渡（見下面
+       .dvd-instant／body.initial-reveal-pending／.dvd-reveal 三處），
+       這條新的 height transition 一併被蓋掉，不會在那些情境下多跑一段
+       不該有的動畫。 */
     transform-origin: center center;
-    transition: transform .22s cubic-bezier(.34,1.56,.64,1), opacity .22s ease;
+    transition: transform .22s cubic-bezier(.34,1.56,.64,1), opacity .22s ease, height .32s cubic-bezier(.22,.61,.36,1);
   }
   /* 抓住飄動字的當下（見 JS dvdPointerDown 加上的 .dvd-grabbing class）
      稍微縮小；放開的瞬間（dvdPointerUp 移除這個 class）transition 會用
@@ -6930,8 +6945,43 @@
   // coverage 或 aspect 是 null／算不出來的項目（裁切失敗、整張透明等，見
   // trimTransparentImage() 的說明）不參與平均值計算，縮放倍率固定給 1，
   // 維持原本固定高度的行為。
-  const DVD_AREA_SCALE_MIN = 0.65;
-  const DVD_AREA_SCALE_MAX = 1.7;
+  //
+  // ---------- 修正「還是有些照片顯得突然特別小或特別大」----------
+  // 上面這套「完全按 coverage×aspect 比例修正」的做法在數學上没問題，但
+  // 實際套用到一整批照片、且圖庫組成不受控制時，有兩個地方會放大成「视觉
+  // 上忽大忽小」的觀感問題：
+  //
+  //   1) 基準用「平均數」：只要圖庫裡混進一兩張特別極端的照片（例如整張
+  //      幾乎全透明、只剩一根細線的圖案），這一兩張的 coverage×aspect 值
+  //      會小到不成比例，直接把「平均數」這個基準本身往下拉走，等於連帶
+  //      拖累了其他原本正常、比例均衡的照片，讓它們的縮放倍率也跟著被
+  //      這一兩張離群值污染、算出不合理的結果。
+  //      改用「中位數」當基準：中位數只看排序後最中間那個值，不會因為
+  //      一兩張極端照片的數值有多誇張而被拉走，天然對離群值不敏感，抓到
+  //      的是這批照片裡「一般典型的那一張」大概長什麼樣子，其他照片才有
+  //      一個穩定、不被少數幾張污染的比較基準。
+  //
+  //   2) 「完全修正」（100% 照理論倍率縮放）：coverage×aspect 終究只是用
+  //      裁切後矩形這個粗略幾何量去估計「人眼實際感受到的視覺份量」，兩者
+  //      不會每次都完全吻合——例如同樣的有色面積，形狀瑣碎、破碎分散的
+  //      圖案，人眼會覺得比一整塊完整色塊「輕」，但公式算出來的面積是
+  //      一樣的。這批估計特別不準的照片，用 100% 修正力道去縮放，反而會
+  //      矯枉過正，變成「這張突然放超大」或「這張突然縮超小」——這正是這次
+  //      使用者回報「有些看起來突然太小或太大」的成因，不是公式邏輯錯誤，
+  //      是「完全相信一個本來就只是粗略估計值」這個做法本身太激進。
+  //      改成只套用 DVD_AREA_SCALE_DAMPING 這個比例的修正力道（例如 0.7 代表
+  //      只修正理論差距的 7 成，保留 3 成原本的落差不修正）：效果是「把最
+  //      極端的落差往中間拉近、變得沒那麼誇張，但不強求每張的顯示面積
+  //      完全相等」，比「數學上完全相等」更貼近人眼的自然觀感，也更能
+  //      容忍 coverage/aspect 這個估計值本身偶爾不準。
+  //
+  //   另外縮放區間本身也一併收窄（0.65~1.7 → 0.78~1.3）：兩者疊加後，
+  //   整批照片之間最大的顯示比例差距從原本理論上的 2.6 倍（1.7/0.65），
+  //   收斂到約 1.67 倍（1.3/0.78），肉眼感受上是「差不多大、略有大小之分」，
+  //   不會再出現單張特別突兀的極端大小。
+  const DVD_AREA_SCALE_MIN = 0.78;
+  const DVD_AREA_SCALE_MAX = 1.3;
+  const DVD_AREA_SCALE_DAMPING = 0.7; // 修正力道：1 = 完全按比例修正（理論上讓每張圖的有色面積完全相等），0 = 完全不修正（維持固定高度）
   function computeDvdAreaScales(entries){
     const weightOf = e => e.coverage * e.aspect;
     const valid = entries.filter(e => e
@@ -6942,15 +6992,25 @@
       // 維持縮放倍率 1，等同沒有這套機制時的原本固定高度行為。
       return entries.map(e => ({ src: (e && e.src) || e, scale: 1 }));
     }
-    const avgWeight = valid.reduce((sum, e) => sum + weightOf(e), 0) / valid.length;
+    // 中位數當基準（見上面完整說明）：排序後取最中間的值，資料筆數是偶數
+    // 時取中間兩個的平均，是標準的中位數算法。
+    const sortedWeights = valid.map(weightOf).sort((a, b) => a - b);
+    const mid = Math.floor(sortedWeights.length / 2);
+    const medianWeight = sortedWeights.length % 2 === 0
+      ? (sortedWeights[mid - 1] + sortedWeights[mid]) / 2
+      : sortedWeights[mid];
     return entries.map(e => {
       const src = (e && e.src) || e;
       if(!e || typeof e.coverage !== 'number' || e.coverage <= 0
         || typeof e.aspect !== 'number' || e.aspect <= 0){
         return { src, scale: 1 };
       }
-      let scale = Math.sqrt(avgWeight / weightOf(e));
-      scale = Math.min(DVD_AREA_SCALE_MAX, Math.max(DVD_AREA_SCALE_MIN, scale));
+      const idealScale = Math.sqrt(medianWeight / weightOf(e)); // 理論上「完全修正」該用的倍率
+      // 只朝理論倍率的方向拉近 DVD_AREA_SCALE_DAMPING 這個比例，不是直接
+      // 套用理論值本身——1 + (理論值 - 1) × 力道，力道是 0 就等於維持 1
+      // （不修正），力道是 1 就等於完全採用理論值，中間值就是按比例拉近。
+      const damped = 1 + (idealScale - 1) * DVD_AREA_SCALE_DAMPING;
+      const scale = Math.min(DVD_AREA_SCALE_MAX, Math.max(DVD_AREA_SCALE_MIN, damped));
       return { src, scale };
     });
   }
