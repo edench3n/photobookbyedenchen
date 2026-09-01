@@ -6985,6 +6985,7 @@
     function step(){
       if(i >= dvdEImages.length) return;
       const entry = dvdEImages[i++];
+      if(!entry){ step(); return; } // 防呆：理論上呼叫這裡時整批應該都已經填滿密實，保留以防萬一有空洞
       const im = new Image();
       im.src = entry.src;
       const scheduleNext = () => {
@@ -7323,23 +7324,45 @@
   // 撞牆自然就會排除掉使用者剛剛已經看過的這張，規則從進站第一刻就生效，
   // 不會有例外的第一次。
   let dvdEImageRecentHistory = [0];
-  function pickNextDvdEImageIndex(){
-    const n = dvdEImages.length;
-    if(n <= 1) return 0;
+  // ---------- 修正「已就緒池平行快速預載之後，中間可能出現『空洞』」----------
+  // 成因：下面 DVD_E_QUICK_PRELOAD_COUNT 那段一次平行預載好幾張小尺寸縮圖，
+  // 每一張下載完成的先後順序完全看網路狀況，不保證跟索引順序一致——例如
+  // 索引 5 可能比索引 2 更早下載完成、更早被寫進 dvdEImages[5]，這時
+  // dvdEImages[2] 還是空的。原本這裡假設 dvdEImages 永遠是從索引 0 開始、
+  // 一路密實填到 length-1（背景 trimDvdEImagesStaggered() 本身確實是嚴格
+  // 按順序一張一張處理、沒有這個問題），只看 `dvdEImages.length` 當作
+  // 「有幾張候選」，平行預載一旦造成中間空洞，`length` 就會被最後面那個
+  // 空洞後的索引撐大，選到還沒真的填值的格子時 nextEntry 會是 undefined，
+  // 換圖時直接壞掉。
+  // 修法：改成先掃出「真的有內容」的索引清單，只在這份清單裡挑選，空洞
+  // 的格子完全不會被選到；「候選數」也一併改用這份清單的實際長度，不再
+  // 直接信任 dvdEImages.length。
+  function dvdEReadyIndices(){
+    const list = [];
+    for(let i = 0; i < dvdEImages.length; i++){
+      if(dvdEImages[i]) list.push(i);
+    }
+    return list;
+  }
+  function pickNextDvdEImageIndex(readyIndices){
+    const list = readyIndices || dvdEReadyIndices();
+    const n = list.length;
+    if(n <= 1) return list.length ? list[0] : 0;
     const excludeCount = Math.min(DVD_E_IMAGE_NO_REPEAT_COUNT, n - 1);
     const excludeSet = new Set(dvdEImageRecentHistory.slice(-excludeCount));
     // 理論上隨機挑幾次就會挑到不在排除名單裡的索引；guard 純粹防呆，避免
     // 極端情況（理論上不會發生）造成無限迴圈。
-    let candidate = Math.floor(Math.random() * n);
+    let candidate = list[Math.floor(Math.random() * n)];
     let guard = 0;
     while(excludeSet.has(candidate) && guard < 50){
-      candidate = Math.floor(Math.random() * n);
+      candidate = list[Math.floor(Math.random() * n)];
       guard++;
     }
     return candidate;
   }
   function cycleDvdEImage(){
     if(!dvdEImages.length || !dvdBounceImgEl) return;
+    const readyIndices = dvdEReadyIndices();
     const now = performance.now();
     if((now - dvdEImageLastChangeAt) < DVD_E_IMAGE_RAPID_MS){
       return; // 離上一次真正換圖太近，當作同一次連續撞擊，忽略、不換圖
@@ -7363,15 +7386,19 @@
     // dvdEImageLastChangeAt／history 的節奏），讓背景剛寫回的正式版本
     // 安靜留在陣列裡；真的等池子長大、換到別張照片時才自然帶出來，不會
     // 再有「沒換照片卻忽然放大」的空窗期。
-    const nextIndex = pickNextDvdEImageIndex();
-    if(dvdEImages.length <= 1 && nextIndex === dvdEImageIndex) return;
+    // 注意：這裡的「只有 1 張」改看 readyIndices.length（真的有內容的
+    // 候選數），不再看 dvdEImages.length——平行快速預載造成中間空洞時，
+    // 兩者不再是同一件事（見上面 dvdEReadyIndices() 的完整說明）。
+    const nextIndex = pickNextDvdEImageIndex(readyIndices);
+    if(readyIndices.length <= 1 && nextIndex === dvdEImageIndex) return;
+    const nextEntry = dvdEImages[nextIndex];
+    if(!nextEntry) return; // 防呆：理論上不會發生（nextIndex 一定來自 readyIndices），保留以防萬一
     dvdEImageLastChangeAt = now;
     dvdEImageIndex = nextIndex;
     dvdEImageRecentHistory.push(dvdEImageIndex);
     if(dvdEImageRecentHistory.length > DVD_E_IMAGE_NO_REPEAT_COUNT){
       dvdEImageRecentHistory.shift(); // 只需要留最近這幾張，舊的自然淘汰
     }
-    const nextEntry = dvdEImages[dvdEImageIndex];
     setDvdBounceImageSrc(nextEntry.src, nextEntry.scale);
   }
   // =====================================================================
@@ -11322,39 +11349,59 @@
       // 不是參數調得不夠、guard 加得不夠多的問題——只要換圖的先決條件是
       // 「背景裁切排到第 2 張」，這個空窗期就一定存在，難怪怎麼改都還是
       // 會發生。
-      // 修法：比照上面 quickUrl 的做法，對 orderedUrls[1]（圖庫「第二張」）
-      // 也額外要一份 =s400 小尺寸縮圖，進站當下就跟第一張平行送出下載
-      // 請求，解碼成功就直接補進 dvdEImages[1]（scale 先用預設值 1，跟
+      // 修法：比照上面 quickUrl 的做法，但不是只多預載「第二張」，而是把
+      // orderedUrls 最前面一整批（DVD_E_QUICK_PRELOAD_COUNT 張）都一起要
+      // 一份 =s400 小尺寸縮圖，進站當下就跟第一張平行送出下載請求，各自
+      // 解碼成功就直接補進 dvdEImages[該索引]（scale 先用預設值 1，跟
       // dvdEImages[0] 一開始的暫時值一致）——不等待、不卡住上面的 initial
       // reveal 流程（reveal 只看第一張是否就緒，這裡純粹是背景並行預抓）。
-      // 只是一張小圖平行下載，遠比「排隊等到背景裁切流程處理到第二張」
-      // 快上很多，池子從一開始就有 2 張可選，大幅縮小、甚至消除「第一次
-      // 撞牆沒反應」的空窗期。之後 orderedUrls[1] 一樣會被
-      // trimDvdEImagesStaggered() 正常裁切去背、依 idx 寫回 dvdEImages[1]
-      // （見下面該處說明）：如果那時使用者已經撞牆換到這張在看，一樣走
-      // 「至少 2 張時不會自我重選」這條既有保護（見上面 cycleDvdEImage()
-      // 的完整說明），不會有忽然放大的問題；如果還沒被撞到，正式版本
-      // 安靜更新，行為跟其他張完全一致。下載失敗（離線、CORS 等）就直接
-      // 放棄這條快速路徑，交給下面完整的裁切流程（本身就有重試機制）
-      // 補上，不強行顯示一張可能是破圖的縮圖。
-      if(orderedUrls.length > 1){
-        const secondUrl = orderedUrls[1];
-        const quickUrl2 = /=s\d+$/.test(secondUrl) ? secondUrl.replace(/=s\d+$/, '=s400') : secondUrl;
-        const offscreen2 = new Image();
-        offscreen2.src = quickUrl2;
-        const markSecondReady = () => {
-          // 背景裁切流程如果剛好比這裡快、已經把正式版本寫進
-          // dvdEImages[1]，就不要用這張還沒去背的快速縮圖蓋掉已經更好
-          // 的版本。
-          if(!dvdEImages[1]){
-            dvdEImages[1] = { src: quickUrl2, scale: 1 };
+      //
+      // ---------- 修正：「換一張之後，接著幾次撞牆像沒反應，然後又忽然
+      // 跳回第一張，節奏整個亂掉」----------
+      // 成因：上一輪修正只多預載了「第二張」，池子在背景裁切
+      // （trimDvdEImagesStaggered，手機尤其慢）追上進度之前，長時間只有
+      // 2 張候選。pickNextDvdEImageIndex() 為了「最近 DVD_E_IMAGE_NO_REPEAT_COUNT
+      // 張不重複」，池子只有 2 張時唯一合法候選永遠是「另外那一張」——
+      // 這代表撞牆只能在這兩張之間死板來回：第一下從索引 0 換到索引 1
+      // （使用者看到「换成下一張」），下一次真的觸發換圖時就只能從 1 換
+      // 回 0（肉眼看起來像是「瞬間跳回第一張」）；中間如果撞擊間隔剛好落
+      // 在 DVD_E_IMAGE_RAPID_MS 的防彈跳窗口內，那幾下又會被當成連續同一次
+      // 撞擊直接忽略、畫面沒有任何變化——三件事疊在一起，就是使用者體感
+      // 到的「換一張、幾次沒反應、又跳回第一張，完全沒有規則」。
+      // 修法：把快速預載的張數從「只有第二張」擴大成一整批（見下面
+      // DVD_E_QUICK_PRELOAD_COUNT），讓已就緒池從進站那一刻起就有足夠多
+      // 候選，撞牆換圖才會是「一張接一張、真的隨機」地往下跑，不會被迫
+      // 卡在兩三張裡死板輪替。這幾張快速縮圖一樣是「不去背、保留原始
+      // 留白」的暫時版本、面積縮放先用預設值 1（跟原本 quickUrl2 的做法
+      // 完全一致，使用者先前已經確認這條快速路徑本身視覺上沒有問題），
+      // 之後背景 trimDvdEImagesStaggered() 照樣會依序排到這些索引，用
+      // 同一套「跳過目前正在顯示的那格」規則（見下面 onItemReady 內的
+      // 說明）無縫換成裁切乾淨的正式版本，不會有額外的跳動。
+      //
+      // 注意：這些下載彼此之間、以及跟下面下載完成寫回 dvdEImages 的順序
+      // 完全不保證跟索引順序一致（純粹看各自網路請求誰先回來），陣列中
+      // 間因此可能暫時出現「空洞」——上面 pickNextDvdEImageIndex() 已經
+      // 改成只在 dvdEReadyIndices() 這份「真的有內容」的索引清單裡選，
+      // 不會選到空洞，這裡不需要額外處理順序。
+      const DVD_E_QUICK_PRELOAD_COUNT = Math.min(orderedUrls.length, DVD_E_IMAGE_NO_REPEAT_COUNT + 4);
+      for(let qi = 1; qi < DVD_E_QUICK_PRELOAD_COUNT; qi++){
+        const quickIdx = qi; // 迴圈變數本身在閉包裡會變動，先固定成獨立變數給下面的 closure 用
+        const urlN = orderedUrls[quickIdx];
+        const quickUrlN = /=s\d+$/.test(urlN) ? urlN.replace(/=s\d+$/, '=s400') : urlN;
+        const offscreenN = new Image();
+        offscreenN.src = quickUrlN;
+        const markReadyN = () => {
+          // 背景裁切流程如果剛好比這裡快、已經把正式版本寫進這一格，就
+          // 不要用還沒去背的快速縮圖蓋掉已經更好的版本。
+          if(!dvdEImages[quickIdx]){
+            dvdEImages[quickIdx] = { src: quickUrlN, scale: 1 };
           }
         };
-        if(offscreen2.decode){
-          offscreen2.decode().then(markSecondReady, () => {}); // 失敗就放棄這條快速路徑，交給下面完整流程處理
+        if(offscreenN.decode){
+          offscreenN.decode().then(markReadyN, () => {}); // 失敗就放棄這條快速路徑，交給下面完整流程處理
         } else {
-          offscreen2.onload = markSecondReady;
-          offscreen2.onerror = () => {};
+          offscreenN.onload = markReadyN;
+          offscreenN.onerror = () => {};
         }
       }
 
