@@ -7233,9 +7233,17 @@
   //   整批照片之間最大的顯示比例差距從原本理論上的 2.6 倍（1.7/0.65），
   //   收斂到約 1.67 倍（1.3/0.78），肉眼感受上是「差不多大、略有大小之分」，
   //   不會再出現單張特別突兀的極端大小。
-  const DVD_AREA_SCALE_MIN = 0.78;
-  const DVD_AREA_SCALE_MAX = 1.3;
-  const DVD_AREA_SCALE_DAMPING = 0.7; // 修正力道：1 = 完全按比例修正（理論上讓每張圖的有色面積完全相等），0 = 完全不修正（維持固定高度）
+  const DVD_AREA_SCALE_MIN = 0.78; // 飽滿/寬扁照片最多可以縮到多小——維持原樣不變
+  const DVD_AREA_SCALE_MAX = 1.6; // 稀疏/細長圖案（去背後面積佔比小）最多可以放大到多大——原本是 1.3，
+                                    // 使用者確認「相對細小的圖片顯示得比較大」是可以接受的，所以放寬上限，
+                                    // 讓這類圖案的顯示大小能更接近其他照片
+  // 修正力道拆成「該放大」跟「該縮小」兩個方向分開調整：idealScale > 1（去背後面積佔比偏小、該被放大
+  // 拉近平均）的圖案，用 UP 這組更高的力道，讓它們更接近其他照片的視覺份量；idealScale < 1（面積佔比
+  // 偏大、飽滿寬扁、該被縮小）的圖案，維持原本 0.7 的力道不變——使用者只要求「小圖可以更大」這個方向，
+  // 沒有要求「大圖要再縮更小」，所以那個方向刻意不動，避免意外把原本正常大小的照片縮得比之前更小。
+  // 力道定義同下：1 = 完全按比例修正（理論上讓每張圖的有色面積完全相等），0 = 完全不修正（維持固定高度）
+  const DVD_AREA_SCALE_DAMPING_UP = 0.9;   // 該放大的方向：力道拉高，原本兩個方向共用 0.7
+  const DVD_AREA_SCALE_DAMPING_DOWN = 0.7; // 該縮小的方向：維持原本力道，不額外加強
   function computeDvdAreaScales(entries){
     const weightOf = e => e.coverage * e.aspect;
     const valid = entries.filter(e => e
@@ -7260,10 +7268,13 @@
         return { src, scale: 1 };
       }
       const idealScale = Math.sqrt(medianWeight / weightOf(e)); // 理論上「完全修正」該用的倍率
-      // 只朝理論倍率的方向拉近 DVD_AREA_SCALE_DAMPING 這個比例，不是直接
-      // 套用理論值本身——1 + (理論值 - 1) × 力道，力道是 0 就等於維持 1
-      // （不修正），力道是 1 就等於完全採用理論值，中間值就是按比例拉近。
-      const damped = 1 + (idealScale - 1) * DVD_AREA_SCALE_DAMPING;
+      // 只朝理論倍率的方向拉近對應力道的比例，不是直接套用理論值本身——
+      // 1 + (理論值 - 1) × 力道，力道是 0 就等於維持 1（不修正），力道是 1
+      // 就等於完全採用理論值，中間值就是按比例拉近。idealScale >= 1（該放大
+      // 的細小/稀疏圖案）用 DAMPING_UP，< 1（該縮小的飽滿圖案）用
+      // DAMPING_DOWN，兩個方向分開調整（見上面常數定義處的完整說明）。
+      const damping = idealScale >= 1 ? DVD_AREA_SCALE_DAMPING_UP : DVD_AREA_SCALE_DAMPING_DOWN;
+      const damped = 1 + (idealScale - 1) * damping;
       const scale = Math.min(DVD_AREA_SCALE_MAX, Math.max(DVD_AREA_SCALE_MIN, damped));
       return { src, scale };
     });
