@@ -7743,8 +7743,52 @@
   let dvdDecayDurationMs = DVD_DECAY_MS; // 只有「甩得比定速快」時才會用到，等於 DVD_DECAY_MS；低於定速時 dvdDecaying 直接是 false，這個值不會被套用
   let dvdDragging = false;
   let dvdPointerId = null;
-  let dvdGrabOffsetX = 0, dvdGrabOffsetY = 0; // 抓取當下，指標位置跟元素左上角的距離，維持抓取點不跳動
   let dvdMoveSamples = []; // 最近的 {t, x, y} 取樣，放開時用來算「甩動當下」的瞬時速度
+
+  // ---------- 需求：抓住飄動物件的「一側」時，要像鐘擺一樣自然垂晃 ----------
+  // 原本的拖曳完全沒有旋轉：commitDvdDrag() 只是把抓取當下的角度歸零角速度、
+  // 之後整段拖曳期間角度都維持不變，指標移到哪、整個物件（連同角度）就
+  // 剛性地跟著平移到哪，感覺像抓著一塊硬紙板的正中心，不管抓在哪一點都
+  // 一樣硬邦邦。真實世界裡如果不是抓著正中心，而是抓著邊緣，物件的重心
+  // 沒有被直接固定住，會因為重力繞著「抓取點」自然下垂、擺盪，手一晃動
+  // （尤其是橫向甩動）更會連帶讓它繞著抓取點轉起來——這正是使用者要的
+  // 「鐘擺」手感。
+  //
+  // 做法：不整組重寫拖曳系統，而是把「抓取點」跟「物件本身」拆成兩個獨立
+  // 概念——抓取點（dvdPivotX/Y）單純跟著指標／手指的位置（跟原本一樣，
+  // 也套用同一組邊界限制，保留原有「不能拖出視窗外」的手感），物件的角度
+  // （沿用既有的 dvdRotationDeg／dvdRotationVel，跟撞牆旋轉、兩指旋轉共用
+  // 同一套「角度＋角速度＋摩擦衰減」基礎設施）則交給下面 stepDvdDragPendulum()
+  // 這個獨立的鐘擺物理迴圈，逐影格用「重力＋抓取點加速度造成的慣性力」
+  // 算出來的力矩持續驅動；物件實際畫面上的中心點，則每影格用「抓取點
+  // 位置 - 目前角度下，抓取點相對物件中心的向量」反推出來（等同用一根
+  // 隨物件角度轉動的剛性手臂，把物件懸掛在抓取點下面）。
+  // 抓取點在物件本地（未旋轉）座標系下、相對物件中心的固定向量——只在
+  // commitDvdDrag() 抓取那一刻算一次，之後整段拖曳期間都不變（抓的位置
+  // 是相對物件本身固定的一點，不會因為物件轉動而改變它「抓在物件的哪裡」，
+  // 只是這一點的世界座標會隨轉動角度改變，等同一根固定在物件上的懸掛臂）。
+  let dvdGrabLocalX = 0, dvdGrabLocalY = 0;
+  let dvdPivotX = 0, dvdPivotY = 0; // 抓取點目前的世界座標，直接來自指標／手指目前位置（受邊界限制）
+  // 抓取點的「速度」「加速度」：用來算「手甩動」這一項慣性力矩（見下面
+  // stepDvdDragPendulum() 內的完整推導），採低通濾波後的速度取差分算加速度，
+  // 避免原始指標座標逐影格量測雜訊被直接拿去做二次微分、放大成誇張的抖動。
+  let dvdPivotVX = 0, dvdPivotVY = 0; // 濾波後的抓取點速度（px/秒）
+  let dvdDragRAF = null; // 拖曳期間專屬的鐘擺物理迴圈（跟旋轉／位置迴圈不同：不管指標有沒有移動，
+    // 只要還抓著，重力就要持續作用、讓它能靠慣性繼續擺盪，所以不能只靠
+    // pointermove 事件觸發，需要自己的常駐 RAF）。
+  let dvdDragLastTime = null;
+  const PENDULUM_GRAVITY_PX = 1800; // px/秒²，鐘擺重力加速度——純粹試出來的手感數值，非真實物理單位；
+    // 選這個量級是讓典型抓握臂長（約 60~150px）擺盪的自然週期落在一秒
+    // 上下，看起來從容、有重量感，不會像被電到一樣抖動，也不會慢到像
+    // 沒有重力。
+  const PENDULUM_DAMPING_PER_SEC = 1.1; // 角速度的指數衰減係數（跟 DVD_ROTATION_FRICTION_PER_SEC 同寫法）：
+    // 純重力鐘擺理論上會永遠擺盪不停，這裡疊加一點點空氣阻力般的阻尼，
+    // 讓長時間握著不動時擺動會漸漸收斂變小，而不是一直等幅擺盪下去，
+    // 同時也讓數值積分本身更穩定，不會因為逐影格誤差累積而越擺越大。
+  const PENDULUM_MAX_ANGULAR_VEL = 480; // deg/秒，角速度上限，純保底，避免手速取樣異常時算出離譜的轉速
+  const PENDULUM_MAX_PIVOT_ACCEL = 12000; // px/秒²，抓取點加速度的夾限——手指／滑鼠座標量測本身有雜訊，
+    // 直接拿相鄰影格的位置做兩次微分，極端情況下可能算出遠超真實手速的
+    // 加速度值，這裡夾限住，避免慣性力矩項偶發暴衝。
   // 修正「雙擊飄動的 e 時，位置會跟著跳兩下」：按下的當下先只記錄「候選」
   // 資訊，不立刻套用抓取效果／搬動位置，等真的確定是拖曳（位移超過
   // DVD_TAP_MAX_MOVE）才由 commitDvdDrag() 真正接手。完整原因見下面
@@ -8796,14 +8840,140 @@
     const centerY = rect.top + rect.height / 2;
     dvdX = centerX - dvdW / 2;
     dvdY = centerY - dvdH / 2;
-    dvdGrabOffsetX = e.clientX - dvdX;
-    dvdGrabOffsetY = e.clientY - dvdY;
+
+    // ---------- 鐘擺懸掛臂：把抓取點換算成「物件本地座標系」下的固定向量 ----------
+    // 抓的是物件上的哪一點，是相對物件本身固定的（例如抓在物件的右上角，
+    // 不管物件之後轉到什麼角度，抓的都還是「它的右上角」）——所以要先把
+    // 「這一刻」抓取點相對中心的世界向量，反旋轉回角度是 0 時的本地座標
+    // 系，之後每一影格再用「目前角度」重新正向旋轉這個向量一次，就能還原
+    // 出抓取點目前應該在的世界座標，等同一根隨物件轉動、長度固定的懸掛臂。
+    const grabWorldX = e.clientX - centerX;
+    const grabWorldY = e.clientY - centerY;
+    const theta0 = dvdRotationDeg * Math.PI / 180;
+    const cos0 = Math.cos(theta0), sin0 = Math.sin(theta0);
+    dvdGrabLocalX = grabWorldX * cos0 + grabWorldY * sin0;
+    dvdGrabLocalY = -grabWorldX * sin0 + grabWorldY * cos0;
+
+    dvdPivotX = e.clientX;
+    dvdPivotY = e.clientY;
+    dvdPivotVX = 0;
+    dvdPivotVY = 0; // 抓住的瞬間手還沒開始移動，速度、加速度都從 0 起算，跟上面「歸零殘留角速度」同一個精神
+    // 清掉上一次拖曳留下的快取，避免這次剛抓住的第一影格拿舊的抓取點座標
+    // 去算差分速度、誤判成一個突如其來的瞬間移動。
+    stepDvdDragPendulum._prevPivotX = e.clientX;
+    stepDvdDragPendulum._prevPivotY = e.clientY;
+
     dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
     // 記下這根手指目前的座標，供之後補第二根手指做兩指旋轉時，拿來當
     // 「兩指連線」的其中一個端點（見上面 startDvdRotateGesture() 的說明）。
     dvdPrimaryTouchX = e.clientX;
     dvdPrimaryTouchY = e.clientY;
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
+
+    // 啟動鐘擺物理迴圈：跟主迴圈 stepDvdBounce() 一樣是常駐 RAF，理由是
+    // 就算指標完全靜止不動，重力依然要持續作用、讓擺動能繼續靠慣性擺盪，
+    // 不能只靠 pointermove 事件才更新一次（那樣手停住的瞬間擺動也會跟著
+    // 卡住，不像真正的鐘擺）。
+    dvdDragLastTime = null;
+    if(!dvdDragRAF) dvdDragRAF = requestAnimationFrame(stepDvdDragPendulum);
+  }
+
+  // ---------- 拖曳期間的鐘擺物理：逐影格算出重力＋甩動造成的角加速度 ----------
+  // 把物件想像成一根固定長度的懸掛臂：一端是抓取點（跟著指標／手指跑，見
+  // dvdPivotX/Y），另一端是物件中心。角度（dvdRotationDeg）跟角速度
+  // （dvdRotationVel）沿用既有的旋轉基礎設施，跟撞牆、兩指旋轉共用同一組
+  // 衰減系統（stepDvdRotation()），差別只在這裡驅動角速度的是「重力力矩」
+  // 加上「抓取點加速度造成的慣性力矩」（手甩得越快，這一項的貢獻越大，
+  // 就是「甩動也會造成旋轉晃動」的物理成因——想像拎著一串鑰匙快速往旁邊
+  // 一甩，鑰匙串會被甩得轉起來，不是只有静止懸掛才會晃）。
+  // 算完新角度之後，物件目前的畫面中心 = 抓取點的世界座標 - 抓取點相對
+  // 中心的向量（依目前角度重新旋轉過），也就是懸掛臂反推回物件那一端該在
+  // 哪裡；最後再套用跟原本拖曳一樣的視窗邊界，避免鐘擺甩動把物件整個甩出
+  // 視窗外。
+  function stepDvdDragPendulum(timestamp){
+    if(!dvdDragging){ dvdDragRAF = null; dvdDragLastTime = null; return; }
+    if(dvdDragLastTime === null) dvdDragLastTime = timestamp;
+    const dt = Math.min(0.048, (timestamp - dvdDragLastTime) / 1000); // 跟其他物理迴圈一致，限制單幀最大時間差
+    dvdDragLastTime = timestamp;
+
+    if(dt > 0 && dvdRotatePointerId === null){
+      // 兩指旋轉手勢進行中（dvdRotatePointerId !== null）時，角度改由那個
+      // 手勢直接控制（見 dvdRotatePointerMove()），這裡的鐘擺力矩暫時讓開，
+      // 避免兩邊同時搶著改 dvdRotationDeg 互相打架；手勢結束後角速度會被
+      // finalizeDvdRotateVelocity() 重新設定成甩轉速度，下一影格這裡接手
+      // 繼續套用重力，感覺就像「轉一下之後，鐘擺力學重新接管」。
+      const thetaRad = dvdRotationDeg * Math.PI / 180;
+      const cosT = Math.cos(thetaRad), sinT = Math.sin(thetaRad);
+      // 抓取點相對物件中心，目前這一影格的世界向量（懸掛臂另一端）
+      const armX = dvdGrabLocalX * cosT - dvdGrabLocalY * sinT;
+      const armY = dvdGrabLocalX * sinT + dvdGrabLocalY * cosT;
+      // 抓取點（懸掛支點）指向物件中心的向量，鐘擺重力力矩由這個向量算
+      const rx = -armX, ry = -armY;
+      const armLenSq = Math.max(1, armX * armX + armY * armY); // 保底避免抓在正中心（臂長趨近 0）時除以 0
+
+      // 抓取點速度：低通濾波，抹掉指標座標量測本身的高頻雜訊，避免直接
+      // 拿相鄰影格差分去做二次微分（算加速度）時把雜訊放大成誇張的抖動。
+      const instVX = (dvdPivotX - (stepDvdDragPendulum._prevPivotX ?? dvdPivotX)) / dt;
+      const instVY = (dvdPivotY - (stepDvdDragPendulum._prevPivotY ?? dvdPivotY)) / dt;
+      stepDvdDragPendulum._prevPivotX = dvdPivotX;
+      stepDvdDragPendulum._prevPivotY = dvdPivotY;
+      const smooth = 1 - Math.exp(-18 * dt); // 濾波係數，數字越大跟得越緊，18 大約是 60fps 下抓兩三影格平均的手感
+      const newVX = dvdPivotVX + (instVX - dvdPivotVX) * smooth;
+      const newVY = dvdPivotVY + (instVY - dvdPivotVY) * smooth;
+      let accelX = (newVX - dvdPivotVX) / dt;
+      let accelY = (newVY - dvdPivotVY) / dt;
+      accelX = Math.max(-PENDULUM_MAX_PIVOT_ACCEL, Math.min(PENDULUM_MAX_PIVOT_ACCEL, accelX));
+      accelY = Math.max(-PENDULUM_MAX_PIVOT_ACCEL, Math.min(PENDULUM_MAX_PIVOT_ACCEL, accelY));
+      dvdPivotVX = newVX;
+      dvdPivotVY = newVY;
+
+      // 力矩（單位質量近似，見上方常數說明）：
+      //   重力項：rx * g——重心偏在支點水平方向哪一側，重力就往哪個方向轉，
+      //           拉回「垂直懸掛在支點正下方」的平衡角度。
+      //   慣性項：支點加速度在懸掛臂帶動下的參考系裡，等同一股反方向的
+      //           虛擬力（-accel）作用在中心上，力矩算法跟重力項同一套
+      //           叉積公式，只是把重力向量換成這股虛擬力。
+      const torqueGravity = rx * PENDULUM_GRAVITY_PX;
+      const torqueInertial = ry * accelX - rx * accelY;
+      const alphaRad = (torqueGravity + torqueInertial) / armLenSq; // rad/秒²
+      const alphaDeg = alphaRad * 180 / Math.PI;
+
+      dvdRotationVel += alphaDeg * dt;
+      dvdRotationVel *= Math.exp(-PENDULUM_DAMPING_PER_SEC * dt);
+      dvdRotationVel = Math.max(-PENDULUM_MAX_ANGULAR_VEL, Math.min(PENDULUM_MAX_ANGULAR_VEL, dvdRotationVel));
+      dvdRotationDeg += dvdRotationVel * dt;
+    }
+
+    // 用「目前角度」重新算一次抓取點相對中心的世界向量，反推出物件中心
+    // 目前該在的畫面座標（懸掛臂另一端）。
+    const thetaNow = dvdRotationDeg * Math.PI / 180;
+    const cosN = Math.cos(thetaNow), sinN = Math.sin(thetaNow);
+    const armNowX = dvdGrabLocalX * cosN - dvdGrabLocalY * sinN;
+    const armNowY = dvdGrabLocalX * sinN + dvdGrabLocalY * cosN;
+    const rawCenterX = dvdPivotX - armNowX;
+    const rawCenterY = dvdPivotY - armNowY;
+
+    // 沿用跟原本拖曳一樣的視窗邊界（含像素級 inset），避免鐘擺甩動把物件
+    // 整個甩出可視範圍；跟原本拖曳的差別只在於這裡是「甩到哪就卡在哪」，
+    // 不影響抓取點本身繼續自由跟著指標移動。
+    const dvdDragPixelInsets = computeDvdPixelInsets();
+    const minX = dvdBoundMinX() - dvdDragPixelInsets.left, minY = dvdBoundMinY() - dvdDragPixelInsets.top;
+    const maxX = dvdBoundMaxX() + dvdDragPixelInsets.right, maxY = dvdBoundMaxY() + dvdDragPixelInsets.bottom;
+    dvdX = clampDvd(rawCenterX - dvdW / 2, Math.min(minX, maxX), Math.max(minX, maxX));
+    dvdY = clampDvd(rawCenterY - dvdH / 2, Math.min(minY, maxY), Math.max(minY, maxY));
+    dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
+
+    // 補進「這一影格」的位置取樣，供放開時 dvdPointerUp() 那段（受保護、
+    // 已跟使用者確認過的）末速度計算使用——這裡算出來的 dvdX/dvdY 已經
+    // 包含鐘擺甩動帶來的切線分量，等同「甩繩子甩出去」那種手感會自然被
+    // 這套既有的速度採樣邏輯吃進去，不需要另外算一次放開速度。
+    const now = performance.now();
+    dvdMoveSamples.push({ t: now, x: dvdX, y: dvdY });
+    while(dvdMoveSamples.length > 2 && now - dvdMoveSamples[0].t > DVD_FLING_WINDOW_MS){
+      dvdMoveSamples.shift();
+    }
+
+    dvdDragRAF = requestAnimationFrame(stepDvdDragPendulum);
   }
 
   // ⚠️ 保護區段開始：dvdPointerMove() + dvdPointerUp() 裡的末速度計算，
@@ -8821,44 +8991,23 @@
     }
     if(!dvdDragging || e.pointerId !== dvdPointerId) return;
     e.preventDefault();
-    // ---------- 修正：「用滑鼠／觸控拖曳時，卡在一個空白區域邊界，而不是
-    // 實際去背後邊界」----------
-    // 這裡原本只拿 dvdBoundMinX()/dvdBoundMaxX() 這組「未去背裁切、單純
-    // 矩形外框」的邊界去 clamp 拖曳座標——跟 stepDvdBounce() 那套飄動／
-    // 撞牆物理迴圈不是同一組邊界：後者早就有 computeDvdPixelInsets() 算出
-    // 的像素級 inset（見該函式的完整說明），拖曳這裡卻完全沒有套用，等於
-    // 放開手指飄走時用的是「圖案實際邊緣」，用手指／滑鼠拖曳時卻仍然被
-    // 矩形外框卡住——這正是使用者回報「拖曳到網頁邊界時，被一個空白的
-    // 區域邊界卡住，而不是實際去背後邊界」的成因：矩形外框比圖案實際可視
-    // 範圍多留了一圈透明空白，拖曳時手還沒真的把圖案本身的像素拖到螢幕
-    // 邊緣，就已經被這圈空白卡住、拖不動了。
-    // 修法：拖曳時也套用同一套 computeDvdPixelInsets()，跟飄動物理迴圈用
-    // 完全相同的一組邊界，讓拖曳能一路拖到圖案本身的像素貼齊螢幕邊緣為止，
-    // 不會再被外框的透明留白提前卡住。旋轉角度在拖曳全程本來就是抓取當下
-    // 的固定值（見 commitDvdDrag() 裡把 dvdRotationVel 歸零的說明），這裡
-    // 不需要額外處理旋轉變化，直接呼叫即可。
-    const dvdDragPixelInsets = computeDvdPixelInsets();
-    const minX = dvdBoundMinX() - dvdDragPixelInsets.left, minY = dvdBoundMinY() - dvdDragPixelInsets.top;
-    const maxX = dvdBoundMaxX() + dvdDragPixelInsets.right, maxY = dvdBoundMaxY() + dvdDragPixelInsets.bottom;
-    dvdX = clampDvd(e.clientX - dvdGrabOffsetX, Math.min(minX, maxX), Math.max(minX, maxX));
-    dvdY = clampDvd(e.clientY - dvdGrabOffsetY, Math.min(minY, maxY), Math.max(minY, maxY));
+    // ---------- 需求變更：位置改由「鐘擺懸掛臂」反推，這裡只負責更新抓取點 ----------
+    // 抓握鐘擺功能上線之前，這裡是直接拿指標座標減掉抓取偏移量、算出來
+    // 就是 dvdX/dvdY 本身（物件剛性跟著指標平移，角度全程不變）。現在
+    // 角度會因為重力／甩動持續改變（見 stepDvdDragPendulum()），dvdX/dvdY
+    // 已經不能再由這裡一次性算完——改成只更新「抓取點」目前的世界座標
+    // （dvdPivotX/Y，就是指標／手指本身，不需要再扣掉抓取偏移量，抓取點
+    // 定義上就是指標當下的位置本身），真正的物件中心位置、視窗邊界的
+    // clamp、末速度取樣，全部移到 stepDvdDragPendulum() 那個常駐迴圈裡
+    // 逐影格處理（理由見該函式的完整說明：就算指標靜止不動，鐘擺仍要
+    // 持續受重力擺動，不能只靠這個事件觸發才更新一次）。
+    dvdPivotX = e.clientX;
+    dvdPivotY = e.clientY;
     // 隨時更新這根手指目前的座標，讓正在進行中的兩指旋轉手勢（如果有）
     // 拿到的「連線角度」永遠是相對這根手指最新位置算出來的，位置拖曳跟
     // 兩指旋轉可以同時進行，不會互相干擾。
     dvdPrimaryTouchX = e.clientX;
     dvdPrimaryTouchY = e.clientY;
-    dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
-
-    const now = performance.now();
-    dvdMoveSamples.push({ t: now, x: dvdX, y: dvdY });
-    // 只留最近 ~DVD_FLING_WINDOW_MS 的取樣：這裡的裁切是相對「這一次
-    // pointermove 觸發的時間」回推，只是先做初步瘦身、避免長時間拖曳時
-    // 陣列無限長大；真正決定「放開那一刻算出來的末速度」的裁切，改成在
-    // dvdPointerUp() 裡相對「放開當下」重新做一次（見該處說明），這裡
-    // 不需要做到跟那邊完全一致。
-    while(dvdMoveSamples.length > 2 && now - dvdMoveSamples[0].t > DVD_FLING_WINDOW_MS){
-      dvdMoveSamples.shift();
-    }
   }
 
   function dvdPointerUp(e){
@@ -9672,6 +9821,10 @@
     // 事件、跟物理堆疊模式的 transform 控制權互搶。
     if(dvdRotatePointerId !== null) endDvdRotateGesture(dvdRotatePointerId);
     if(dvdDragRotRAF){ cancelAnimationFrame(dvdDragRotRAF); dvdDragRotRAF = null; }
+    // 同上，保險停掉鐘擺拖曳迴圈（見 stepDvdDragPendulum()）：正常流程下
+    // dvdDragging 已經在上面被設回 false，迴圈下一影格就會自己停止，這裡
+    // 只是避免極端時序下多跑一影格、跟接下來的物理堆疊模式搶著寫 transform。
+    if(dvdDragRAF){ cancelAnimationFrame(dvdDragRAF); dvdDragRAF = null; }
 
     // 原本 e 是等首頁縮圖收起的 PHOTO_FALL_SHRINK_MS（420ms）過完，才跟 15
     // 張照片一起被丟進物理世界，這段空檔它已經停止飄動、卻還沒開始受重力，
@@ -10837,6 +10990,7 @@
     // 保險同上（見 enterPhotoFallMode 內對應那段的說明）。
     if(dvdRotatePointerId !== null) endDvdRotateGesture(dvdRotatePointerId);
     if(dvdDragRotRAF){ cancelAnimationFrame(dvdDragRotRAF); dvdDragRotRAF = null; }
+    if(dvdDragRAF){ cancelAnimationFrame(dvdDragRAF); dvdDragRAF = null; } // 同上，保險停掉鐘擺拖曳迴圈
     const Matter = window.Matter;
     if(Matter && pfEngine){
       if(!pfDvdItem){
