@@ -6967,10 +6967,56 @@
     if(rects){
       const parts = rects.map(r => Bodies.rectangle(x + r.cx, y + r.cy, r.w, r.h, partOptions));
       const body = Body.create({ parts });
+      // ---------- 真正修好「複合碰撞體仍會跟視覺畫面對不齊」的根本成因 ----------
+      // Body.create({parts}) 底層是呼叫 Matter 的 Body.setParts()，它會把
+      // body.position 強制改寫成「所有小矩形（也就是實際有畫到東西的
+      // alpha 像素）依面積加權算出來的質心」，而不是我們原本想要的「整張
+      // 去背圖外框矩形的正中心」（w/2, h/2）。上面兩者只有形狀完全對稱、
+      // 顏色平均分佈在外框正中央時才會剛好重合；但這裡多半是異形去背圖
+      // （例如蕨類捲起的一端比較密、蝴蝶翅膀左右不對稱、香蕉一整串偏向
+      // 一側），質心天生就會偏離外框正中心。下面 pfSyncHandler／飛入詳細頁
+      // 動畫等每個地方，全部都是直接拿 body.position 當「外框矩形正中心」
+      // 去反推 DOM 該畫在哪裡（translate(body.position.x - w/2, ...)）——
+      // 這個假設一旦不成立，畫出來的整張圖（含外框內的透明留白）就會
+      // 整個偏移，偏移量剛好等於「質心到外框中心」這段距離。碰撞判斷本身
+      // （質心 vs 質心）其實是準的，兩張圖的碰撞體真的沒有互相穿透；但
+      // 畫面上看到的，是兩張「因為偏移而被畫錯位置」的完整外框圖片在打架，
+      // 這才是不管怎麼調網格解析度、肉眼看起來還是會交疊的真正原因。
+      // 修法：在 Body.create 把 position 改寫成質心「當下」（角度還是 0，
+      // 因為下面 Body.setAngle 還沒呼叫），先把「質心 → 外框正中心」這段
+      // 向量算出來記住（body-local 座標系下的固定偏移量，不會再變），存進
+      // Matter 官方保留給外掛自訂資料用的 body.plugin 裡。之後無論這顆
+      // body 怎麼被物理引擎轉動、位移，只要在畫面同步時把這段固定的本地
+      // 偏移量依照 body 目前的 angle 重新旋轉一次、加回 body.position，
+      // 就能還原出「外框正中心」目前真正該在的世界座標——這才是畫面元素
+      // 真正該對齊的點（見下面共用的 pfBoxCenter()）。
+      body.plugin = body.plugin || {};
+      body.plugin.pfCenterOffset = { x: x - body.position.x, y: y - body.position.y };
       if(typeof angle === 'number') Body.setAngle(body, angle);
       return body;
     }
-    return Bodies.rectangle(x, y, w, h, Object.assign({}, options, { chamfer: { radius: 3 } }));
+    const body = Bodies.rectangle(x, y, w, h, Object.assign({}, options, { chamfer: { radius: 3 } }));
+    // 退回單一矩形 body 時，body.position 本來就等於外框正中心，偏移量是
+    // 零向量——跟上面複合物體共用同一套 pfBoxCenter() 讀取邏輯，不用另外
+    // 特判「這顆是不是複合物體」。
+    body.plugin = body.plugin || {};
+    body.plugin.pfCenterOffset = { x: 0, y: 0 };
+    return body;
+  }
+
+  // 共用：把「質心 → 外框正中心」這段固定的本地偏移量，依 body 目前的
+  // angle 重新旋轉，加回 body.position，還原出外框正中心目前真正在世界
+  // 座標系裡的位置。所有需要「把 body 換算成畫面矩形」的地方（每影格
+  // 同步 transform、算飛行動畫起點矩形、判斷是否已經完全掉出畫面……）都
+  // 應該呼叫這個函式，不要再直接拿 body.position 當外框正中心用。
+  function pfBoxCenter(body){
+    const off = body.plugin && body.plugin.pfCenterOffset;
+    if(!off || (off.x === 0 && off.y === 0)) return body.position;
+    const cosA = Math.cos(body.angle), sinA = Math.sin(body.angle);
+    return {
+      x: body.position.x + off.x * cosA - off.y * sinA,
+      y: body.position.y + off.x * sinA + off.y * cosA,
+    };
   }
 
   // 窄義相位：在兩個矩形（螢幕座標）的重疊範圍內，依固定間距取樣，逐點
@@ -9768,11 +9814,13 @@
     pfItems = [];
     pfSyncHandler = () => {
       pfItems.forEach(({ body, el, w, h }) => {
-        el.style.transform = `translate(${body.position.x - w / 2}px, ${body.position.y - h / 2}px) rotate(${body.angle}rad)`;
+        const c = pfBoxCenter(body);
+        el.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${body.angle}rad)`;
       });
       if(pfDvdItem){
         const { body, w, h } = pfDvdItem;
-        dvdBounce.style.transform = `translate(${body.position.x - w / 2}px, ${body.position.y - h / 2}px) rotate(${body.angle}rad)`;
+        const c = pfBoxCenter(body);
+        dvdBounce.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${body.angle}rad)`;
       }
     };
     // 效能修正（手機版堆疊頁面 lag／fps 掉很低的根本成因）：原本這裡是
@@ -10258,9 +10306,10 @@
     // 旋轉後被撐大的外接矩形，飛行動畫的起點、尺寸都會偏大、偏移。角度
     // 本身另外用 angle 這個欄位原封不動帶過去，讓分身可以照著這個角度
     // 開始飛（而不是被拿掉旋轉資訊、變成憑空從水平開始）。
+    const pfCenter = pfBoxCenter(info.body);
     const rect = {
-      left: info.body.position.x - info.w / 2,
-      top: info.body.position.y - info.h / 2,
+      left: pfCenter.x - info.w / 2,
+      top: pfCenter.y - info.h / 2,
       width: info.w,
       height: info.h,
       angle: info.body.angle,
@@ -10396,7 +10445,7 @@
     };
 
     const checkOldOut = () => {
-      const allOut = oldItems.every(({ body, h }) => body.position.y - h / 2 > vh + 40);
+      const allOut = oldItems.every(({ body, h }) => pfBoxCenter(body).y - h / 2 > vh + 40);
       if(allOut){
         settleOnce();
       } else {
@@ -10426,7 +10475,7 @@
     // 本意——單純當作「萬一輪詢那條路徑意外沒被觸發」的備援，而不是一個
     // 會提早打斷掉落動畫、讓照片憑空消失的強制關卡。
     const triggerReshuffleFallback = () => {
-      const allOut = oldItems.every(({ body, h }) => body.position.y - h / 2 > vh + 40);
+      const allOut = oldItems.every(({ body, h }) => pfBoxCenter(body).y - h / 2 > vh + 40);
       if(pfDragging || !allOut){
         pfExitFallbackTimer = setTimeout(triggerReshuffleFallback, PHOTO_FALL_EXIT_MAX_WAIT_MS);
         return;
@@ -10513,8 +10562,8 @@
 
     const vh = window.innerHeight;
     const checkAllOut = () => {
-      const allOut = pfItems.every(({ body, h }) => body.position.y - h / 2 > vh + 40)
-        && (!pfDvdItem || pfDvdItem.body.position.y - pfDvdItem.h / 2 > vh + 40);
+      const allOut = pfItems.every(({ body, h }) => pfBoxCenter(body).y - h / 2 > vh + 40)
+        && (!pfDvdItem || pfBoxCenter(pfDvdItem.body).y - pfDvdItem.h / 2 > vh + 40);
       if(allOut){
         clearTimeout(pfExitFallbackTimer);
         clearTimeout(pfExitPollTimer);
@@ -10552,8 +10601,8 @@
     // 這裡同樣補上 allOut 檢查，只有真的全部掉出畫面（或使用者放手後
     // checkAllOut 輪詢先偵測到）才收尾，其餘情況一律繼續往後延。
     const triggerExitFallback = () => {
-      const allOut = pfItems.every(({ body, h }) => body.position.y - h / 2 > vh + 40)
-        && (!pfDvdItem || pfDvdItem.body.position.y - pfDvdItem.h / 2 > vh + 40);
+      const allOut = pfItems.every(({ body, h }) => pfBoxCenter(body).y - h / 2 > vh + 40)
+        && (!pfDvdItem || pfBoxCenter(pfDvdItem.body).y - pfDvdItem.h / 2 > vh + 40);
       if(pfDragging || !allOut){
         pfExitFallbackTimer = setTimeout(triggerExitFallback, PHOTO_FALL_EXIT_MAX_WAIT_MS);
         return;
