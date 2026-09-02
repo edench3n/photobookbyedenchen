@@ -1545,14 +1545,37 @@
   .photo-fall-item{
     position:absolute;
     top:0; left:0;
-    overflow:hidden;
-    background:#f4f4f4;
+    overflow:visible;
+    /* 原本這裡是 background:#f4f4f4，給「一般不透明相片」在真正載入完成前
+       當一塊淺灰色的載入骨架用——相片本身是滿版矩形，載入完成後 <img>
+       會完全蓋住這塊底色，使用者從頭到尾看不到它。改成掉落「漂浮物件
+       圖片庫」的去背 PNG 之後，圖片本身四周、鏤空處都是透明的，這塊底色
+       會直接從透明區域透出來，變成每個物件背後多一塊灰色矩形卡片——這正
+       是「怎麼每個物件後面都有一塊灰底、彼此完全不能像去背圖那樣互相
+       貼合」的成因。已經不需要靠這塊底色當載入骨架（見下面 img 內 opacity
+       淡入、以及 .pf-pending 把整格連同底色一起隱藏的機制，兩者都不依賴
+       這裡的顏色），直接拿掉即可：整個 .photo-fall-item 保持完全透明，
+       只有 <img> 本身去背後「真正有顏色的那塊形狀」看得見，物件與物件
+       之間、邊緣縫隙都能像圖片庫原本的去背圖一樣互相貼合、露出後面的
+       白色頁面（或彼此疊在上面的其他物件），不會再卡著一塊多餘的灰色
+       矩形。overflow 也從 hidden 改成 visible：hidden 對「填滿整個方塊」
+       的相片沒有影響，但去背圖旋轉時，物件實際可見的形狀（例如伸長的
+       觸角、藤蔓）常常會些微超出它自己這個依「面積」概算出來的矩形框，
+       hidden 會把這些邊緣尖角切掉一角，改成 visible 才能完整顯示整個
+       去背形狀，不會被自己的容器裁邊。 */
     will-change: transform;
   }
   .photo-fall-item img{
     width:100%;
     height:100%;
-    object-fit:cover;
+    /* 原本是 object-fit:cover：相片是滿版矩形，cover 保證填滿整個容器、
+       裁掉多餘的邊。去背 PNG 改用 object-fit:contain——這格的寬高是依
+       「面積＋長寬比」概算出來的，長寬比超出 PHOTO_FALL_ASPECT_MIN/MAX
+       時會被夾住、跟圖片實際比例會有些微落差，用 cover 會把去背圖案邊緣
+       (例如細長的腳、觸角) 裁掉一截；contain 保證整張去背圖完整顯示、
+       絕不裁切，落差最多就是容器裡多一點透明留白，反正容器本身已經是
+       透明的，這圈留白使用者完全看不出來。 */
+    object-fit:contain;
     display:block;
     pointer-events:none;
     -webkit-user-drag:none;
@@ -1568,15 +1591,15 @@
   }
   .photo-fall-item img.loaded{ opacity:1; }
   /* 還在等圖片真的下載＋decode 完成、還沒被允許掉落的照片（見 JS
-     spawnFallingPhotos() 內 markLoadedAndDrop() 的說明）：整格連同底色
-     一起隱藏，不只是裡面的 <img>。因為這格這時根本還沒有對應的物理
-     body、也不在 pfItems 裡，不會有任何一影格幫它同步 transform 位置，
-     若只藏 <img> 不藏整個方塊，會看到 .photo-fall-item 自己的灰色底色
-     卡在版面左上角（CSS 預設的 top:0/left:0）動也不動——這正是原本
-     「還沒載入好的照片，方塊已經掉在地上」問題的根源。opacity:0 完全
-     隱藏，等真正建立物理 body、加進畫面同步的那一刻才拿掉這個 class，
-     使用者看到的就是這張照片「一準備好，馬上從畫面外開始掉落」，不會有
-     任何中間的空白／灰色方塊。 */
+     spawnFallingPhotos() 內 markLoadedAndDrop() 的說明）：整格隱藏，不只
+     是裡面的 <img>。因為這格這時根本還沒有對應的物理 body、也不在
+     pfItems 裡，不會有任何一影格幫它同步 transform 位置，若只藏 <img>
+     不藏整個方塊，雖然現在 .photo-fall-item 本身已經沒有底色（見上面
+     說明，已改成完全透明），但這格的邊框範圍仍然會卡在版面左上角
+     （CSS 預設的 top:0/left:0）動也不動，一樣不該讓使用者看到——opacity:0
+     完全隱藏，等真正建立物理 body、加進畫面同步的那一刻才拿掉這個
+     class，使用者看到的就是這張圖「一準備好，馬上從畫面外開始掉落」，
+     不會有任何中間卡住不動的空殼。 */
   .photo-fall-item.pf-pending{
     opacity: 0;
     pointer-events: none;
