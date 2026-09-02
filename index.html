@@ -6856,6 +6856,102 @@
     return maskEntry.mask[y * maskEntry.w + x] === 1;
   }
 
+  // ---------- 照片物理堆疊模式共用：把 alpha 遮罩換算成貼合實際形狀的碰撞體 ----------
+  // 給 spawnFallingPhotos()（每張掉落照片）跟 startPhotoFallEngine()（飄動
+  // 的 e 本身進場落下那顆 body）共用——兩邊都是「同一批去背異形圖，需要
+  // 貼合真實輪廓的碰撞體，而不是整張外框矩形」，邏輯完全一樣，抽成這裡
+  // 共用一份。
+  //
+  // 第一版只用單一凸包（convex hull）貼合輪廓，已經比整張矩形準確很多；
+  // 但凸包天生沒辦法還原「凹陷」——例如蝴蝶兩片翅膀中間那個 V 形缺口、
+  // 豆莢彎成愛心形狀中間凹進去那塊、陶笛鏤空的洞——凸包會直接把這些凹陷
+  // 「橋接」過去變成一塊實心區域，導致其他照片肉眼看起來明明有空間可以
+  // 卡進那個缺口，物理上卻被這塊「其實不存在的隱形凸起」擋住，完全塞不
+  // 進去，正是「蝴蝶下方縫隙其他圖片根本進不去」的成因；飄動的 e 進場後
+  // 落下那顆 body 目前也還是整張矩形，同一個原因，還沒真的貼到自己的
+  // 真實邊緣。
+  // 修法：改把 alpha 遮罩降到一個較粗的網格（PF_BODY_GRID_MAX——效能考量
+  // 不能跟原本用於像素級撞牆判斷的 72×72 遮罩一樣細，那樣拆出的矩形數量
+  // 太多，多張照片同時落下、物理引擎會撐不住），對每一列做「連續實心格子
+  // 合併成一個小矩形」（run-length 合併），把同一張圖所有列合併出的小矩形
+  // 一起組成一個 Matter「複合物體」（compound body：多個 part 組成、彼此
+  // 固定相對位置，物理上仍是一個整體）。用一整排小矩形逼近原始形狀輪廓
+  // （含凹陷），是點陣圖形轉成物理碰撞體的常見實用技巧，不需要額外載入
+  // poly-decomp（凹多邊形分解函式庫，這頁面目前沒有載入），也不用處理它
+  // 的相容性/效能問題。
+  // 遮罩還沒建立好時（例如剛好在第一次雙擊那一刻還沒暖機完成），優雅退回
+  // 原本的矩形 body（+ 圓角），不會讓功能壞掉或報錯。
+  const PF_BODY_GRID_MAX = DVD_LOW_POWER_DEVICE ? 10 : 16; // 拆解精細度上限（沿長邊的格數）：越大越貼合凹陷，但拆出的矩形（=物理 body 數量）也越多，效能較弱裝置調低
+  const PF_BODY_GRID_CELL_MAJORITY = 0.5; // 跟 PF_ALPHA_MASK_CELL_MAJORITY 同樣的道理：降到粗網格時，這一格要「多數」原始像素都有畫到東西才算整格實心，避免只沾到一點顏色的邊緣格被整格補滿
+
+  // 把 maskEntry（見 finishMask() 的 {mask,w,h} 格式）降到粗網格、按列合併
+  // 出一批矩形，每個矩形都是「以整張圖 w×h 為範圍、原點在中心」的區域座標
+  // （cx/cy 是矩形中心相對整張圖中心的偏移量），供呼叫端直接加上世界座標
+  // 的 x/y 平移使用。
+  function buildFallItemPhysicsRects(maskEntry, w, h){
+    if(!maskEntry || !maskEntry.mask || !maskEntry.w || !maskEntry.h) return null;
+    const srcW = maskEntry.w, srcH = maskEntry.h;
+    const scaleFactor = Math.max(1, Math.round(Math.max(srcW, srcH) / PF_BODY_GRID_MAX));
+    const gridW = Math.max(1, Math.round(srcW / scaleFactor));
+    const gridH = Math.max(1, Math.round(srcH / scaleFactor));
+    const grid = new Uint8Array(gridW * gridH);
+    for(let gy = 0; gy < gridH; gy++){
+      const y0 = Math.floor(gy * srcH / gridH), y1 = Math.max(y0 + 1, Math.floor((gy + 1) * srcH / gridH));
+      for(let gx = 0; gx < gridW; gx++){
+        const x0 = Math.floor(gx * srcW / gridW), x1 = Math.max(x0 + 1, Math.floor((gx + 1) * srcW / gridW));
+        let solid = 0, total = 0;
+        for(let sy = y0; sy < y1; sy++){
+          const rowBase = sy * srcW;
+          for(let sx = x0; sx < x1; sx++){ total++; if(maskEntry.mask[rowBase + sx] === 1) solid++; }
+        }
+        grid[gy * gridW + gx] = (total > 0 && solid / total >= PF_BODY_GRID_CELL_MAJORITY) ? 1 : 0;
+      }
+    }
+    const cellW = w / gridW, cellH = h / gridH;
+    const rects = [];
+    for(let gy = 0; gy < gridH; gy++){
+      let runStart = -1;
+      for(let gx = 0; gx <= gridW; gx++){
+        const solid = gx < gridW && grid[gy * gridW + gx] === 1;
+        if(solid && runStart === -1) runStart = gx;
+        if(!solid && runStart !== -1){
+          rects.push({
+            cx: (runStart + gx) / 2 * cellW - w / 2,
+            cy: (gy + 0.5) * cellH - h / 2,
+            w: (gx - runStart) * cellW,
+            h: cellH,
+          });
+          runStart = -1;
+        }
+      }
+    }
+    return rects.length ? rects : null;
+  }
+
+  // 建立最終要加進物理世界的 body：優先用上面「多矩形逼近實際形狀」的
+  // 做法（回傳複合物體），遮罩還沒就緒時退回原本的矩形（+ 圓角）。
+  // options 裡的 angle 刻意不直接傳給每一個小矩形——那樣會變成每個小矩形
+  // 各自先被轉了一次角度，跟複合物體組好之後「整體再轉一次」的物理語意
+  // 對不上；改成组好複合物體之後，用 Body.setAngle() 對整個複合物體只轉
+  // 一次，等同原本單一矩形 body 直接帶 angle 建立的效果。restitution／
+  // friction／frictionAir／density／collisionFilter 這些則要讓每個小矩形
+  // 各自帶著（決定整體的質量分佈、以及每個 part 各自的碰撞判斷/篩選規則），
+  // 所以原封不動傳給每一個小矩形。
+  function buildFallItemBody(Matter, maskEntry, x, y, w, h, options){
+    const { Bodies, Body } = Matter;
+    const angle = options.angle;
+    const partOptions = {};
+    for(const key in options){ if(key !== 'angle') partOptions[key] = options[key]; }
+    const rects = buildFallItemPhysicsRects(maskEntry, w, h);
+    if(rects){
+      const parts = rects.map(r => Bodies.rectangle(x + r.cx, y + r.cy, r.w, r.h, partOptions));
+      const body = Body.create({ parts });
+      if(typeof angle === 'number') Body.setAngle(body, angle);
+      return body;
+    }
+    return Bodies.rectangle(x, y, w, h, Object.assign({}, options, { chamfer: { radius: 3 } }));
+  }
+
   // 窄義相位：在兩個矩形（螢幕座標）的重疊範圍內，依固定間距取樣，逐點
   // 換算回各自的本地遮罩座標（dvd 這邊還要考慮目前的旋轉角度），只要有
   // 任何一個取樣點「兩邊都是實心像素」，就代表圖案本身真的疊到了。
@@ -9603,19 +9699,27 @@
     // 停下飄動迴圈時最後讀到的座標），不給任何初始速度——單純交給重力，
     // 效果就是原地忽然開始往下掉，不是從畫面外飛進來、也不是延續原本
     // 飄動的速度方向。跟其他照片共用完全相同的物理參數（restitution／
-    // friction／frictionAir／chamfer），落下、碰撞、拖曳的手感一致，只有
-    // 起始位置跟起始時間不同。
+    // friction／frictionAir），落下、碰撞、拖曳的手感一致，只有起始位置跟
+    // 起始時間不同。
+    // 碰撞形狀改用跟掉落照片同一套 buildFallItemBody()（完整說明見該函式
+    // 上方的註解）：e 本身也是去背異形圖（可能是內建的 EDEN 預設圖，也可能
+    // 是使用者換到圖片庫裡的某一張），一樣用它目前顯示中這張圖（見
+    // dvdActiveImgSrc）已經建立好的 alpha 遮罩，拆成貼合實際形狀的複合
+    // 物體，不再是整張外框矩形——這是「飄動物件本身沒有實際邊緣碰到」的
+    // 修正。遮罩還沒就緒時一樣優雅退回矩形，行為不受影響。
     measureDvdSize();
-    const dvdBody = Bodies.rectangle(dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, {
+    const dvdMaskEntry = dvdActiveImgSrc ? getCachedAlphaMask(dvdActiveImgSrc) : null;
+    const dvdBody = buildFallItemBody(Matter, dvdMaskEntry, dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, {
       restitution: 0.3, // 0.8 太接近全彈跳，多顆疊在一起的照片互相碰撞時會一直小幅度來回彈、看起來在抖動；調低到 0.3，還有一點回彈感，但不會抖個不停
       friction: 0.55,
       frictionAir: 0.012,
       density: 0.0026,
-      chamfer: { radius: 4 },
       // category 標成 PF_CATEGORY_DVD（mask 維持預設 0xFFFFFFFF，照樣跟
       // 牆壁／照片／地板正常碰撞，不影響原本任何互動）：單擊換批照片時
       // （見 reshufflePhotoFallBatch()）需要靠這個分類，讓專屬給 e 的
-      // 那塊地板只擋得住 e、擋不住一般照片。
+      // 那塊地板只擋得住 e、擋不住一般照片。這個 filter 會跟著傳進
+      // buildFallItemBody() 內每一個組成複合物體的小矩形 part，確保
+      // 不管碰撞體被拆成幾塊，分類判斷都還是一致的。
       collisionFilter: { category: PF_CATEGORY_DVD },
     });
     Composite.add(pfEngine.world, dvdBody);
@@ -9701,7 +9805,7 @@
   function spawnFallingPhotos(photoBatch, warmCache){
     if(!pfEngine) return; // 保險：使用者可能在照片還沒掉進來之前就已經雙擊提早收掉整個模式
     const Matter = window.Matter;
-    const { Bodies, Composite, Body, Vertices } = Matter;
+    const { Composite, Body } = Matter;
     pfSpawnGeneration += 1;
     const mySpawnGeneration = pfSpawnGeneration; // 見上面 pfSpawnGeneration 宣告處的完整說明
 
@@ -9800,53 +9904,24 @@
     // restitution／friction／chamfer 那些碰撞手感參數，肉眼看永遠隔著一段
     // 空隙，怎麼修都無效」的根本原因：問題從來不在碰撞的「手感」，而在碰撞體
     // 的「形狀」本身就沒有貼合圖案真正的輪廓。
-    // 修法：這批圖片（dvdEImages）在飄動撞牆模式（見 pixelShapesOverlap()／
-    // requestAlphaMask() 一帶）早就已經為了「像素級撞牆判斷」建立過 alpha
-    // 遮罩，其中 finishMask() 額外算出了 boundary——這張圖去背後真正輪廓的
-    // 邊界點（0~1 常態化座標，見該函式的完整說明）。這裡直接沿用同一份
-    // boundary，換算成這張掉落照片實際的 itemW/itemH 尺寸、以矩形中心為原點
-    // 的座標，再用 Matter 內建的 Vertices.hull() 算出這些邊界點的「凸包」
-    // （convex hull：包住所有邊界點的最小凸多邊形）。凸包雖然不是每個凹陷
-    // 都完全貼合（例如章魚捲起來的觸手中間那圈鏤空，凸包會直接連過去、不會
-    // 挖空），但已經比「整張外框矩形」精準太多、緊貼圖案外緣，也不需要額外
-    // 載入 poly-decomp（頁面目前沒有載入這個凹多邊形分解函式庫，Matter.js
-    // 沒有它就無法正確處理「凹」多邊形，但凸包本身保證一定是凸的，
-    // Bodies.fromVertices() 不需要靠 poly-decomp 分解也能正確建立）。
-    // 遮罩還沒建立好（例如剛好在使用者第一次雙擊那一刻還沒暖機完成）時，
-    // getCachedAlphaMask() 會回傳 undefined——這裡跟其他呼叫端一致，優雅
-    // 退回原本的矩形 body，不會讓功能壞掉或報錯。
-    const PF_HULL_MIN_BOUNDARY_POINTS = 6; // boundary 是攤平的 [x0,y0,x1,y1,...]，至少要 3 個點（6 個數字）才夠算出一個有意義的多邊形，點數太少就直接退回矩形
-    function buildFallItemHullVertices(maskEntry, itemW, itemH){
-      if(!maskEntry || !maskEntry.boundary || maskEntry.boundary.length < PF_HULL_MIN_BOUNDARY_POINTS) return null;
-      const b = maskEntry.boundary;
-      const pts = [];
-      for(let i = 0; i < b.length; i += 2){
-        pts.push({ x: b[i] * itemW - itemW / 2, y: b[i + 1] * itemH - itemH / 2 });
-      }
-      const hull = Vertices.hull(pts);
-      return (hull && hull.length >= 3) ? hull : null;
-    }
-
+    // 這裡改用 buildFallItemBody()（跟飄動的 e 進場落下那顆 body 共用同一套
+    // 邏輯，完整說明見該函式上方的註解）：拿這批圖片早就為了「像素級撞牆
+    // 判斷」建立好的 alpha 遮罩，拆成一批貼合實際形狀（含凹陷）的小矩形，
+    // 組成複合物體當碰撞體，不再是整張外框矩形。遮罩還沒建立好時，函式內部
+    // 會自動優雅退回原本的矩形 body，不會讓功能壞掉。
     const dropItem = (el, itemW, itemH, startX, startY, photo) => {
       if(!pfEngine || pfSpawnGeneration !== mySpawnGeneration){
         if(el.parentNode) el.parentNode.removeChild(el); // 這一批（或整個堆疊模式）已經作廢，別再讓這張照片憑空冒出來
         return;
       }
-      // restitution/friction/frictionAir/density 這幾個「碰撞手感」參數維持
-      // 完全不變——這次要修的是形狀本身，不是手感，兩者是各自獨立的問題。
-      const bodyOptions = {
+      const maskEntry = photo && photo.src ? getCachedAlphaMask(photo.src) : null;
+      const body = buildFallItemBody(Matter, maskEntry, startX, startY, itemW, itemH, {
         restitution: 0.3, // 0.8 太接近全彈跳，多顆疊在一起的照片互相碰撞時會一直小幅度來回彈、看起來在抖動；調低到 0.3，還有一點回彈感，但不會抖個不停
         friction: 0.55,
         frictionAir: 0.012,
         density: 0.0022,
         angle: (Math.random() - 0.5) * 0.6,
-      };
-      const maskEntry = photo && photo.src ? getCachedAlphaMask(photo.src) : null;
-      const hullVerts = buildFallItemHullVertices(maskEntry, itemW, itemH);
-      const body = hullVerts
-        ? Bodies.fromVertices(startX, startY, [hullVerts], bodyOptions, true)
-        // 遮罩還沒就緒的退回路徑：維持原本矩形 + 圓角的舊行為，不受這次修改影響。
-        : Bodies.rectangle(startX, startY, itemW, itemH, { ...bodyOptions, chamfer: { radius: 3 } });
+      });
       Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.14);
       Composite.add(pfEngine.world, body);
       // 直接把這張照片對應的 body／尺寸／原始 photo 物件存在 DOM 元素自己
@@ -10641,12 +10716,12 @@
         // 世界裡正常運作中（現在改成蓋滿畫面那一刻才凍結，見
         // openPreviewPage() 內的說明），不需要重建，直接跳過這一段。
         measureDvdSize();
-        const dvdBody = Matter.Bodies.rectangle(dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, {
+        const dvdMaskEntry = dvdActiveImgSrc ? getCachedAlphaMask(dvdActiveImgSrc) : null;
+        const dvdBody = buildFallItemBody(Matter, dvdMaskEntry, dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, {
           restitution: 0.3, // 0.8 太接近全彈跳，多顆疊在一起的照片互相碰撞時會一直小幅度來回彈、看起來在抖動；調低到 0.3，還有一點回彈感，但不會抖個不停
           friction: 0.55,
           frictionAir: 0.012,
           density: 0.0026,
-          chamfer: { radius: 4 },
           collisionFilter: { category: PF_CATEGORY_DVD }, // 見 startPhotoFallEngine() 內同一個屬性的說明
         });
         Matter.Composite.add(pfEngine.world, dvdBody);
