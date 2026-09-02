@@ -6972,6 +6972,14 @@
   // 下面 pickNextDvdEImageIndex() 的完整說明），不再是單純按順序 +1。
   let dvdEImages = [];
   let dvdEImageIndex = 0;
+  // src -> 寬高比（naturalWidth/naturalHeight）：照片物理堆疊模式改成掉落
+  // 「漂浮物件圖片庫」（dvdEImages）的去背圖之後，需要知道每張圖去背後
+  // 真正的長寬比才能算出正確的掉落尺寸（見 spawnFallingPhotos()）。這裡
+  // 在 predecodeDvdEImage() 每張圖解碼完成的同一刻順便量出來、寫進這個
+  // cache——跟撞牆用的 dvdEDecodedSrcSet／pfAlphaMaskCache 是同一批背景
+  // 暖機流程，不需要另外多跑一次。查不到（例如剛好還沒暖機完成）就退回
+  // 正方形，行為跟原本 photo.aspect 缺值時的退回邏輯一致。
+  const dvdEImageAspectCache = new Map();
   // ---------- 修正：「撞牆當下下一張還沒載入好，會在接下來的空中飄動
   // 途中才『趕上』切換」----------
   // 成因：setDvdBounceImageSrc() 內部一律用「畫面外 Image().decode() 完成
@@ -7062,6 +7070,12 @@
       // （圖片本身壞掉），也一併標記過，避免同一張壞圖每次撞到都被當成
       // 「還沒準備好」卡住不放行、永遠選不到別張。
       dvdEDecodedSrcSet.add(src);
+      // 順便量出這張去背圖真正的長寬比，供照片物理堆疊模式掉落這張圖時
+      // 使用（見 dvdEImageAspectCache 宣告處的完整說明）。decode() 失敗時
+      // naturalWidth/naturalHeight 會是 0，不寫入，呼叫端自然退回正方形。
+      if(im.naturalWidth && im.naturalHeight){
+        dvdEImageAspectCache.set(src, im.naturalWidth / im.naturalHeight);
+      }
       // 遮罩建立本身已經包了一層 requestIdleCallback（見 requestAlphaMask()
       // 內部），這裡呼叫只是「登記」，不會在這一刻同步跑重運算。
       requestAlphaMask(src, im);
@@ -9292,23 +9306,24 @@
     const cache = new Map();
     if(!batch) return { promise: Promise.resolve(), cache };
     const tasks = [];
-    batch.forEach((photo) => {
-      if(!photo) return;
-      [photo.gridUrl, photo.thumbUrl].forEach((url) => {
-        if(!url || cache.has(url)) return;
-        const im = new Image();
-        im.src = url;
-        const store = () => cache.set(url, im);
-        if(im.decode){
-          tasks.push(im.decode().then(store, () => {})); // 失敗不快取，見上方說明
-        } else {
-          tasks.push(new Promise((resolve) => {
-            if(im.complete && im.naturalWidth > 0){ store(); resolve(); return; }
-            im.onload = () => { store(); resolve(); };
-            im.onerror = () => resolve(); // 失敗不快取，見上方說明
-          }));
-        }
-      });
+    // 現在每一項是 dvdEImages 的 {src, scale} 物件，只有一種畫質（本來就是
+    // 本地已裁切好的 data:/blob: URL，不像原本相片還分 gridUrl/thumbUrl
+    // 兩種尺寸），只需要暖這一個 src。
+    batch.forEach((entry) => {
+      if(!entry || !entry.src || cache.has(entry.src)) return;
+      const url = entry.src;
+      const im = new Image();
+      im.src = url;
+      const store = () => cache.set(url, im);
+      if(im.decode){
+        tasks.push(im.decode().then(store, () => {})); // 失敗不快取，見上方說明
+      } else {
+        tasks.push(new Promise((resolve) => {
+          if(im.complete && im.naturalWidth > 0){ store(); resolve(); return; }
+          im.onload = () => { store(); resolve(); };
+          im.onerror = () => resolve(); // 失敗不快取，見上方說明
+        }));
+      }
     });
     return { promise: Promise.all(tasks), cache };
   }
@@ -9321,7 +9336,10 @@
   // 洗出不同的隨機結果，跟已經暖好的那批對不起來）。
   function pickInitialFallBatch(){
     const fallCount = photoFallCount();
-    const pool = photos.length ? shuffled(photos) : [];
+    // 改成從「漂浮物件圖片庫」（dvdEImages，飄動的 e 撞牆換圖用的同一批
+    // 去背圖）取材，不再從首頁縮圖（photos）取材——掉落堆疊現在顯示的是
+    // 去背後的漂浮物件，而不是相片本身。
+    const pool = dvdEImages.length ? shuffled(dvdEImages) : [];
     const batch = [];
     for(let i = 0; i < fallCount; i++){
       batch.push(pool.length ? pool[i % pool.length] : null);
@@ -9337,10 +9355,12 @@
   // 組合整體不同（除非照片總數少到 count 都湊不滿，那種極端情況下退回
   // 盡力而為，不會整個壞掉或卡住）。
   function pickReshuffleBatch(count){
-    if(!photos.length) return [];
-    const fresh = shuffled(photos.filter(p => !pfLastBatchUrls.has(p.url)));
+    if(!dvdEImages.length) return [];
+    // 同上，改成從 dvdEImages 取材；排除規則沿用原本邏輯，只是比對的欄位
+    // 從 photo.url 換成 dvdEImages 每一項的 src。
+    const fresh = shuffled(dvdEImages.filter(p => p && !pfLastBatchUrls.has(p.src)));
     if(fresh.length >= count) return fresh.slice(0, count);
-    const filler = shuffled(photos);
+    const filler = shuffled(dvdEImages);
     const result = fresh.slice();
     for(let i = 0; result.length < count && i < filler.length; i++){
       result.push(filler[i]);
@@ -9719,7 +9739,7 @@
     // 每次進場的組合都不一樣。換批時（photoBatch 有帶值）則直接使用
     // pickReshuffleBatch() 已經排除過目前這批、選好的結果，不再重新洗牌
     // 全部照片。
-    const pool = photoBatch || (photos.length ? shuffled(photos) : []);
+    const pool = photoBatch || (dvdEImages.length ? shuffled(dvdEImages) : []);
     const fallCount = photoFallCount();
 
     // 從這一輪會掉落的 fallCount 張裡面，隨機挑出 3~5 個「位置」（index）
@@ -9772,13 +9792,23 @@
     };
 
     for(let i = 0; i < fallCount; i++){
+      // 現在掉落的是「漂浮物件圖片庫」（dvdEImages）裡的去背圖，不是
+      // 首頁相片——pool 裡每一項是 {src, scale} 物件。
       const photo = pool.length ? pool[i % pool.length] : null;
-      if(photo && photo.url) usedUrls.add(photo.url);
-      const rawAspect = (photo && photo.aspect) ? photo.aspect : 1; // 沒有量到寬高比（見上面 fetchDriveImages 的說明）就退回正方形
+      if(photo && photo.src) usedUrls.add(photo.src);
+      // 寬高比改查 dvdEImageAspectCache（見該 Map 宣告處的完整說明），
+      // 這批圖多半已經在背景暖機階段被量過；查不到就退回正方形，行為
+      // 跟原本 photo.aspect 缺值時的退回邏輯一致。
+      const rawAspect = (photo && dvdEImageAspectCache.get(photo.src)) || 1;
       const aspect = Math.min(PHOTO_FALL_ASPECT_MAX, Math.max(PHOTO_FALL_ASPECT_MIN, rawAspect));
       const tileArea = bigIndexSet.has(i) ? (PHOTO_FALL_TILE_AREA * PHOTO_FALL_BIG_AREA_MULTIPLIER) : PHOTO_FALL_TILE_AREA;
       // area = w*h，aspect = w/h → h = sqrt(area/aspect)，w = h*aspect
-      const itemH = Math.round(Math.sqrt(tileArea / aspect));
+      // 再乘上這張圖自己的 scale（跟飄動的 e 撞牆換圖用的是同一個縮放
+      // 倍率，見 computeDvdAreaScales() 的完整說明）：圖片庫裡每張去背圖
+      // 實際「有色面積」大小不一，用這個倍率校正過，掉落畫面裡的漂浮
+      // 物件才會維持跟撞牆飄動時一致的相對大小感，不會忽大忽小。
+      const areaScale = (photo && typeof photo.scale === 'number') ? photo.scale : 1;
+      const itemH = Math.round(Math.sqrt(tileArea / aspect) * areaScale);
       const itemW = Math.round(itemH * aspect);
 
       const el = document.createElement('div');
@@ -9811,13 +9841,10 @@
       el.style.transform = `translate(${startX - itemW / 2}px, ${startY - itemH / 2}px)`;
 
       if(photo){
-        // 一般大小的照片沿用原本的 gridUrl（340px）就夠清楚；放大版
-        // （bigIndexSet 裡的位置）邊長多了約 1.55 倍，繼續套用同一張
-        // 400px 來源、被拉伸顯示的話會比其他張明顯偏糊，反而讓「放大」
-        // 看起來像「畫質變差」。這裡放大版改用 thumbUrl（700px），
-        // 尺寸依然遠小於原始檔案、下載跟解碼負擔很小，但足以撐住多出來
-        // 的顯示面積，維持銳利。
-        const srcUrl = (bigIndexSet.has(i) ? (photo.thumbUrl || photo.gridUrl) : photo.gridUrl) || photo.thumbUrl || photo.url;
+        // dvdEImages 裡每一項只有單一畫質的 src（本地已裁切好的
+        // data:/blob: URL），不像原本相片還分 gridUrl/thumbUrl 兩種尺寸，
+        // 放大版跟一般版都直接沿用同一個 src。
+        const srcUrl = photo.src;
         const warmedImg = warmCache && warmCache.get(srcUrl);
         let img;
         if(warmedImg){
@@ -9863,7 +9890,7 @@
             if(img.decode){ img.decode().then(retryMarkLoaded).catch(retryMarkLoaded); }
             else { img.onload = retryMarkLoaded; }
           };
-          img.alt = photo.title || '';
+          img.alt = '';
           img.draggable = false;
           el.appendChild(img);
           photoFallStage.appendChild(el);
@@ -9881,7 +9908,7 @@
           // 看到的就是這張照片「一準備好，立刻從畫面外開始掉落」，跟其他
           // 提早暖好的照片視覺語言一致，只是掉落的時間點稍微晚一點點。
           img = document.createElement('img');
-          img.alt = photo.title || '';
+          img.alt = '';
           img.draggable = false;
           el.appendChild(img);
           el.classList.add('pf-pending');
@@ -9961,20 +9988,31 @@
     pfLastBatchUrls = usedUrls;
   }
 
-  // ---------- 單擊堆疊照片：跟首頁格子點縮圖一樣開啟照片詳細頁 ----------
+  // ---------- 單擊／雙擊堆疊裡的漂浮物件：跟飄動的 e 一樣的互動 ----------
+  // 堆疊裡掉落的每一個物件，現在都是「漂浮物件圖片庫」（dvdEImages）的
+  // 去背圖，不再是可以點進去看細節的相片，所以不再用「點一下開啟照片
+  // 詳細頁」這套行為；改成套用跟飄動的 e 完全一樣的互動語意：單擊（點在
+  // 任何一個掉落物件上）換一批新的漂浮物件，雙擊直接收起整組堆疊、回到
+  // 首頁。
   // 堆疊照片同時支援兩種互動：Matter.Mouse（見 startPhotoFallEngine() 內
   // 綁在 photoFallStage 上的原生滑鼠事件）負責物理拖曳／甩動；這裡另外
   // 加一組獨立的 Pointer Events 偵測「單純點一下、沒有拖曳位移」的情況，
   // 判斷方式（pointerdown 記起點、pointerup 比對位移量 PF_PHOTO_TAP_MAX_MOVE）
-  // 完全比照上面飄動的 e 那組 dvdTapCandidatePointerId 邏輯。兩組系統各自
+  // 完全比照上面飄動的 e 那組 dvdTapCandidatePointerId 邏輯；單擊／雙擊
+  // 的判斷（等一段時間內有沒有等到第二下）也完全比照 dvdLastRealClickTime／
+  // dvdSingleClickTimer 那套寫法，只是這裡是「點在任何一個掉落物件上」都算
+  // 一次有效點擊，不限定同一個物件。兩組系統（這裡跟飄動的 e 那組）各自
   // 獨立運作、互不干擾：這裡完全不呼叫 preventDefault()，Matter 原生的
   // mousedown/mousemove/mouseup 拖曳照樣正常運作。
   const PF_PHOTO_TAP_MAX_MOVE = 10;
+  const PF_PHOTO_DOUBLE_CLICK_MS = 320;
   let pfPhotoTapCandidateEl = null;
   let pfPhotoTapCandidatePointerId = null;
   let pfPhotoTapStartX = 0, pfPhotoTapStartY = 0;
+  let pfPhotoLastRealClickTime = 0;
+  let pfPhotoSingleClickTimer = null;
   photoFallStage.addEventListener('pointerdown', (e) => {
-    if(photoFallState !== 'active') return; // entering/exiting/reshuffling 這些過渡狀態不處理，避免點到即將被清掉的舊照片
+    if(photoFallState !== 'active') return; // entering/exiting/reshuffling 這些過渡狀態不處理，避免點到即將被清掉的舊物件
     const itemEl = e.target && e.target.closest ? e.target.closest('.photo-fall-item') : null;
     if(!itemEl || !itemEl._pf) return;
     pfPhotoTapCandidateEl = itemEl;
@@ -9987,17 +10025,44 @@
     const itemEl = pfPhotoTapCandidateEl;
     pfPhotoTapCandidatePointerId = null;
     pfPhotoTapCandidateEl = null;
-    if(!itemEl || !itemEl.isConnected) return; // 這次手勢途中，照片可能剛好被換批清掉了
+    if(!itemEl || !itemEl.isConnected) return; // 這次手勢途中，物件可能剛好被換批清掉了
     const dx = e.clientX - pfPhotoTapStartX, dy = e.clientY - pfPhotoTapStartY;
     if(Math.hypot(dx, dy) > PF_PHOTO_TAP_MAX_MOVE) return; // 明顯位移＝拖曳，不算點擊
-    if(photoFallState !== 'active') return;
     if(document.body.classList.contains('detail-active') || document.body.classList.contains('preview-active')) return;
-    openDetailFromPhotoFallItem(itemEl);
+    const nowClick = Date.now();
+    if(nowClick - pfPhotoLastRealClickTime <= PF_PHOTO_DOUBLE_CLICK_MS){
+      // 判定成雙擊：取消還在等第二下的單擊候選計時器，直接收起整組堆疊
+      // ——跟 handleDvdDoubleClick() 的邏輯完全一致，含「換批動畫進行中
+      // 又被雙擊打斷」的處理（interruptReshuffleForExit()）。
+      pfPhotoLastRealClickTime = 0;
+      clearTimeout(pfPhotoSingleClickTimer);
+      if(photoFallState === 'active'){
+        exitPhotoFallMode();
+      } else if(photoFallState === 'reshuffling'){
+        interruptReshuffleForExit();
+      }
+    } else {
+      pfPhotoLastRealClickTime = nowClick;
+      // 先當作雙擊候選的第一下，等 PF_PHOTO_DOUBLE_CLICK_MS 內真的沒等到
+      // 第二下、確定不是雙擊，才算數成一次單擊、換一批新的漂浮物件。
+      clearTimeout(pfPhotoSingleClickTimer);
+      pfPhotoSingleClickTimer = setTimeout(() => {
+        pfPhotoLastRealClickTime = 0;
+        if(photoFallState === 'active') reshufflePhotoFallBatch();
+      }, PF_PHOTO_DOUBLE_CLICK_MS);
+    }
   });
   window.addEventListener('pointercancel', (e) => {
     if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; pfPhotoTapCandidateEl = null; }
   });
 
+  // ---------- 目前沒有任何地方呼叫這個函式 ----------
+  // 掉落的堆疊物件改成漂浮物件圖片庫（去背圖）之後，點一下的行為已經
+  // 改成換批、雙擊改成收起堆疊（見上面新的 pointerup 監聽器），不再開啟
+  // 照片詳細頁——這個物件本來就不是 photos 陣列裡的相片，也就沒有詳細頁
+  // 可以開。保留這個函式只是為了完整記錄原本「點下堆疊裡的某一張照片」
+  // 這套轉場邏輯，之後如果想恢復或另作他用可以參考，目前完全是死碼、
+  // 不影響任何行為。
   // 點下堆疊裡的某一張照片：跟首頁格子點縮圖一樣的「分身飛到大圖欄位」
   // 轉場（見 openDetail()／runGridToDetailTransition()），差別有三點：
   //   1) 起點矩形直接用物理世界目前的座標反推（見下面的完整說明），不是
