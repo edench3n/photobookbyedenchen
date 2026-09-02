@@ -9701,7 +9701,7 @@
   function spawnFallingPhotos(photoBatch, warmCache){
     if(!pfEngine) return; // 保險：使用者可能在照片還沒掉進來之前就已經雙擊提早收掉整個模式
     const Matter = window.Matter;
-    const { Bodies, Composite, Body } = Matter;
+    const { Bodies, Composite, Body, Vertices } = Matter;
     pfSpawnGeneration += 1;
     const mySpawnGeneration = pfSpawnGeneration; // 見上面 pfSpawnGeneration 宣告處的完整說明
 
@@ -9790,19 +9790,63 @@
     // 處的完整說明）：確保這張照片真正掉落的那一刻，還是屬於「現在這一
     // 批」、物理世界也還存在——避免使用者在圖片載入完成之前就已經換批
     // 或雙擊收掉整個堆疊模式，導致遲到的 body 被誤加進早就作廢的世界裡。
+    // ---------- 真正修好「堆疊照片永遠碰不到彼此真實邊緣」的根本成因 ----------
+    // 過去這裡的碰撞體（physics body）一律是 Bodies.rectangle(itemW, itemH)——
+    // 一個貼齊「整張去背圖裁切後外框」的長方形。問題是這些素材本身是去背異形
+    // 照片（章魚的觸手、彎曲的老薑、螺旋狀的金屬條…），實際上色的形狀往往比
+    // 它的外框矩形小上一大截、甚至中間還鏤空。物理引擎撞牆判斷比對的是「矩形
+    // 邊緣」，兩張照片矩形邊緣真的貼在一起時，兩張照片「看得見的部分」之間
+    // 還隔著各自矩形內、實際圖案外面那圈透明留白——這正是「不管怎麼調
+    // restitution／friction／chamfer 那些碰撞手感參數，肉眼看永遠隔著一段
+    // 空隙，怎麼修都無效」的根本原因：問題從來不在碰撞的「手感」，而在碰撞體
+    // 的「形狀」本身就沒有貼合圖案真正的輪廓。
+    // 修法：這批圖片（dvdEImages）在飄動撞牆模式（見 pixelShapesOverlap()／
+    // requestAlphaMask() 一帶）早就已經為了「像素級撞牆判斷」建立過 alpha
+    // 遮罩，其中 finishMask() 額外算出了 boundary——這張圖去背後真正輪廓的
+    // 邊界點（0~1 常態化座標，見該函式的完整說明）。這裡直接沿用同一份
+    // boundary，換算成這張掉落照片實際的 itemW/itemH 尺寸、以矩形中心為原點
+    // 的座標，再用 Matter 內建的 Vertices.hull() 算出這些邊界點的「凸包」
+    // （convex hull：包住所有邊界點的最小凸多邊形）。凸包雖然不是每個凹陷
+    // 都完全貼合（例如章魚捲起來的觸手中間那圈鏤空，凸包會直接連過去、不會
+    // 挖空），但已經比「整張外框矩形」精準太多、緊貼圖案外緣，也不需要額外
+    // 載入 poly-decomp（頁面目前沒有載入這個凹多邊形分解函式庫，Matter.js
+    // 沒有它就無法正確處理「凹」多邊形，但凸包本身保證一定是凸的，
+    // Bodies.fromVertices() 不需要靠 poly-decomp 分解也能正確建立）。
+    // 遮罩還沒建立好（例如剛好在使用者第一次雙擊那一刻還沒暖機完成）時，
+    // getCachedAlphaMask() 會回傳 undefined——這裡跟其他呼叫端一致，優雅
+    // 退回原本的矩形 body，不會讓功能壞掉或報錯。
+    const PF_HULL_MIN_BOUNDARY_POINTS = 6; // boundary 是攤平的 [x0,y0,x1,y1,...]，至少要 3 個點（6 個數字）才夠算出一個有意義的多邊形，點數太少就直接退回矩形
+    function buildFallItemHullVertices(maskEntry, itemW, itemH){
+      if(!maskEntry || !maskEntry.boundary || maskEntry.boundary.length < PF_HULL_MIN_BOUNDARY_POINTS) return null;
+      const b = maskEntry.boundary;
+      const pts = [];
+      for(let i = 0; i < b.length; i += 2){
+        pts.push({ x: b[i] * itemW - itemW / 2, y: b[i + 1] * itemH - itemH / 2 });
+      }
+      const hull = Vertices.hull(pts);
+      return (hull && hull.length >= 3) ? hull : null;
+    }
+
     const dropItem = (el, itemW, itemH, startX, startY, photo) => {
       if(!pfEngine || pfSpawnGeneration !== mySpawnGeneration){
         if(el.parentNode) el.parentNode.removeChild(el); // 這一批（或整個堆疊模式）已經作廢，別再讓這張照片憑空冒出來
         return;
       }
-      const body = Bodies.rectangle(startX, startY, itemW, itemH, {
+      // restitution/friction/frictionAir/density 這幾個「碰撞手感」參數維持
+      // 完全不變——這次要修的是形狀本身，不是手感，兩者是各自獨立的問題。
+      const bodyOptions = {
         restitution: 0.3, // 0.8 太接近全彈跳，多顆疊在一起的照片互相碰撞時會一直小幅度來回彈、看起來在抖動；調低到 0.3，還有一點回彈感，但不會抖個不停
         friction: 0.55,
         frictionAir: 0.012,
         density: 0.0022,
-        chamfer: { radius: 3 },
         angle: (Math.random() - 0.5) * 0.6,
-      });
+      };
+      const maskEntry = photo && photo.src ? getCachedAlphaMask(photo.src) : null;
+      const hullVerts = buildFallItemHullVertices(maskEntry, itemW, itemH);
+      const body = hullVerts
+        ? Bodies.fromVertices(startX, startY, [hullVerts], bodyOptions, true)
+        // 遮罩還沒就緒的退回路徑：維持原本矩形 + 圓角的舊行為，不受這次修改影響。
+        : Bodies.rectangle(startX, startY, itemW, itemH, { ...bodyOptions, chamfer: { radius: 3 } });
       Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.14);
       Composite.add(pfEngine.world, body);
       // 直接把這張照片對應的 body／尺寸／原始 photo 物件存在 DOM 元素自己
