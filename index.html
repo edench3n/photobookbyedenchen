@@ -6963,6 +6963,15 @@
     const angle = options.angle;
     const partOptions = {};
     for(const key in options){ if(key !== 'angle') partOptions[key] = options[key]; }
+    // Matter.js 每個 body 預設允許 0.05（世界座標，這裡跟畫面像素 1:1）的
+    // 「容許重疊量」(slop)：只要重疊沒超過這個值，引擎會直接視為已解決、
+    // 不再花力氣繼續修正，這是為了避免解算在浮點誤差邊緣無限微調、抖動
+    // 不收斂的正常機制，但代價是永遠會留一絲絲允許的重疊。這裡用不到那
+    // 麼多容忍空間（不需要顧慮浮點雜訊造成的抖動，複合物體本來就是離散
+    // 小矩形拼出來的），調低到 0.01，讓引擎盡量把重疊收斂到肉眼看不出來
+    // 的程度，而不是提早在還有明顯重疊時就放棄。若呼叫端自己有指定 slop
+    // 則尊重呼叫端的設定，不覆寫。
+    if(partOptions.slop === undefined) partOptions.slop = 0.01;
     const rects = buildFallItemPhysicsRects(maskEntry, w, h);
     if(rects){
       const parts = rects.map(r => Bodies.rectangle(x + r.cx, y + r.cy, r.w, r.h, partOptions));
@@ -6995,7 +7004,7 @@
       if(typeof angle === 'number') Body.setAngle(body, angle);
       return body;
     }
-    const body = Bodies.rectangle(x, y, w, h, Object.assign({}, options, { chamfer: { radius: 3 } }));
+    const body = Bodies.rectangle(x, y, w, h, Object.assign({}, options, { slop: 0.01, chamfer: { radius: 3 } }));
     // 退回單一矩形 body 時，body.position 本來就等於外框正中心，偏移量是
     // 零向量——跟上面複合物體共用同一套 pfBoxCenter() 讀取邏輯，不用另外
     // 特判「這顆是不是複合物體」。
@@ -9744,10 +9753,39 @@
     // 撞到才會自動醒過來（Matter.js 內建行為，MouseConstraint 抓取、
     // 新物體碰撞都會自動喚醒），使用者手感完全不受影響，堆疊「定住」之後
     // 的持續效能負擔幾乎歸零。
+    // ---------- 修正：拖曳照片去撞其他照片時，會先「滑」進去再慢慢彈開 ----------
+    // 使用者反應：手動抓著一張照片去頂另一張，兩張圖會先明顯疊在一起（像
+    // 沒有真的撞到、直接滑進去），過一會兒才慢慢被推開分離，而不是一碰到
+    // 邊界就立刻擋住。這跟上面 pfBoxCenter() 修的「畫面位置對不齊」是兩個
+    // 不同的成因：這裡碰撞體的位置本身其實是對的，問題出在 Matter.js
+    // 「解算」這個重疊要花幾步才能修正完。
+    // 上面這兩個迭代次數原本為了手機效能刻意調低（見這段程式碼原本的說明：
+    // positionIterations 從內建預設 6 調成 3~5、velocityIterations 從內建
+    // 預設 4 調成 2~3）——調低沒錯，代價是每一步物理世界只能把「兩個物體
+    // 疊在一起」這件事修正一部分，沒辦法一步到位完全推開，要靠好幾個影格
+    // 慢慢疊加修正量，才會慢慢分離乾淨；平常照片只是自由落下、疊起來，這個
+    // 「要花幾影格才收斂」肉眼幾乎感覺不到。但使用者主動用滑鼠／手指去拖
+    // 一張照片，等於持續用外力硬把它往別張照片裡塞（拖曳的彈簧一直在補力），
+    // 跟位置修正互相拉扯，修正速度跟不上外力灌入的速度，才會看起來像「滑
+    // 進去、才慢慢彈開」。
+    // 另外一個放大這個問題的因素：上面 PF_BODY_GRID_MAX 為了讓碰撞邊界更
+    // 貼合真實輪廓，已經把每張圖拆成更多小矩形（複合物體 part 數變多）——
+    // 同時間要解算的碰撞接觸點也跟著變多，同樣的迭代次數，收斂速度自然
+    // 比以前更慢，兩個問題疊加在一起，才會覺得這次拖曳手感特別滑。
+    // 修法：把這兩個迭代次數調回比 Matter.js 內建預設更高（不是只調回
+    // 預設值，因為現在的碰撞接觸點數量已經比預設場景多很多，要用更高的
+    // 迭代次數才能在拖曳這種持續外力的狀況下，重疊還是能在一兩影格內就
+    // 收斂完畢，感覺起來才會像「撞到硬牆立刻擋住」而不是「慢慢被推開」）；
+    // 手機維持比桌機低一階，仍是效能與精準度之間的折衷，但整體都比原本
+    // 的數字高上不少。額外加開 constraintIterations（Matter 內建預設是
+    // 2）：這個數字管的是拖曳用的 MouseConstraint 這條「彈簧」本身解算得
+    // 多準，調高可以讓抓著的照片更緊跟著滑鼠／手指本身的位置，減少因為
+    // 彈簧本身沒解準、疊加出額外一層晃動或穿透感。
     const pfMobile = isDetailMobile();
     pfEngine = Engine.create({
-      positionIterations: pfMobile ? 3 : 5,
-      velocityIterations: pfMobile ? 2 : 3,
+      positionIterations: pfMobile ? 8 : 14,
+      velocityIterations: pfMobile ? 5 : 8,
+      constraintIterations: pfMobile ? 3 : 4,
       enableSleeping: true,
     });
     pfEngine.gravity.y = PHOTO_FALL_GRAVITY;
@@ -9777,6 +9815,17 @@
     measureDvdSize();
     const dvdMaskEntry = dvdActiveImgSrc ? getCachedAlphaMask(dvdActiveImgSrc) : null;
     const dvdBody = buildFallItemBody(Matter, dvdMaskEntry, dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, {
+      // 修正「雙擊那一刻，飄動的 e 會先瞬間轉正成 0 度、才開始掉落」：
+      // buildFallItemBody() 原本沒收到 angle 時，內部 Body.setAngle 完全
+      // 不會被呼叫，新建的物理 body 就會停在 Matter.js 的預設角度（0）。
+      // 但 e 雙擊當下畫面上顯示的角度其實是 dvdRotationDeg（飄動狀態下
+      // 撞牆累積的小幅度旋轉，見 dvdRotationDeg／dvdTransformString()），
+      // 兩者對不上，物理世界一接手，畫面就會看到 e 從目前角度「跳」回
+      // 0 度、才開始受重力下墜，變成很突兀的一下瞬間轉正。
+      // 這裡把 dvdRotationDeg（度）換算成弧度傳進去，body 建立時就直接
+      // 帶著雙擊當下那一刻的角度，畫面上感覺就是「維持原本傾斜的樣子，
+      // 直接自然地往下掉」，跟其他掉落照片一樣沒有瞬間跳動。
+      angle: dvdRotationDeg * Math.PI / 180,
       restitution: 0.3, // 0.8 太接近全彈跳，多顆疊在一起的照片互相碰撞時會一直小幅度來回彈、看起來在抖動；調低到 0.3，還有一點回彈感，但不會抖個不停
       friction: 0.55,
       frictionAir: 0.012,
@@ -9799,10 +9848,22 @@
     // 對應，不需要額外轉換滑鼠座標。之後不管拖的是 e 還是照片，都是同一個
     // MouseConstraint，彼此之間的碰撞完全由 Matter 內建的物理引擎處理，
     // 不需要另外寫任何 e／照片專屬的判斷。
+    // stiffness/damping 原本是 0.18/0.15：這條「彈簧」把抓著的照片拉向
+    // 滑鼠／手指目前的位置，數字越低彈簧越軟，代表照片跟指標之間允許的
+    // 「落差」越大——使用者主動把照片往另一張裡面推的時候，這段落差正好
+    // 讓照片可以先明顯陷進鄰居裡面一段距離，彈簧才慢慢把它拉回來，跟上面
+    // 調高的迭代次數放在一起看，就是「先滑進去、才慢慢彈開」的另一半成因
+    // （迭代次數不夠決定了「解重疊解得慢」，彈簧太軟則決定了「一開始允許
+    // 陷進去的量本來就比較大」）。調高到 0.5，讓抓著的照片更緊跟著指標
+    // 目前的位置，指標一旦被鄰居擋住，照片也會幾乎同時被擋住，而不是先
+    // 讓出一段緩衝空間才慢慢跟上；同時把 damping 一起調高到 0.25，避免
+    // 彈簧變硬之後，鬆手瞬間或撞到障礙物彈開時的殘餘速度沒被吸收乾淨，
+    // 看起來抖動或过衝。這兩個值都還遠低於 1（完全剛性、容易連鎖不穩定），
+    // 是「手感夠扎實」跟「不會抖動」之間留了餘裕的折衷。
     pfMouse = Mouse.create(photoFallStage);
     pfMouseConstraint = MouseConstraint.create(pfEngine, {
       mouse: pfMouse,
-      constraint: { stiffness: 0.18, damping: 0.15, render: { visible: false } },
+      constraint: { stiffness: 0.5, damping: 0.25, render: { visible: false } },
     });
     Composite.add(pfEngine.world, pfMouseConstraint);
     Events.on(pfMouseConstraint, 'startdrag', () => { photoFallStage.classList.add('grabbing'); pfDragging = true; });
@@ -10788,6 +10849,10 @@
         measureDvdSize();
         const dvdMaskEntry = dvdActiveImgSrc ? getCachedAlphaMask(dvdActiveImgSrc) : null;
         const dvdBody = buildFallItemBody(Matter, dvdMaskEntry, dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, {
+          // 同 startPhotoFallEngine() 內的修正：帶入目前飄動角度
+          // （dvdRotationDeg），避免重新掉回堆疊那一刻先瞬間轉正成 0 度、
+          // 才開始下墜，改成維持原本傾斜的樣子自然往下掉。
+          angle: dvdRotationDeg * Math.PI / 180,
           restitution: 0.3, // 0.8 太接近全彈跳，多顆疊在一起的照片互相碰撞時會一直小幅度來回彈、看起來在抖動；調低到 0.3，還有一點回彈感，但不會抖個不停
           friction: 0.55,
           frictionAir: 0.012,
