@@ -2702,9 +2702,23 @@
       // 2x Retina（656 × 2 ≈ 1312px）仍然夠用，只有在最大顯示尺寸疊上
       // 3x 螢幕這種較少見的組合時，才會比原本 1400px 略為軟一點，肉眼
       // 差異不算明顯，換來的是進站頭幾秒撞牆就能正常換圖。
+      //
+      // ---------- 桌機/平板再往下修一點點：1400px → 1000px ----------
+      // 上面手機版已經改用 1000px，這裡桌機/平板原本維持 1400px 沒動；
+      // 但桌機/平板這顆飄動物件顯示的最大高度其實只有 315px（見上面這段
+      // 開頭「桌機/平板目前最大可以到 315px」的說明），就算疊上少見的
+      // 3x Retina 螢幕，需要的像素也只有 315 × 3 ≈ 945px，1400px 遠遠
+      // 超出這個需求、多下載的部分肉眼完全用不到。改成跟手機版一致的
+      // 1000px：仍然比 945px 這個「3x Retina 情境下真正需要」的門檻多留
+      // 一截安全邊際，不會有肉眼可辨的模糊，卻能省下約三成（1000²/1400²
+      // ≈ 0.51，實際約省 49%）的下載量與裁切運算量；跟手機版共用同一個
+      // 尺寸參數，也讓兩邊的行為更一致、好維護。刻意不比照手機版再往下修
+      // （手機版 1000px 疊上最大 656px、3x Retina 已經算是取捨後的下限，
+      // 見上面該段完整說明），這裡的 1000px 純粹是桌機/平板這邊「原本明顯
+      // 超額」的部分被修掉，不是同一種取捨。
       const urls = data.files.map(file => {
         const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
-        const size = supportsTouch ? '=s1000' : '=s1400';
+        const size = '=s1000';
         return thumbBase ? (thumbBase + size) : `https://drive.google.com/uc?export=view&id=${file.id}`;
       });
 
@@ -6888,6 +6902,11 @@
     const scaleValue = (typeof areaScale === 'number' && areaScale > 0) ? areaScale : 1;
     // 真正把新圖套到「畫面上看得見」的這顆 <img> 上，並重新量測撞牆矩形。
     const apply = () => {
+      // 保險登記：這張圖既然能走到這裡（畫面外 Image() 已經 decode()／
+      // onload 完成），就代表它確定解碼好了，一併寫進 dvdEDecodedSrcSet，
+      // 涵蓋內建預設圖、備援路徑等原本不會經過 predecodeDvdEImage() 的
+      // 情況，避免 cycleDvdEImage() 誤判成「還沒準備好」。
+      dvdEDecodedSrcSet.add(src);
       dvdBounceImgEl.src = src;
       dvdBounceImgEl.style.setProperty('--dvd-area-scale', scaleValue);
       // 同步記錄「目前顯示的是哪一張圖」，供 computeDvdPixelInsets() 查詢
@@ -6953,6 +6972,28 @@
   // 下面 pickNextDvdEImageIndex() 的完整說明），不再是單純按順序 +1。
   let dvdEImages = [];
   let dvdEImageIndex = 0;
+  // ---------- 修正：「撞牆當下下一張還沒載入好，會在接下來的空中飄動
+  // 途中才『趕上』切換」----------
+  // 成因：setDvdBounceImageSrc() 內部一律用「畫面外 Image().decode() 完成
+  // 後才 apply」這套機制換圖（見該函式的完整說明，這是為了避免換圖那一刻
+  // 短暫消失，不是本次要動的部分）。但 cycleDvdEImage() 原本不管這張圖
+  // 有沒有真的預先解碼完成，撞牆當下一律直接呼叫 setDvdBounceImageSrc()
+  // 並且立刻更新 dvdEImageIndex／history／dvdEImageLastChangeAt 這些狀態、
+  // 當成「這次撞擊已經換好圖了」。如果這張圖剛好還沒被 predecodeDvdEImage()
+  // 處理完（網路慢、或裁切/解碼還在排隊），decode() 要等到之後才 resolve
+  // ——但飄動物件的物理迴圈完全不會因此暫停，撞牆後照樣繼續往反方向飄，
+  // 等 decode() 真的 resolve、新圖才套用上去時，畫面上的物件其實已經
+  // 離開牆面、飄在半空中了，使用者體感就是「撞擊當下沒反應，換圖動作卻
+  // 發生在接下來的飄動途中才趕上」。
+  // 修法：用這個 Set 記錄「這個 src 已經確定被瀏覽器解碼完成過」（寫入
+  // 時機見下面 predecodeDvdEImage() 的 afterDecode、以及
+  // setDvdBounceImageSrc() 的 apply()）。cycleDvdEImage() 撞牆當下先查
+  // 這個 Set：已經解碼完成過，才真的换圖、更新狀態；還沒解碼完成，代表
+  // 「這一次撞擊來不及了」，直接放棄這次換圖、完全不更新任何狀態（連
+  // dvdEImageLastChangeAt 也不動），畫面維持顯示原本那張圖，等下一次
+  // 真的撞牆時才重新檢查一次——不會有「已經飄離牆面才切換」的空中趕上
+  // 情形，只會「這次沒換成、下次撞擊再換」。
+  const dvdEDecodedSrcSet = new Set();
 
   // 背景把整個圖片庫都預先解碼好，撞牆換圖的當下才不用臨時等待——這裡的
   // 圖片這時已經是裁切完成的 data URL（本地資料），主要是讓瀏覽器先解碼
@@ -6980,26 +7021,62 @@
   // 撞到這張圖時，遮罩早就已經在背景準備好了，不會再需要臨時運算，
   // 「撞到新圖那一刻卡一下」的情況因此完全不會發生，而不是像原本那樣
   // 只是「撞過一輪之後才不會」。
+  // ---------- 修正：「手機板初次打開網頁，飄動物件撞擊後偶爾沒有馬上
+  // 切換，要到接下來的空中飄動途中才切換」----------
+  // 成因：已就緒池（dvdEImages）裡的每一格，原本要嘛是上面「快速預載」
+  // 那批已經先 decode() 過的 =s400 小圖，要嘛是背景 trimDvdEImagesStaggered()
+  // 剛裁切完成、直接用 `dvdEImages[idx] = { src: result.src, scale: 1 }`
+  // 寫進陣列的正式版本——後者這個 canvas.toBlob() 產生的新 blob URL，
+  // 從來沒有被任何 <img> 真的解碼過一次。原本唯一會幫整批圖片預先
+  // decode() 的 preloadDvdEImages()，要等 trimDvdEImagesStaggered() 整批
+  // 全部處理完成才會被呼叫（見下面 `.then(trimmedEntries => {...})` 收尾
+  // 那段），圖片庫張數多、或手機處理器較慢時，這段「整批跑完」可能要
+  // 好幾秒——這段期間內，只要撞牆當下 pickNextDvdEImageIndex() 剛好選到
+  // 「已經寫進池子、但還沒被 preloadDvdEImages() 排到」的這種格子，
+  // cycleDvdEImage() 呼叫的 setDvdBounceImageSrc() 內部第一次對這個
+  // blob URL 呼叫 decode()，就會是這張圖「這輩子第一次」真正解碼——
+  // decode() 是非同步的，即使通常很快，也需要跨過至少一個事件迴圈的
+  // 等待，而飄動物件的 requestAnimationFrame 物理迴圈完全沒有因此暫停，
+  // 撞牆之後照樣繼續往反方向飄。等 decode() 真的 resolve、新圖被換上去
+  // 的那一刻，畫面上的飄動物件其實已經離開牆面、正飄在半空中——使用者
+  // 體感到的就是「撞擊當下沒反應，換圖動作卻發生在接下來的飄動途中」，
+  // 而不是撞牆那一瞬間乾淨俐落地切換。
+  // 修法：把「單張圖片預先 decode()＋建立像素遮罩」拆成獨立的
+  // predecodeDvdEImage()，一張圖片「剛被寫進已就緒池的那一刻」就立刻
+  // 呼叫（見下面 trimDvdEImagesStaggered() 的 onItemReady callback 內），
+  // 不用再等整批背景裁切全部跑完才輪到。等使用者真的撞牆選到這一格時，
+  // 瀏覽器對同一個 blob URL 的解碼結果早就快取好了，setDvdBounceImageSrc()
+  // 內部的 decode() 幾乎必定立即 resolve，換圖動作因此能準確對齊撞牆的
+  // 那一影格，不會再延到下一段飄動才顯現。
+  // preloadDvdEImages()（整批完成後的收尾）維持不變、繼續呼叫：多數格子
+  // 這時早已經被 predecodeDvdEImage() 處理過，重複呼叫 decode() 只是
+  // 立即命中快取、幾乎零成本，純粹當作保底（例如萬一某一格 predecodeDvdEImage()
+  // 失敗過），不會造成任何額外負擔或重複的視覺效果。
+  function predecodeDvdEImage(src){
+    const im = new Image();
+    im.src = src;
+    const afterDecode = () => {
+      // 標記這個 src 已經確定解碼完成過——cycleDvdEImage() 撞牆當下靠這個
+      // 標記判斷「這張圖來不來得及在這次撞擊換上」，完整成因見上面
+      // dvdEDecodedSrcSet 宣告處的說明。就算 decode() 是走 onerror 那條路
+      // （圖片本身壞掉），也一併標記過，避免同一張壞圖每次撞到都被當成
+      // 「還沒準備好」卡住不放行、永遠選不到別張。
+      dvdEDecodedSrcSet.add(src);
+      // 遮罩建立本身已經包了一層 requestIdleCallback（見 requestAlphaMask()
+      // 內部），這裡呼叫只是「登記」，不會在這一刻同步跑重運算。
+      requestAlphaMask(src, im);
+    };
+    if(im.decode){ im.decode().then(afterDecode, afterDecode); }
+    else { im.onload = afterDecode; im.onerror = () => {}; }
+  }
   function preloadDvdEImages(){
     let i = 0;
     function step(){
       if(i >= dvdEImages.length) return;
       const entry = dvdEImages[i++];
       if(!entry){ step(); return; } // 防呆：理論上呼叫這裡時整批應該都已經填滿密實，保留以防萬一有空洞
-      const im = new Image();
-      im.src = entry.src;
-      const scheduleNext = () => {
-        scheduleIdle(step, { timeout: 600, fallbackDelay: 60 });
-      };
-      const afterDecode = () => {
-        // 遮罩建立本身已經包了一層 requestIdleCallback（見 requestAlphaMask()
-        // 內部），這裡呼叫只是「登記」，不會在這一刻同步跑重運算，可以
-        // 放心緊接著排下一張的解碼。
-        requestAlphaMask(entry.src, im);
-        scheduleNext();
-      };
-      if(im.decode){ im.decode().then(afterDecode, afterDecode); }
-      else { afterDecode(); }
+      predecodeDvdEImage(entry.src);
+      scheduleIdle(step, { timeout: 600, fallbackDelay: 60 });
     }
     step();
   }
@@ -7393,6 +7470,20 @@
     if(readyIndices.length <= 1 && nextIndex === dvdEImageIndex) return;
     const nextEntry = dvdEImages[nextIndex];
     if(!nextEntry) return; // 防呆：理論上不會發生（nextIndex 一定來自 readyIndices），保留以防萬一
+    // ---------- 這次撞擊選到的這張圖還沒真的解碼完成 → 放棄這次換圖 ----------
+    // 完整成因見上面 dvdEDecodedSrcSet 宣告處的說明。這裡直接 return、
+    // 不更新 dvdEImageIndex／dvdEImageRecentHistory／dvdEImageLastChangeAt
+    // 任何一項狀態，等同這次撞擊完全沒發生過換圖判斷——畫面繼續顯示原本
+    // 那張圖，不會有「稍後在空中飄動途中才趕上切換」的情形；下一次真的
+    // 撞到牆時，cycleDvdEImage() 會重新整個判斷一次（屆時這張圖說不定已
+    // 經解碼完成，也可能重新選到別張），不會被這次放棄的紀錄卡住。
+    // 順手催一下這張圖的解碼／遮罩準備（多半早就在背景排隊中，這裡呼叫
+    // 只是保險，避免極端情況下完全沒人排過），讓它盡快就緒、下次撞擊
+    // 更有機會趕上。
+    if(!dvdEDecodedSrcSet.has(nextEntry.src)){
+      predecodeDvdEImage(nextEntry.src);
+      return;
+    }
     dvdEImageLastChangeAt = now;
     dvdEImageIndex = nextIndex;
     dvdEImageRecentHistory.push(dvdEImageIndex);
@@ -11500,6 +11591,12 @@
             // 保證 dvdEImages[idx] 永遠對應 orderedUrls[idx] 這一張，兩邊
             // 索引不會再錯位。
             dvdEImages[idx] = { src: result.src, scale: 1 };
+            // 立刻在背景把這張剛就緒的圖預先解碼＋建立像素遮罩，不用等
+            // 整批處理完才輪到 preloadDvdEImages()——見上面 predecodeDvdEImage()
+            // 旁「撞擊後沒有馬上切換，要到接下來的空中飄動途中才切換」的
+            // 完整成因說明。這裡只是「登記」一次非同步 decode()，不會佔用
+            // 主執行緒，也不影響這一步 onItemReady 原本的其他行為。
+            predecodeDvdEImage(result.src);
             if(!firstEntryApplied){
               firstEntryApplied = true;
               // ---------- 修正「剛進網頁時還是會卡頓式稍微放大」----------
