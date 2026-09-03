@@ -10730,8 +10730,17 @@
     // pickReshuffleBatch() 內部有隨機洗牌，若之後收尾時（見
     // finishReshuffleOldBatch()）重新呼叫一次，會洗出完全不同的另一批，
     // 跟這裡已經暖好的那批對不起來，暖機就白做了。
-    const nextBatch = pickReshuffleBatch(photoFallCount());
-    const nextWarm = warmFallBatch(nextBatch); // { promise, cache }——原因同 enterPhotoFallMode()，spawn 時機不等它，只借用 cache 裡已經暖好的 Image 元素
+    // ---------- 多留一個名額給「下一批」專屬的飄動物件 ----------
+    // 使用者反應：單擊換一批之後，原本從首頁進來的飄動物件（e）應該要
+    // 繼續留在畫面上，而且從這一批開始，飄動物件本身也該是這批新照片
+    // 裡真正的一張，不是一路沿用舊圖、跟這批新照片完全無關的另一個
+    // 獨立東西。這裡多要一張（+1），第 0 個名額固定保留給下面
+    // finishReshuffleOldBatch() 內的 promoteBatchPhotoToDvd()：那一張
+    // 不會被 spawnFallingPhotos() 當一般照片摔下去，而是直接接手成為
+    // 飄動物件顯示的圖案／碰撞形狀，其餘 photoFallCount() 張才是真正
+    // 掉落堆疊的一般照片，兩邊內容互斥、不會重複。
+    const nextBatch = pickReshuffleBatch(photoFallCount() + 1);
+    const nextWarm = warmFallBatch(nextBatch); // { promise, cache }——原因同 enterPhotoFallMode()，spawn 時機不等它，只借用 cache 裡已經暖好的 Image 元素（現在也包含保留給飄動物件用的那一張，一併預熱）
 
     // 修正：checkOldOut()（80ms 輪詢）跟下面 triggerReshuffleFallback()
     // （1700ms 保底逾時）是兩條各自獨立的計時器鏈，理論上都可能觀察到
@@ -10809,6 +10818,72 @@
   // 節奏——真正解決「空白方塊」的方法是把這個 cache 傳給
   // spawnFallingPhotos()，讓它對每一張照片先查有沒有已經暖好的版本可以
   // 直接用，而不是靠延後整批的出場時間去換。
+  // ---------- 換批時：讓新一批裡的其中一張圖片接手成為「飄動物件」本身 ----------
+  // 修正「單擊換一批 png 圖片之後，原本從首頁進來的飄動物件掉下去了」：
+  // 飄動的 e 這顆物理 body 其實全程都沒有離開過畫面（見上面 pfDvdFloor
+  // 的完整說明，換批期間它一直穩穩待在專屬地板上、不會跟著舊照片一起
+  // 掉出去），但它顯示的圖案原本從頭到尾都是同一張（雙擊進場那一刻，
+  // 首頁飄動物件當下正在顯示的那張），完全不會隨著每次換批更新——這裡
+  // 改成每次換批，都讓 reshufflePhotoFallBatch() 多留給飄動物件的那一張
+  // （見該處、以及 finishReshuffleOldBatch() 內 dvdPhoto 的完整說明）
+  // 接手，讓「每一批 png 都有一個飄動物件在裡面」，而不是飄動物件遊離在
+  // 這批新照片之外、感覺像是另一個不相干的東西。
+  //
+  // 作法：先讀出目前這顆 body 的中心點座標、旋轉角度（跟其他掉落照片
+  // 換批時一樣，全程停在原地，不會有瞬間跳位），把舊 body 從物理世界
+  // 移除、pfDvdItem 先設回 null（pfSyncHandler 已經有 null 檢查，這段
+  // 空窗期最多一格畫面，不會出錯），再呼叫 setDvdBounceImageSrc() 把
+  // 畫面上看得見的 <img> 換成新圖案——這個函式內部本來就會先在畫面外
+  // decode 完成才真正套用（見該函式旁「無縫直接切換」的完整說明），這裡
+  // 傳進來的 photo 早就被 warmFallBatch() 預熱過，幾乎必定立即 resolve。
+  // 圖片真正套用、measureDvdSize() 量出新的 dvdW/dvdH 之後，才用
+  // buildFallItemBody()（跟其他掉落照片、e 進場落下用的是同一套邏輯）
+  // 在剛剛記錄的同一個座標、同一個角度重建一顆貼合新圖案形狀的物理
+  // body，視覺上就是「原本那個飄動物件，身上的圖案換成了新一批裡的
+  // 某一張」，不是憑空多一個、也不會被新照片取代掉。
+  // 這裡完全不用另外處理「按 Preview 之後，飄動物件要在當下位置直接
+  // 變成 preview 頁飄動規則飄起來」這件事——dvdBounce／dvdActiveImgSrc
+  // 從頭到尾都是全站共用同一份（見 resumeDvdFloatAfterPhotoFallCover()
+  // 的完整說明，恢復飄動時本來就是直接沿用「凍結那一刻」的座標、跟
+  // 目前顯示中的圖案），這裡只是換了它現在顯示、碰撞用的是哪一張圖，
+  // 進到 preview 頁時自然就是「這張換上來的新圖，從它當下的位置」開始
+  // 飄動，不需要另外銜接。
+  function promoteBatchPhotoToDvd(photo){
+    if(!photo || !photo.src) return;
+    const Matter = window.Matter;
+    let centerX = null, centerY = null, angle = 0;
+    if(Matter && pfEngine && pfDvdItem){
+      const c = pfBoxCenter(pfDvdItem.body);
+      centerX = c.x; centerY = c.y; angle = pfDvdItem.body.angle;
+      Matter.Composite.remove(pfEngine.world, pfDvdItem.body);
+    }
+    pfDvdItem = null;
+    const mySpawnGeneration = pfSpawnGeneration; // 沿用跟 spawnFallingPhotos() 一樣的世代比對，避免下面 decode 完成時，其實已經是另一輪換批或整個堆疊模式都結束了
+    setDvdBounceImageSrc(photo.src, photo.scale).then(() => {
+      const M = window.Matter;
+      // 保險：decode 這段期間，使用者可能已經雙擊收掉整個堆疊模式
+      // （pfEngine 被清空），或是又緊接著點了下一次換批（世代不對）——
+      // 兩種情況都不該再把這顆遲到的 body 加進一個已經作廢的物理世界。
+      if(!M || !pfEngine || pfSpawnGeneration !== mySpawnGeneration) return;
+      measureDvdSize();
+      const cx = centerX !== null ? centerX : (dvdX + dvdW / 2);
+      const cy = centerY !== null ? centerY : (dvdY + dvdH / 2);
+      const dvdMaskEntry = getCachedAlphaMask(photo.src);
+      const dvdBody = buildFallItemBody(M, dvdMaskEntry, cx, cy, dvdW, dvdH, {
+        angle,
+        restitution: 0.3, // 跟其他掉落照片／e 進場落下用同一組手感參數，見 startPhotoFallEngine() 內同一段的完整說明
+        friction: 0.55,
+        frictionAir: 0.012,
+        density: 0.0026,
+        collisionFilter: { category: PF_CATEGORY_DVD }, // 見 startPhotoFallEngine() 內同一個屬性的完整說明
+      });
+      M.Composite.add(pfEngine.world, dvdBody);
+      pfDvdItem = { body: dvdBody, w: dvdW, h: dvdH };
+      dvdBounce.style.transition = 'none';
+      if(M.Sleeping) M.Sleeping.set(dvdBody, false); // 保險：確保新 body 從這一影格就正常受重力／碰撞影響，不會意外一開始就被引擎判定成睡眠
+    });
+  }
+
   function finishReshuffleOldBatch(oldItems, nextBatch, nextWarmCache){
     const Matter = window.Matter;
     if(Matter && pfEngine){
@@ -10843,7 +10918,24 @@
     pfItems = [];
 
     photoFallState = 'active';
-    spawnFallingPhotos(nextBatch, nextWarmCache);
+
+    // ---------- 這批（nextBatch）第 0 個名額保留給飄動物件本身 ----------
+    // 呼叫端 reshufflePhotoFallBatch() 已經多要了一張（見該處呼叫
+    // pickReshuffleBatch() 旁的完整說明），這裡把它切成兩份：dvdPhoto
+    // （第 0 個，接手變成飄動物件顯示的圖案）跟 ordinaryBatch（其餘才是
+    // 真正掉落堆疊的一般照片，張數剛好等於 photoFallCount()，不會有
+    // spawnFallingPhotos() 內部拿不滿、要靠 % 循環重複取用的情況）。
+    const dvdPhoto = nextBatch && nextBatch.length ? nextBatch[0] : null;
+    const ordinaryBatch = nextBatch && nextBatch.length > 1 ? nextBatch.slice(1) : [];
+    spawnFallingPhotos(ordinaryBatch, nextWarmCache);
+    // spawnFallingPhotos() 剛剛已經把 pfLastBatchUrls 覆寫成 ordinaryBatch
+    // 這些 url——這裡把保留給飄動物件的這張也一併補進去，下一輪
+    // pickReshuffleBatch() 才會知道這張最近才剛用過，不會馬上又選到
+    // 一模一樣的圖案當下一批的飄動物件或掉落照片。
+    if(dvdPhoto){
+      promoteBatchPhotoToDvd(dvdPhoto);
+      if(dvdPhoto.src) pfLastBatchUrls.add(dvdPhoto.src);
+    }
   }
 
   // ---------- 收場：拿掉地板，所有照片＋e 一路物理掉出畫面下緣，回到首頁 ----------
