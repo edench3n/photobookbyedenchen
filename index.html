@@ -9411,6 +9411,11 @@
   }
 
   let pfEngine = null, pfRunner = null, pfMouse = null, pfMouseConstraint = null;
+  // 見下面 startPhotoFallEngine() 內「拖著物件移出視窗，回來時還卡在抓著
+  // 狀態」的完整說明——這裡存放掛在 document 上的偵測 listener 參照，
+  // 讓 finishExitPhotoFallMode() 收尾時可以正確解除，不會每次進出堆疊
+  // 模式就疊加一個新的 listener。
+  let pfMouseButtonGuard = null;
   // pfRunner 目前是不是真的處於「停止」狀態——重複呼叫「啟動迴圈」如果對一個
   // 「已經在跑」的迴圈重複呼叫，會疊加出第二個 requestAnimationFrame 迴圈
   // （「停止迴圈」只會取消最後一次記錄到的那個迴圈 id，先前疊加的迴圈不會
@@ -9971,6 +9976,46 @@
     Composite.add(pfEngine.world, pfMouseConstraint);
     Events.on(pfMouseConstraint, 'startdrag', () => { photoFallStage.classList.add('grabbing'); pfDragging = true; });
     Events.on(pfMouseConstraint, 'enddrag', () => { photoFallStage.classList.remove('grabbing'); pfDragging = false; });
+
+    // ---------- 修正：「拖著物件移出視窗，回來時明明已經放開，卻還卡在
+    // 抓著的狀態」----------
+    // 成因：Matter.Mouse 綁的 mouseup 監聽器，只有在滑鼠指標還停留在
+    // 瀏覽器視窗「裡面」放開時才會收到事件——這是瀏覽器原生行為，指標
+    // 一旦移出整個瀏覽器視窗範圍，視窗完全不會收到任何滑鼠事件，包含
+    // 放開這個動作本身。使用者抓著物件把指標拖出視窗邊界、在視窗外面
+    // 才放開滑鼠，這個「放開」的訊號從頭到尾沒有機會傳進網頁——等指標
+    // 移回視窗裡面、mousemove 事件重新開始送達，Matter 內部記錄的按鍵
+    // 狀態仍然停在「還按著」，物件因此持續被拖曳彈簧拉著跑，即使使用者
+    // 這時手指／滑鼠鍵早就已經放開了。
+    // 修法：不去猜「指標離開視窗那一刻」使用者是放開還是繼續按著（沒辦法
+    // 從網頁這端得知），而是利用瀏覽器原生 MouseEvent 物件的 `buttons`
+    // 屬性——不管游標剛剛去了哪裡、瀏覽器有沒有收到中間那些事件，只要
+    // 指標「這一刻」重新回到視窗、送出下一個 mousemove，這個事件當下的
+    // `buttons` 一定會如實反映滑鼠鍵「現在」真正的按壓狀態（0 代表所有
+    // 鍵都沒按著）。額外掛一個 document 層級的 mousemove 監聽器，只要
+    // 偵測到「Matter 這邊還認為正在拖曳，但這一刻 buttons 已經是 0」，
+    // 就代表放開的動作確實發生過（只是發生在視窗外、網頁沒收到通知），
+    // 立刻手動觸發跟真正放開滑鼠完全等效的收尾：清空 pfMouseConstraint.body
+    // 讓引擎不再對這顆物體施加拖曳彈簧力、把 Matter 內部的按鍵狀態同步
+    // 改回「沒按」、拿掉 grabbing 樣式、pfDragging 設回 false——效果等同
+    // 使用者在視窗內正常放開滑鼠，物件會照原本的物理規則自然掉落，不會
+    // 無故被清除或跳動。
+    // 使用者如果是「按著不放、把指標移出去又移回來」（真的還在拖曳中），
+    // 這個判斷不會誤觸發：只要滑鼠鍵確實還按著，重新進入視窗的 mousemove
+    // 事件 `buttons` 就會正確回報非 0，跟原本「按著就抓住」的手感完全
+    // 不受影響，只有「已經放開」這一種情況會被這裡補上正確的收尾。
+    // 掛在 document（不是 photoFallStage）上，是因為指標從視窗外移回來，
+    // 第一個收到的 mousemove 位置不保證還在 photoFallStage 範圍內，掛在
+    // document 才能確保一定收得到這個訊號。
+    pfMouseButtonGuard = (e) => {
+      if(pfMouseConstraint && pfMouseConstraint.body && e.buttons === 0){
+        pfMouseConstraint.body = null;
+        if(pfMouseConstraint.mouse) pfMouseConstraint.mouse.button = -1;
+        photoFallStage.classList.remove('grabbing');
+        pfDragging = false;
+      }
+    };
+    document.addEventListener('mousemove', pfMouseButtonGuard);
 
     // ---------- 修正：「拖著物件去撞網頁邊界，會被拖穿過去」----------
     // 成因：左右牆／地板都是靜態物體，正常掉落、堆疊時確實擋得住；但
@@ -10857,6 +10902,15 @@
     }
     pfEngine = null; pfRunner = null; pfMouse = null; pfMouseConstraint = null;
     pfGroundBody = null; pfLeftWall = null; pfRightWall = null;
+    // 見 startPhotoFallEngine() 內 pfMouseButtonGuard 宣告處的完整說明：
+    // 這是額外掛在 document 上的 listener，不是掛在 pfMouseConstraint／
+    // pfEngine 這些會被上面 Engine.clear()／Composite.clear() 一併清掉的
+    // 物件上，必須自己手動 removeEventListener，否則下一次進堆疊模式
+    // 又會重新掛一個新的，document 上会疊加越來越多份同樣的 listener。
+    if(pfMouseButtonGuard){
+      document.removeEventListener('mousemove', pfMouseButtonGuard);
+      pfMouseButtonGuard = null;
+    }
     pfDragging = false; // 這一輪徹底收尾了，重設乾淨，避免殘留的 true 影響下一輪堆疊模式
     pfDvdFloor = null; pfLastBatchUrls = new Set(); // 換批用的狀態一併重設，避免殘留影響下一輪堆疊模式
     pfDvdItem = null; pfSyncHandler = null; pfFinished = false;
