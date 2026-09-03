@@ -200,9 +200,9 @@
     flex-shrink:0;
     position:relative;
     left: var(--header-left-nudge, 0px); /* 桌機滿版 5 欄時，JS 會把這個微調成精準對齊 001 照片左邊緣的偏移量，做法跟 header-preview 對齊 002 完全一樣；手機版這個變數固定是 0，位置不受影響 */
-    opacity:0; /* 原因跟 header-preview / header-right 一樣：等 001 圖片載入、
-                  算出精準位置後才顯示，避免進頁面/重新整理時「先跑到錯誤位置
-                  再跳回來」 */
+    opacity:1; /* 大標題改成一開始就顯示，不等 JS 算完精準位置才淡入——
+                  預設 nudge 是 0px，JS 之後只會做幾 px 內的微調，肉眼幾乎
+                  看不出來，比起讓標題明顯「晚出來」更划算 */
     transition: opacity .2s ease;
   }
   .fixed-header .header-left.positioned{ opacity:1; }
