@@ -1216,6 +1216,37 @@
     transition:none !important;
   }
 
+  /* ---------- 進站第一次載入：全白遮罩淡入畫面 ----------
+     在上面 initial-reveal-pending 這層「個別元素各自 opacity:0」的機制
+     之外，另外疊一層純白、蓋住全畫面的遮罩，z-index 比飄動的 e
+     （99999，全站最高）還高，一開始完全不透明，把整個網頁（包含還沒
+     排版好、還沒載完圖的瞬間）整片擋住。等 revealInitialChrome() 真正
+     判斷所有東西都準備好、要放行的那一刻，才幫這個遮罩加上 .hide，
+     用 .5s 淡出，讓使用者看到的是「從全白淡入到完整畫面」，而不是
+     像原本那樣看著白畫面等、東西才一個個蹦出來。
+     這層遮罩本身刻意跟 initial-reveal-pending 分開判斷、慢一點才拿掉：
+     revealInitialChrome() 內會在真正放行前，額外多等一段緩衝時間（見
+     JS INITIAL_REVEAL_EXTRA_BUFFER_MS 的說明），讓飄動的 e 撞牆用的
+     圖片庫（quick-preload 那一批）有更多時間在背景載完、decode 完，
+     避免使用者一進站馬上撞牆、圖片庫還沒準備好而「撞了但沒換圖」。
+     pointer-events 淡出時一起關掉，避免這段期間內使用者點到還沒真正
+     顯示出來的元素；display:none 則等淡出動畫真的播完才加上（用
+     transitionend，找不到就用 timeout 保底），避免中途把 opacity
+     transition 打斷。 */
+  .initial-load-overlay{
+    position:fixed;
+    inset:0;
+    background:#fff;
+    z-index:2147483647;
+    opacity:1;
+    transition:opacity .5s ease;
+    pointer-events:auto;
+  }
+  .initial-load-overlay.hide{
+    opacity:0;
+    pointer-events:none;
+  }
+
   /* ---------- 貫穿全站、蓋在所有頁面之上的飄動英文字 ----------
      不再只在手機版 preview 頁面顯示、也不再區分手機/桌機兩種操作方式：
      用 position:fixed（相對視窗，不是相對捲動位置）+ transform 定位
@@ -1613,6 +1644,12 @@
 </head>
 <body class="preview-active initial-reveal-pending">
 
+  <!-- 進站第一次載入用的全白淡入遮罩，完整說明見上面 CSS
+       .initial-load-overlay 那段。刻意放在 body 最前面、DOM 順序最上層，
+       跟 z-index:2147483647 一起確保蓋住畫面上所有東西（包含飄動的
+       e），JS 準備好之後會幫它加上 .hide 觸發 .5s 淡出。 -->
+  <div class="initial-load-overlay" id="initialLoadOverlay" aria-hidden="true"></div>
+
   <!-- ---------- 徹底移除內建的黃色 e 預設圖 ----------
        原本這裡放的是一張內嵌的黃色 e base64 PNG，純粹當「量測撞牆矩形」
        用的內部素材，理論上全程被 .dvd-image-pending 這個 CSS 開關遮住、
@@ -1892,6 +1929,7 @@
   const pageClockYear = document.getElementById('pageClockYear');
   const pageClockMonthDay = document.getElementById('pageClockMonthDay');
   const pageClockTime = document.getElementById('pageClockTime');
+  const initialLoadOverlay = document.getElementById('initialLoadOverlay');
 
   const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
   const supportsTouch = window.matchMedia('(pointer: coarse)').matches;
@@ -1905,10 +1943,27 @@
   // initial-reveal-pending 這個 class 了，classList.remove 對本來就沒有
   // 的 class 是無害的重複操作，不會有任何多餘動作或閃爍。
   let initialChromeRevealed = false;
+  // 全白遮罩淡出：完整說明見上面 CSS .initial-load-overlay 那段。跟
+  // initial-reveal-pending 拿掉的同一刻觸發，用 .hide 這個 class 讓遮罩
+  // 從不透明的白色用 .5s 淡出成透明，畫面上看起來就是「從全白淡入到
+  // 完整網頁」。淡出動畫真的播完（transitionend）才補上 display:none，
+  // 徹底移出畫面、避免它繼續佔用一層合成圖層；萬一某些瀏覽器沒有正常
+  // 觸發 transitionend（例如分頁切到背景導致動畫被瀏覽器直接跳過），
+  // 額外用一個跟淡出時間對齊的 setTimeout 保底，兩邊只會有一個真的生效
+  // （用 initialLoadOverlay._hidden 這個旗標避免重複執行）。
+  function hideInitialLoadOverlay(){
+    if(!initialLoadOverlay || initialLoadOverlay._hidden) return;
+    initialLoadOverlay._hidden = true;
+    initialLoadOverlay.classList.add('hide');
+    const finalize = () => { initialLoadOverlay.style.display = 'none'; };
+    initialLoadOverlay.addEventListener('transitionend', finalize, { once:true });
+    setTimeout(finalize, 600);
+  }
   function revealInitialChrome(){
     if(initialChromeRevealed) return;
     initialChromeRevealed = true;
     document.body.classList.remove('initial-reveal-pending');
+    hideInitialLoadOverlay();
     // 飄動的 e 首次進站專用的縮放彈入（見上面 CSS .dvd-bounce.dvd-reveal
     // 的完整說明）：跟拿掉遮罩同一刻加上 dvd-reveal，讓內層圖片從
     // scale(0) 用 .6s 的回彈曲線放大到正常大小；動畫時間一到就把這個
@@ -1956,17 +2011,40 @@
   let dvdReadyForInitialReveal = false;
   let initialRevealGraceTimer = null;
   const DVD_REVEAL_GRACE_MS = 500;
+  // ---------- 全白遮罩加上之後，額外多拖一點載入時間 ----------
+  // 成因：飄動的 e 一開站雖然已經有 dvdEImages[0]（見 markDvdRealImageReady()
+  // 那段），但撞牆換圖用的其餘候選圖（quick-preload 那一批，最多再抓
+  // DVD_E_IMAGE_NO_REPEAT_COUNT+4 張）是背景平行下載＋decode，不保證
+  // dvdReadyForInitialReveal 剛設成 true 那一刻就已經全部到位；如果使用者
+  // 剛進站、遮罩一放行就立刻撞到牆，cycleDvdEImage() 裡「候選數量不足
+  // 就整個 no-op」的保護（見該函式旁的說明）會讓這第一下撞擊看起來像
+  // 完全沒反應、沒換圖——這正是使用者反應的「第一次撞擊不會切照片」。
+  // 修法：preview 照片／飄動的 e 兩邊都舉手完成後，不要立刻放行，而是
+  // 額外多等這一小段緩衝時間，讓背景那批 quick-preload 有更多機會在
+  // 遮罩淡出、使用者真的看得到畫面、開始能撞牆之前先完成；同時全白
+  // 遮罩本身還在畫面上擋著，這段等待使用者感覺不到「卡住」，只會覺得
+  // 是遮罩淡出前的正常載入時間。
+  const INITIAL_REVEAL_EXTRA_BUFFER_MS = 450;
+  let initialRevealExtraBufferTimer = null;
   function attemptInitialReveal(){
     if(initialChromeRevealed) return;
     if(previewReadyForInitialReveal && dvdReadyForInitialReveal){
       clearTimeout(initialRevealGraceTimer);
       initialRevealGraceTimer = null;
-      revealInitialChrome();
+      if(!initialRevealExtraBufferTimer){
+        initialRevealExtraBufferTimer = setTimeout(() => {
+          initialRevealExtraBufferTimer = null;
+          revealInitialChrome();
+        }, INITIAL_REVEAL_EXTRA_BUFFER_MS);
+      }
       return;
     }
     if(previewReadyForInitialReveal && !initialRevealGraceTimer){
       initialRevealGraceTimer = setTimeout(() => {
         initialRevealGraceTimer = null;
+        // 緩衝時間到了，飄動的 e 那邊還沒舉手，就不再等它——直接放行，
+        // 不额外再疊加 INITIAL_REVEAL_EXTRA_BUFFER_MS，避免使用者對著
+        // 全白遮罩等更久（這種情況本來就已經比一般情況慢了）。
         revealInitialChrome();
       }, DVD_REVEAL_GRACE_MS);
     }
@@ -6881,28 +6959,23 @@
   // 的相容性/效能問題。
   // 遮罩還沒建立好時（例如剛好在第一次雙擊那一刻還沒暖機完成），優雅退回
   // 原本的矩形 body（+ 圓角），不會讓功能壞掉或報錯。
-  // ---------- 修正：碰撞邊界仍跟真實圖片輪廓有落差（交疊 / 隱形留白） ----------
-  // 這裡原本（10/16）比上面 PF_ALPHA_MASK_MAX_DIM（48/72）又再降了一次
-  // 解析度：buildFallItemPhysicsRects() 是拿已經只有 48~72 見方的 alpha
-  // 遮罩，硬是再往下取樣成一個只有 10~16 格的粗網格才拿去組矩形——等於
-  // 對同一張輪廓「降兩次解析度」。網格越粗，每一格能代表的實際像素範圍
-  // 就越大，「多數決」(PF_BODY_GRID_CELL_MAJORITY) 判斷整格實心/整格鏤空
-  // 時的量化誤差也跟著放大：形狀往外凸的地方，量化誤差會讓碰撞體「比
-  // 實際圖案更寬」，兩張圖矩形邊緣還沒真的碰在一起、視覺上色彩就已經先
-  // 疊到一起（使用者說的「交疊」）；形狀往內凹或邊緣較斜的地方，同一個
-  // 量化誤差則反過來讓碰撞體「比實際圖案更窄」，兩張圖明明畫面上已經貼在
-  // 一起，物理邊界卻還留著一段沒接觸到的空隙（使用者說的「隱形邊界」）。
-  // 兩種看似相反的症狀，其實是同一個成因：網格解析度遠低於遮罩本身能
-  // 提供的細節，跟 restitution/friction 這些碰撞「手感」參數完全無關。
-  // 修法：把這一層網格的精細度上限，直接對齊（甚至逼近）上面
-  // PF_ALPHA_MASK_MAX_DIM 遮罩本身的解析度，讓 buildFallItemPhysicsRects()
-  // 幾乎是直接沿用遮罩本來的精細度組矩形，不再對同一份輪廓多做一次不必要
-  // 的粗化——量化誤差就只剩遮罩本身那一層（本來就已經是效能與精細度的
-  // 折衷結果），碰撞體才會真正貼齊肉眼看到的圖片邊界。拆出的矩形數量會
-  // 隨解析度提高而增加（沿長邊格數是線性關係，不是格數平方——run-length
-  // 合併後每一列頂多只會拆成個位數的小矩形），效能較弱裝置維持用比較低
-  // 的上限，跟 PF_ALPHA_MASK_MAX_DIM 一樣的折衷邏輯。
-  const PF_BODY_GRID_MAX = DVD_LOW_POWER_DEVICE ? 24 : 44; // 拆解精細度上限（沿長邊的格數）：越大越貼合凹陷／越貼近真實邊界，但拆出的矩形（=物理 body 數量）也越多，效能較弱裝置調低；上限對齊 PF_ALPHA_MASK_MAX_DIM（48/72），避免對同一份遮罩多一層不必要的粗化
+  // ---------- 再次加強：拆解網格精細度直接等於遮罩本身解析度，徹底去掉
+  // 「降兩次解析度」的落差 ----------
+  // 上一輪修正把上限從 10/16 調到 24/44，比 PF_ALPHA_MASK_MAX_DIM（48/72）
+  // 還是低了整整一半——等於還是對同一份輪廓的細節「打對折」，量化誤差
+  // 依舊比遮罩本身能提供的精細度粗，使用者反映堆疊頁面仍然容易看到照片
+  // 交疊，就是這一半落差殘留下來的結果。這裡不再折衷，直接把上限設成跟
+  // PF_ALPHA_MASK_MAX_DIM 完全相等：buildFallItemPhysicsRects() 裡的
+  // scaleFactor（= Math.round(遮罩邊長 / 這個常數)）在兩者相等時算出來
+  // 剛好是 1，等同完全不再對遮罩做任何二次縮小，直接照遮罩原始格數組
+  // 矩形——量化誤差只剩遮罩本身那一層（建立遮罩時已經是效能與精細度的
+  // 折衷），是目前這套「粗網格逼近輪廓」做法在不重新拉高遮罩本身解析度
+  // 之下，所能做到最貼合真實邊緣的精細度。拆出的矩形數量雖然會比之前
+  // 多（沿長邊格數變成原本的兩倍），但仍然是線性成長、run-length 合併後
+  // 每列還是只會拆出個位數的小矩形，效能較弱裝置一樣維持用比較低的
+  // PF_ALPHA_MASK_MAX_DIM（因此這裡也跟著等比例調低），維持原有的效能
+  // 折衷分寸不變。
+  const PF_BODY_GRID_MAX = PF_ALPHA_MASK_MAX_DIM; // 拆解精細度上限（沿長邊的格數），直接等於遮罩本身的解析度——見上方說明，這是目前這套做法所能達到的最高精細度
   const PF_BODY_GRID_CELL_MAJORITY = 0.5; // 跟 PF_ALPHA_MASK_CELL_MAJORITY 同樣的道理：降到粗網格時，這一格要「多數」原始像素都有畫到東西才算整格實心，避免只沾到一點顏色的邊緣格被整格補滿
 
   // 把 maskEntry（見 finishMask() 的 {mask,w,h} 格式）降到粗網格、按列合併
@@ -9976,12 +10049,12 @@
     // 整批改變原有的視覺級距。用「面積」乘上倍數（而不是直接乘邊長）：
     // 跟下面既有的「面積為基準、再依長寬比反推邊長」算法是同一套邏輯，
     // 這樣不管照片本身是直的、橫的、正方的，放大後仍然維持它自己原本的
-    // 長寬比，不會變形。倍數選 2.4（面積），換算邊長大約放大 1.55 倍，
-    // 在畫面上一眼就能看出「這幾張比較大」，但還不到誇張到蓋住太多其他
-    // 照片、或讓物理碰撞看起來突兀的程度。手機／桌機共用同一套規則，
-    // 因為兩邊原本的 tileSize 已經各自用 PHOTO_FALL_TILE_RATIO 分開校準過，
-    // 這裡只是在各自原本的大小基準上再放大，不需要另外分裝置處理。
-    const PHOTO_FALL_BIG_AREA_MULTIPLIER = 2.4;
+    // 長寬比，不會變形。倍數選 3.6（面積），換算邊長大約放大 1.9 倍，
+    // 比原本的 2.4（邊長約 1.55 倍）更明顯大一階，一眼就能看出「這幾張
+    // 特別大」。手機／桌機共用同一套規則，因為兩邊原本的 tileSize 已經
+    // 各自用 PHOTO_FALL_TILE_RATIO 分開校準過，這裡只是在各自原本的大小
+    // 基準上再放大，不需要另外分裝置處理。
+    const PHOTO_FALL_BIG_AREA_MULTIPLIER = 3.6;
     const PHOTO_FALL_BIG_COUNT_MIN = 3;
     const PHOTO_FALL_BIG_COUNT_MAX = 5;
 
