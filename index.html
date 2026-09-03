@@ -10113,6 +10113,59 @@
       }
     });
 
+    // ---------- 修正「拖曳、或從 preview 頁回來時，PNG 剛好疊在一起就永遠
+    // 黏在一起、不會自動彈開」----------
+    // 成因：上面已經把 positionIterations/velocityIterations 調高（見該處
+    // 完整說明），理論上只要物理世界還在正常運算，Matter.js 自己的位置
+    // 解算就會把重疊的兩個 body 慢慢推開，不需要另外寫任何邏輯。但這裡
+    // 同時開著 enableSleeping:true（省效能用，見 startPhotoFallEngine()
+    // 開頭那段完整說明）——Matter.js 判斷「該不該睡著」用的是 body 的
+    // 瞬時速度／角速度，跟位置解算的重疊修正是兩件事：拖曳放開的瞬間、
+    // 或使用者從 preview 頁關閉回到堆疊畫面那一刻，兩張照片剛好卡在
+    // 重疊的位置、但彼此的速度都已經趨近於零，Matter.js 判定「這兩顆都
+    // 靜止了」，於是讓它們雙雙進入睡眠——一旦兩顆都睡著，睡著的 body
+    // 每一步都會被引擎整個跳過（見上面「加開 enableSleeping」那段的完整
+    // 說明），包含負責把重疊推開的位置解算在內，等於「還沒真的分開，就
+    // 已經被引擎當成不需要再處理」，兩張照片因此永久卡在重疊的畫面上，
+    // 不管再等多久都不會自己彈開——這正是「疊在一起」的根本成因，不是
+    // 碰撞判斷本身失準，是「還沒解完就先睡著」。
+    // 修法：每一步物理世界算完之後，額外檢查一輪「目前所有掉落中的物件
+    // （含飄動的 e），兩兩之間的外接矩形是不是還疊在一起」——只用
+    // body.bounds（Matter 每一步都會自動重算好的 AABB，這裡純讀取、不
+    // 需要另外量測，成本極低）粗略比對，不需要真的比對到去背圖精細的
+    // 遮罩形狀：只要外接矩形都沒疊到，裡面實際的圖案更不可能疊到，這裡
+    // 只是要抓出「有機會疊在一起」的候選，真正精確的分開手法還是交給
+    // Matter.js 自己的位置解算，這裡不直接改寫位置。只要抓到一對外接
+    // 矩形還有重疊、且至少一顆目前是睡著的，就把兩顆都叫醒
+    // （Matter.Sleeping.set(...,false)）——叫醒之後，接下來的每一步就會
+    // 重新交給引擎正常解算，已經調高的迭代次數會在接下來幾影格內把重疊
+    // 慢慢推開，配合 restitution 的回彈手感，看起來就是「流暢地彈開」，
+    // 而不是瞬間跳位；等真的分開、速度重新降到閾值以下，才會照 Matter.js
+    // 原本的機制自然再次睡著，不會被這段邏輯卡住一直醒著耗效能。
+    // 物件數量最多就是 fallCount（15 張）+ 1（e），兩兩比對頂多一百多次
+    // AABB 相交測試，每一步的成本可以忽略不計，不需要額外做任何空間
+    // 分割最佳化。
+    Events.on(pfEngine, 'afterUpdate', () => {
+      const list = pfItems.map(it => it.body);
+      if(pfDvdItem) list.push(pfDvdItem.body);
+      const n = list.length;
+      for(let i = 0; i < n; i++){
+        const a = list[i];
+        const ab = a.bounds;
+        for(let j = i + 1; j < n; j++){
+          const b = list[j];
+          if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理，不需要介入
+          const bb = b.bounds;
+          const overlap = ab.min.x < bb.max.x && ab.max.x > bb.min.x
+            && ab.min.y < bb.max.y && ab.max.y > bb.min.y;
+          if(overlap){
+            if(a.isSleeping) Matter.Sleeping.set(a, false);
+            if(b.isSleeping) Matter.Sleeping.set(b, false);
+          }
+        }
+      }
+    });
+
     photoFallStage.classList.add('active');
     document.body.style.overflow = 'hidden';
 
@@ -11146,7 +11199,17 @@
     if(!photoFallModeActive) return;
 
     const Matter = window.Matter;
+    // ---------- 修正「preview 頁蓋下來時，飄動物件的角度會被拉正回 0 度」
+    // ----------
+    // 物理世界裡的旋轉角度（Matter body.angle，弧度、連續累加，可能是
+    // 撞了好幾次牆、滾了不只一整圈之後的任意角度）要在這裡（Composite.remove
+    // 把 body 真正拿掉之前）先讀出來——原本這裡完全沒有讀它，下面直接把
+    // dvdRotationDeg 寫死成 0，等於使用者看到的畫面是「還在堆疊裡歪斜著的
+    // 那個物件，preview 蓋下來、恢復飄動的那一瞬間，角度忽然被拉正回
+    // 水平」，跟牠原本自由旋轉、停在哪個角度就是哪個角度的觀感完全不符。
+    let bodyAngleRad = 0;
     if(Matter && pfEngine && pfDvdItem){
+      bodyAngleRad = pfDvdItem.body.angle;
       Matter.Composite.remove(pfEngine.world, pfDvdItem.body);
     }
     pfDvdItem = null;
@@ -11164,8 +11227,13 @@
     const rect = dvdBounce.getBoundingClientRect();
     dvdX = rect.left;
     dvdY = rect.top;
-    dvdRotationDeg = 0; // 離開 Matter 物理世界（那邊用弧度、真的在滾動）重新接回這一套小幅度撞擊旋轉，角度歸零重新開始，避免兩套系統的角度單位／基準對不上
-    dvdRotationVel = 0;
+    // 修正：不再寫死成 0——把剛剛讀到的物理世界角度（弧度）換算成度數，
+    // 接到飄動迴圈這一套「小幅度撞牆旋轉」系統的角度變數上。兩套系統的
+    // 角度單位（Matter 用弧度、飄動迴圈用度數）不同，基準（0 度的定義）
+    // 卻是一致的，只要做這一次單位換算，銜接起來就是「牠當下圖片是什麼
+    // 角度，扁成飄動物件就是什麼角度」，不會有瞬間轉正的跳動。
+    dvdRotationDeg = bodyAngleRad * 180 / Math.PI;
+    dvdRotationVel = 0; // 角速度不延續：物理世界裡滾動的瞬時角速度單位、量級都跟飄動迴圈這套「撞牆才轉一點」的角速度對不上，延續過去的意義不大，靜止的角度本身才是重點，這裡維持原本「重新出發」的設計，只修正角度本身被拉正的問題
     dvdBounce.style.transition = '';
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
     setDvdDirection(Math.random() * Math.PI * 2); // 從靜止的堆疊狀態重新出發，隨機挑一個飄動方向
