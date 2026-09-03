@@ -6768,7 +6768,19 @@
   // 呼叫端改用 callback 接收結果（原本是直接 return），draw／
   // getImageData 這段可能丟出的例外（tainted canvas）維持同步丟出，
   // 交給呼叫端原本的 try/catch 處理，行為跟原本完全一致。
-  const PF_ALPHA_MASK_ROWS_PER_CHUNK = 12; // 沒有 requestIdleCallback 時，每批固定處理的「列」數，抓一個經驗上足夠短、不會讓單批卡住太久的數字
+  // ---------- 修正：「preview 頁停留期間，移動優先於遮罩精細度追趕速度」----------
+  // 低效能裝置（DVD_LOW_POWER_DEVICE）每批只處理一半的列數（12→6），且
+  // 排下一批時額外多等 24ms（見下面兩處 scheduleIdle(processRows, ...)
+  // 呼叫的 fallbackDelay）：這是目前整條「撞牆換圖」流程裡，唯一還沒有
+  // 依裝置調整「單批工作量／批次間距」的重運算——上面 trimDvdEImagesStaggered()
+  // 的排隊間隔已經在前一輪修正時刻意調快（見該處說明），沒有再往下調的
+  // 空間；這裡改成調小批次、拉開批次間距，換來的是每一次 processRows()
+  // 佔用主執行緒的時間更短、而且批次跟批次之間確實讓出一小段時間給
+  // 飄動物件的 requestAnimationFrame 迴圈，影格間隔更穩定。代價是遮罩要
+  // 花更多批次、更長的總時間才會全部建完，但在遮罩還沒就緒之前，撞牆
+  // 判斷本來就會優雅退回矩形碰撞（見 sampleAlphaMaskSolid() 的說明），
+  // 不會有任何功能性的問題，只是精細撞牆的時間點稍微晚一點點。
+  const PF_ALPHA_MASK_ROWS_PER_CHUNK = DVD_LOW_POWER_DEVICE ? 6 : 12; // 沒有 requestIdleCallback 時，每批固定處理的「列」數，抓一個經驗上足夠短、不會讓單批卡住太久的數字
   const PF_ALPHA_MASK_IDLE_TIME_MARGIN_MS = 3; // 跟 renderGrid() 的 GRID_IDLE_TIME_MARGIN_MS 同一個道理，留一點緩衝給瀏覽器自己排的其他工作
   function buildAlphaMaskFromSourceChunked(source, naturalW, naturalH, callback){
     if(!naturalW || !naturalH){ callback(null); return; }
@@ -6826,7 +6838,7 @@
         }
       }
       if(my < maskH){
-        scheduleIdle(processRows, { timeout: 400, fallbackDelay: 0 });
+        scheduleIdle(processRows, { timeout: 400, fallbackDelay: DVD_LOW_POWER_DEVICE ? 24 : 0 });
         return;
       }
       finishMask();
@@ -6854,7 +6866,7 @@
       callback({ mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts) });
     }
 
-    scheduleIdle(processRows, { timeout: 400, fallbackDelay: 0 });
+    scheduleIdle(processRows, { timeout: 400, fallbackDelay: DVD_LOW_POWER_DEVICE ? 24 : 0 });
   }
 
   // 觸發（或直接沿用快取）某張圖片的像素遮罩建立，非同步、不阻塞呼叫端——
@@ -11922,7 +11934,17 @@
       // 間因此可能暫時出現「空洞」——上面 pickNextDvdEImageIndex() 已經
       // 改成只在 dvdEReadyIndices() 這份「真的有內容」的索引清單裡選，
       // 不會選到空洞，這裡不需要額外處理順序。
-      const DVD_E_QUICK_PRELOAD_COUNT = Math.min(orderedUrls.length, DVD_E_IMAGE_NO_REPEAT_COUNT + 4);
+      // 低效能裝置（DVD_LOW_POWER_DEVICE）把同時併發預載的張數再收斂一點
+      // （原本統一是「防重複張數 + 4」，這類裝置改成「防重複張數 + 1」）：
+      // 這批 decode() 雖然都是非同步、理論上不直接佔用主執行緒，但剛進站
+      // 這一刻手機處理器同時要應付淡入動畫、飄動物件的 RAF 物理迴圈、
+      // 網路多工下載這幾張小圖——decode() resolve 的那一刻仍然需要瀏覽器
+      // 排一個任務回主執行緒執行 markReadyN()，張數越多，這幾個小任務
+      // 越容易跟移動的那個 RAF 影格擠在一起。降低張數犧牲的是「防重複」
+      // 機制在最初幾秒的候選圖片略少一點，但這個效果原本就會隨著背景
+      // trimDvdEImagesStaggered() 陸續補位而快速消失，換取這幾秒移動更順
+      // 是划算的取捨。
+      const DVD_E_QUICK_PRELOAD_COUNT = Math.min(orderedUrls.length, DVD_E_IMAGE_NO_REPEAT_COUNT + (DVD_LOW_POWER_DEVICE ? 1 : 4));
       for(let qi = 1; qi < DVD_E_QUICK_PRELOAD_COUNT; qi++){
         const quickIdx = qi; // 迴圈變數本身在閉包裡會變動，先固定成獨立變數給下面的 closure 用
         const urlN = orderedUrls[quickIdx];
