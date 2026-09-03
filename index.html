@@ -1239,7 +1239,13 @@
     background:#fff;
     z-index:2147483647;
     opacity:1;
-    transition:opacity .5s ease;
+    /* 淡出時間跟下面 body.initial-reveal-pending 放行的那組內容
+       （.fixed-header / .preview-col / .dvd-bounce，全部都是 .3s ease）
+       對齊，兩者是同一刻（revealInitialChrome()）一起觸發，時間長度
+       不一致的話，內容其實已經淡入完成、白幕卻還要多晃 0.2s 才退完，
+       看起來會不同步；改成一樣的 .3s ease 後，白幕退完的瞬間跟內容
+       完全出現的瞬間會是同一刻。 */
+    transition:opacity .3s ease;
     pointer-events:auto;
   }
   .initial-load-overlay.hide{
