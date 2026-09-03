@@ -6438,7 +6438,17 @@
       // 解析度，最後仍然是拿全解析度的 srcCanvas 做「真正裁切」——輸出圖片
       // 本身的畫質完全不受影響，只是「決定要裁哪裡」這個判斷過程改成在
       // 縮小版上算，純粹省運算量、不犧牲最後看到的圖片品質。
-      const SCAN_MAX_DIM = 400;
+      // ---------- 修正：「preview 頁停留期間，飄動物件移動優先，網格可以晚一點」----------
+      // 低效能裝置（DVD_LOW_POWER_DEVICE，實務上等於沒有 requestIdleCallback
+      // 的 Safari/WebKit 系，包含 IG／LINE／Threads 內建瀏覽器）找邊界這輪
+      // 迴圈的取樣解析度再降一階（400→260），面積只剩約 42%，這段同步
+      // 掃描的運算量對應等比例下降。使用者剛進站幾乎都會先停在 preview
+      // 頁一段時間，這幾秒內畫面上唯一在動、使用者眼睛真正盯著看的就是
+      // 飄動物件本身，寧可讓它撞牆換圖用的裁切輪廓精細度再粗一點點（肉眼
+      // 感覺不出差異），也要換取這幾秒主執行緒更空、移動更順。桌機/平板
+      // （有真正 requestIdleCallback，同一批運算本來就會被排到真正閒置
+      // 時才做）維持原本 400 不變，不受影響。
+      const SCAN_MAX_DIM = DVD_LOW_POWER_DEVICE ? 260 : 400;
       const scanScale = Math.min(1, SCAN_MAX_DIM / Math.max(w, h));
       const sw = Math.max(1, Math.round(w * scanScale));
       const sh = Math.max(1, Math.round(h * scanScale));
@@ -7415,7 +7425,15 @@
       const results = new Array(urls.length);
       let i = 0;
 
-      const DVD_E_PREFETCH_LOOKAHEAD = 3; // 同時間最多幾張圖片在搶跑下載，抓一個不會對行動網路造成太大負擔、又足夠蓋掉單張下載時間的數字
+      // 低效能裝置（同上 DVD_LOW_POWER_DEVICE）降到 1 張：這幾張圖下載完
+      // 之後緊接著的 decode／裁切都會排進同一條 scheduleIdle() 隊伍，
+      // 一次搶跑越多張，代表越多張圖幾乎同時進入「待裁切」狀態，即使
+      // 裁切本身還是排隊執行，光是「同時有好幾個 decode 在跑」本身在
+      // 較弱的手機處理器上就會多佔用主執行緒／記憶體頻寬。preview 頁
+      // 停留期間以飄動物件移動順暢為優先，張數降低換取影響更小；圖片庫
+      // 「整批準備好」的總時間會拉長一些，但這段時間內物件依然可以正常
+      // 撞牆／飄動，只是換圖用的新圖到位速度稍慢，可接受的取捨。
+      const DVD_E_PREFETCH_LOOKAHEAD = DVD_LOW_POWER_DEVICE ? 1 : 3; // 同時間最多幾張圖片在搶跑下載，抓一個不會對行動網路造成太大負擔、又足夠蓋掉單張下載時間的數字
       const prefetchCache = new Map(); // idx -> Promise，resolve 成 { img, blobUrl }（下載＋解碼成功）或 null（失敗，裁切階段會改用 trimTransparentImage() 的完整容錯路徑重新讀取）
 
       function prefetchDvdEBlob(idx){
@@ -10027,7 +10045,12 @@
     // 現在只掉 12 張（見上面 photoFallCount()），格子數變少，畫面有更多
     // 空間可以塞稍微大一點的照片，看起來更清楚，不會顯得空。桌機／平板
     // 維持原本的 0.52 不變。
-    const PHOTO_FALL_TILE_RATIO = isDetailMobile() ? 0.60 : 0.52;
+    // 手機版整體再縮小一點：維持「格子寬度 × 比例＝掉落照片邊長基準」這條
+    // 規則本身不變（下面 tileSize／tileArea／依長寬比反推寬高的整套公式都
+    // 完全沒動），單純把手機版原本的比例常數（0.60）調降一點（→0.54），
+    // 讓算出來的 tileSize 整體小一成，後續依面積、長寬比反推出的每張照片
+    // 寬高也會跟著等比例一起縮小。桌機／平板版（0.52）不受影響。
+    const PHOTO_FALL_TILE_RATIO = isDetailMobile() ? 0.54 : 0.52;
     const sampleItem = grid.querySelector('.grid-item');
     const cellSize = sampleItem ? sampleItem.getBoundingClientRect().width : Math.min(vw / 5, 260);
     const tileSize = Math.round(cellSize * PHOTO_FALL_TILE_RATIO);
@@ -11248,6 +11271,16 @@
     if(previewClosing) return; // 滑動轉場進行中，忽略重複觸發
     if(!previewPage.classList.contains('active')) return;
 
+    // ---------- 使用者提前關閉 preview：網格建置不能再等 ----------
+    // init() 裡把網格建置＋背景預抓延後（見 GRID_BUILD_DEFER_MS 的完整
+    // 說明），前提假設是「使用者這幾秒還停在 preview 頁」；一旦使用者
+    // 這一刻就主動點掉 preview、要看首頁格子，代表這個假設不成立了，
+    // 應該立刻補建，不然使用者會對著一個還沒建置、空白的網格等到
+    // 下面 whenHomeGridReady() 的 600ms 保底上限到才勉強顯示。這裡只是
+    // 「提前觸發」，triggerGridBuildOnce() 內部有防重複呼叫，跟保底
+    // 延遲的 setTimeout 只會有一邊真正執行 buildGridDeferred()。
+    if(typeof window.__triggerGridBuildOnce === 'function') window.__triggerGridBuildOnce();
+
     if(previewOpening){
       // 使用者在「往下蓋下來」轉場還沒播完時就又要關閉：立刻打斷開場動畫，
       // 不要讓兩個方向的滑動轉場疊在一起互相打架
@@ -12107,6 +12140,16 @@
     // 「使用者這一刻真正看得到的 preview 頁」不用再陪著等這一段。
     openPreviewPage(false, true);
 
+    // gridBuildStarted：防止「保底延遲時間到」跟「使用者提前關閉 preview」
+    // 兩條觸發路徑同時／重複呼叫 buildGridDeferred()。這裡刻意在呼叫
+    // scheduleIdle(buildGridDeferred, ...) 之前就標記成 true（見下面
+    // triggerGridBuildOnce()），不是等 buildGridDeferred() 真的執行完才標記
+    // ——因為 renderGrid() 本身是分批非同步完成的，如果用「執行完」當判斷
+    // 依據，使用者在網格還沒建完的這段期間關閉 preview，會誤判成「還沒
+    // 開始」而重複觸發第二次 renderGrid()。只要已經排進佇列（不管排進
+    // requestIdleCallback 還是排進 setTimeout），就視為「已經處理過」，
+    // 不重複觸發。
+    let gridBuildStarted = false;
     const buildGridDeferred = () => {
       // renderGrid() 現在改成分批、跨好幾次 requestIdleCallback 才會全部
       // 建完（見該函式上方「頭幾秒還是會lag」的完整說明）——positionAllGridIdx()
@@ -12121,18 +12164,34 @@
       prefetchAllInBackground();
       prefetchHoverThumbsInBackground();
     };
-    // 見上面「使用者根本還看不到」那段既有的理由：網格建置＋背景預抓可以
-    // 慢一點才開始，換來的是「飄動物件剛出現、自己的圖片庫也才剛要開始
-    // 暖機」這最關鍵的頭幾秒，不用被網格搶掉閒置時間（完整成因見上面
-    // 這段新補的說明）。1500ms 抓一個大概的緩衝——比 dvdEImages 那邊
-    // 自己「顯示完 quickUrl 之後延遲 750ms 才開始整批裁切」略長一點，
-    // 確保網格開始排隊搶閒置時間的時候，飄動的 e 那邊已經至少把最初
-    // 幾張圖處理得差不多了；不是等它整個圖片庫都跑完才開始（圖片庫大小
-    // 不固定，等到跑完可能要好幾十秒，那樣拖慢網格出現的時間反而得不
-    // 償失，1500ms 只是換一個起跑順序，不是排隊等待完成）。
-    setTimeout(() => {
+    // ---------- 修正：「preview 頁停留期間，飄動物件移動優先，網格可以晚一點」----------
+    // 使用者剛進站幾乎一定會先停在 preview 頁一段時間，才會點回首頁——
+    // 這段停留期間網格本來就被蓋在下面看不到，沒有理由讓它的建置／背景
+    // 預抓在這段「使用者眼睛只看得到飄動物件」的黃金時間內跟它搶主執行緒。
+    // 低效能裝置（DVD_LOW_POWER_DEVICE，見上面完整說明）原本的延遲從
+    // 1500ms 拉長到 4000ms：桌機/平板有真正 requestIdleCallback，同一批
+    // 工作本來就只會排到瀏覽器真正閒下來才做，維持 1500ms 不受影響；
+    // 只有沒有這個 API 的 Safari/IG 系，才需要靠「延後起跑點」這個土法
+    // 煉鋼的方式模擬同樣的效果，拉長延遲讓飄動物件那幾秒能獨佔主執行緒。
+    // 這裡不是「等它整個圖片庫都跑完才開始」，只是換一個起跑時間點，跟
+    // 原本 1500ms 的設計理念一致，只是数字更保守。
+    const GRID_BUILD_DEFER_MS = DVD_LOW_POWER_DEVICE ? 4000 : 1500;
+    let gridBuildDeferTimer = null;
+    const triggerGridBuildOnce = () => {
+      if(gridBuildStarted) return;
+      gridBuildStarted = true;
+      if(gridBuildDeferTimer !== null){ clearTimeout(gridBuildDeferTimer); gridBuildDeferTimer = null; }
       scheduleIdle(buildGridDeferred, { timeout: 1200, fallbackDelay: 0 });
-    }, 1500);
+    };
+    gridBuildDeferTimer = setTimeout(triggerGridBuildOnce, GRID_BUILD_DEFER_MS);
+    // 但如果使用者比這個延遲時間更早就主動關閉 preview、要看首頁格子——
+    // 不能讓他們對著還沒建置的空白網格等到保底延遲時間到，這裡讓
+    // closePreviewPage() 觸發時（見該函式內對 window.__triggerGridBuildOnce
+    // 的呼叫）立刻補建，不用等 GRID_BUILD_DEFER_MS 那個「預期使用者還在
+    // preview 頁」的保守延遲。掛在 window 上是因為 closePreviewPage() 定義
+    // 在這個 async function 之外的外層作用域，兩邊都在同一個 IIFE 裡、
+    // 不會外洩到全域，純粹借用 window 當一個雙方都拿得到的溝通管道。
+    window.__triggerGridBuildOnce = triggerGridBuildOnce;
 
     // 背景閒置時間先把 Matter.js 預先載入＋剖析好（不等使用者真的雙擊
     // 飄動的 e 才臨時去下載）：原本 loadMatterJS() 只在 enterPhotoFallMode()
