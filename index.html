@@ -7781,14 +7781,22 @@
     // 選這個量級是讓典型抓握臂長（約 60~150px）擺盪的自然週期落在一秒
     // 上下，看起來從容、有重量感，不會像被電到一樣抖動，也不會慢到像
     // 沒有重力。
-  const PENDULUM_DAMPING_PER_SEC = 1.1; // 角速度的指數衰減係數（跟 DVD_ROTATION_FRICTION_PER_SEC 同寫法）：
+  const PENDULUM_DAMPING_PER_SEC = 1.8; // 角速度的指數衰減係數（跟 DVD_ROTATION_FRICTION_PER_SEC 同寫法）：
     // 純重力鐘擺理論上會永遠擺盪不停，這裡疊加一點點空氣阻力般的阻尼，
     // 讓長時間握著不動時擺動會漸漸收斂變小，而不是一直等幅擺盪下去，
     // 同時也讓數值積分本身更穩定，不會因為逐影格誤差累積而越擺越大。
-  const PENDULUM_MAX_ANGULAR_VEL = 480; // deg/秒，角速度上限，純保底，避免手速取樣異常時算出離譜的轉速
+    // 原本 1.1：使用者回報「首頁跟 preview 頁甩動太大力」，這裡調高
+    // （衰減更快）讓擺動整體收斂得更快、更含蓄，甩動同一個手勢轉出來
+    // 的角度也會跟著變小。
+  const PENDULUM_MAX_ANGULAR_VEL = 280; // deg/秒，角速度上限——原本 480，同上一起調低，避免甩得又快又大力
   const PENDULUM_MAX_PIVOT_ACCEL = 12000; // px/秒²，抓取點加速度的夾限——手指／滑鼠座標量測本身有雜訊，
     // 直接拿相鄰影格的位置做兩次微分，極端情況下可能算出遠超真實手速的
     // 加速度值，這裡夾限住，避免慣性力矩項偶發暴衝。
+  const PENDULUM_INERTIA_TORQUE_FACTOR = 0.45; // 「甩動」這一項力矩（見 stepDvdDragPendulum 內 torqueInertial）
+    // 額外再乘上的縮小倍率：這一項是造成「甩太大力」觀感的主要來源
+    // （手隨便晃一下、加速度换算出來的力矩比重力力矩大很多），重力項
+    // 維持原本大小（不影響「靜止懸掛」的自然垂晃手感），只把「手甩動」
+    // 這一項單獨壓小，兩者可以分開調、互不影響。
   // 修正「雙擊飄動的 e 時，位置會跟著跳兩下」：按下的當下先只記錄「候選」
   // 資訊，不立刻套用抓取效果／搬動位置，等真的確定是拖曳（位移超過
   // DVD_TAP_MAX_MOVE）才由 commitDvdDrag() 真正接手。完整原因見下面
@@ -8934,7 +8942,7 @@
       //           虛擬力（-accel）作用在中心上，力矩算法跟重力項同一套
       //           叉積公式，只是把重力向量換成這股虛擬力。
       const torqueGravity = rx * PENDULUM_GRAVITY_PX;
-      const torqueInertial = ry * accelX - rx * accelY;
+      const torqueInertial = (ry * accelX - rx * accelY) * PENDULUM_INERTIA_TORQUE_FACTOR;
       const alphaRad = (torqueGravity + torqueInertial) / armLenSq; // rad/秒²
       const alphaDeg = alphaRad * 180 / Math.PI;
 
@@ -9437,6 +9445,10 @@
   const PHOTO_FALL_SPAWN_BASE_PX = 160;    // 第一張的起始 y（視窗上緣再往上的距離）
   const PHOTO_FALL_SPAWN_JITTER_PX = 90;   // 每張再疊加一點隨機值，避免看起來太機械式整齊
   const PHOTO_FALL_GRAVITY = 1.8; // 進場掉落＋堆疊期間的基礎重力，微調自 1.2
+  const PF_DRAG_ANGULAR_DAMPING_PER_SEC = 1.8; // 拖曳中額外疊加的角速度阻尼（見下面 startPhotoFallEngine()
+    // 內 Events.on(pfEngine,'afterUpdate',...) 那段的完整說明），數值跟
+    // 首頁飄動字的 PENDULUM_DAMPING_PER_SEC 對齊，讓兩邊拖曳甩動的
+    // 「大力程度」手感一致。
   const PHOTO_FALL_EXIT_GRAVITY_SCALE = 1.9; // 收起時（地板拿掉）在 PHOTO_FALL_GRAVITY 之上再額外加重的重力倍率，讓「掉出畫面」這段明顯比平常堆疊時更快、更乾脆，維持跟基礎重力之間原本的相對比例不變
   const PHOTO_FALL_EXIT_MAX_WAIT_MS = 1700;  // 保底：不管有沒有偵測到全部掉出畫面，最多等這麼久就強制收尾，避免極端情況卡住
   const PHOTO_FALL_LOAD_MAX_WAIT_MS = 650; // 單張照片還沒暖機好時，最多等圖片載入這麼久，逾時就先讓它跟其他張一起開始掉落（見下面 spawnFallingPhotos() 裡的說明），避免單一張慢的照片拖累、跟其他張脫節，看起來像「停頓一下才掉下去」
@@ -10021,6 +10033,33 @@
     Composite.add(pfEngine.world, pfMouseConstraint);
     Events.on(pfMouseConstraint, 'startdrag', () => { photoFallStage.classList.add('grabbing'); pfDragging = true; });
     Events.on(pfMouseConstraint, 'enddrag', () => { photoFallStage.classList.remove('grabbing'); pfDragging = false; });
+
+    // ---------- 需求：拖曳時的甩動旋轉手感，跟首頁飄動字統一（原本比首頁
+    // 更大力）----------
+    // 堆疊模式抓著照片拖曳時的旋轉，完全是 Matter.js 這套物理引擎「自帶」
+    // 的行為：MouseConstraint 只會把「抓到的那個點」釘住拉向滑鼠，不是
+    // 釘住整個物體的中心，抓在偏離重心的位置、手一晃動，物體自然會繞著
+    // 抓取點轉起來——這跟首頁飄動字新加的鐘擺物理是同一種物理成因，只是
+    // 這裡是引擎內建、不是手刻的。問題是這裡完全沒有額外的角速度阻尼
+    // （只有 frictionAir:0.012，那是給「掉落後」的照片用的一般空氣阻力，
+    // 拖曳中的晃動幾乎感覺不到），旋轉力道又是引擎內部按真實剛體物理算
+    // 出來的「正確」數值，比起首頁那邊已經刻意調小甩動力矩（見
+    // PENDULUM_INERTIA_TORQUE_FACTOR）的手感，這裡明顯更大力、更容易被
+    // 甩得團團轉，這正是使用者回報「兩邊參數不一樣」的成因。
+    // 修法：另外加一個角速度阻尼——只對「目前正被拖曳的那個 body」生效
+    // （pfMouseConstraint.body 只有在真的抓著東西時才不是 undefined），
+    // 每個物理子步驟（跟 Engine.update() 的固定時間步 PF_FIXED_STEP_MS
+    // 同步）結束後，把它的 angularVelocity 額外乘上一個小於 1 的衰減
+    // 係數，把「抓著的時候甩得比較誇張」的部份磨掉一些，讓拖曳中的晃動
+    // 力道跟首頁的 PENDULUM_DAMPING_PER_SEC 手感接近；一旦放開（body
+    // 不再是 pfMouseConstraint.body），完全不受影響，放開後的旋轉／掉落
+    // 動量維持 Matter 原本真實物理引擎算出來的結果，不會被這個阻尼波及。
+    Events.on(pfEngine, 'afterUpdate', () => {
+      const draggedBody = pfMouseConstraint && pfMouseConstraint.body;
+      if(!draggedBody) return;
+      const dt = PF_FIXED_STEP_MS / 1000;
+      Matter.Body.setAngularVelocity(draggedBody, draggedBody.angularVelocity * Math.exp(-PF_DRAG_ANGULAR_DAMPING_PER_SEC * dt));
+    });
 
     photoFallStage.classList.add('active');
     document.body.style.overflow = 'hidden';
