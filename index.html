@@ -1459,8 +1459,11 @@
      不變。 */
   @media (hover: none) and (pointer: coarse) and (min-width: 641px){
     .dvd-bounce-img{
-      /* 同上面基礎規則一樣乘上 --dvd-area-scale，平板版跟著桌機版一起再放大約 1.1 倍，維持原本平板相對桌機縮小 0.85 倍的比例 */
-      height: calc(clamp(61.15px, 14.67vw, 179.36px) * var(--dvd-area-scale, 1));
+      /* 使用者反應平板版飄動物件偏小，整體再放大約 1.3 倍（只調整這個
+         平板專屬 breakpoint 底下的高度區間三個數字，桌機/手機版的規則
+         完全沒有動，彼此互不影響）。
+         同上面基礎規則一樣乘上 --dvd-area-scale，平板版跟著桌機版一起再放大約 1.1 倍，維持原本平板相對桌機縮小 0.85 倍的比例 */
+      height: calc(clamp(79.5px, 19.07vw, 233.17px) * var(--dvd-area-scale, 1));
     }
   }
 
@@ -9675,7 +9678,18 @@
     // 改成從「漂浮物件圖片庫」（dvdEImages，飄動的 e 撞牆換圖用的同一批
     // 去背圖）取材，不再從首頁縮圖（photos）取材——掉落堆疊現在顯示的是
     // 去背後的漂浮物件，而不是相片本身。
-    const pool = dvdEImages.length ? shuffled(dvdEImages) : [];
+    // ---------- 修正「掉落堆疊裡混進一張跟飄動的 e 當下一模一樣的照片」 ----------
+    // 雙擊當下，飄動的 e 本身也會帶著牠正在顯示的那張圖（dvdActiveImgSrc）
+    // 一起變成物理世界裡的一顆 body（見 startPhotoFallEngine() 裡的
+    // dvdBody），等於畫面上已經有一張這張圖了；如果掉落的這批（fallBatch）
+    // 又剛好抽到同一張，使用者會看到兩張長得一模一樣的照片同時掉在畫面
+    // 上，感覺像重複/出錯。這裡先把圖庫裡跟 dvdActiveImgSrc 相同的那一張
+    // 濾掉，只從「其餘照片」裡取材；只有整個圖庫就只剩這一張圖可用（極端
+    // 情況，例如圖庫只有 1 張圖）時，才退回完整圖庫，不然掉落名額會湊不滿。
+    const dvdSrc = dvdActiveImgSrc;
+    const excluded = dvdEImages.length ? dvdEImages.filter(p => p && p.src !== dvdSrc) : [];
+    const source = excluded.length ? excluded : dvdEImages;
+    const pool = source.length ? shuffled(source) : [];
     const batch = [];
     for(let i = 0; i < fallCount; i++){
       batch.push(pool.length ? pool[i % pool.length] : null);
@@ -9694,9 +9708,17 @@
     if(!dvdEImages.length) return [];
     // 同上，改成從 dvdEImages 取材；排除規則沿用原本邏輯，只是比對的欄位
     // 從 photo.url 換成 dvdEImages 每一項的 src。
-    const fresh = shuffled(dvdEImages.filter(p => p && !pfLastBatchUrls.has(p.src)));
+    // 換批期間飄動的 e 本身那顆 body（dvdActiveImgSrc）全程留在畫面上、
+    // 不會跟著換批換掉，所以這裡也跟 pickInitialFallBatch() 一樣，優先
+    // 把跟 e 目前這張相同的圖從候選池濾掉，避免換出來的新一批裡又混進一張
+    // 跟 e 重複的照片；濾掉後池子還夠湊滿 count 張時才套用，圖庫太小湊不滿
+    // 的極端情況就不強求，直接沿用原本（可能含重複）的結果。
+    const dvdSrc = dvdActiveImgSrc;
+    const withoutDvd = dvdEImages.filter(p => p && p.src !== dvdSrc);
+    const sourcePool = withoutDvd.length ? withoutDvd : dvdEImages;
+    const fresh = shuffled(sourcePool.filter(p => p && !pfLastBatchUrls.has(p.src)));
     if(fresh.length >= count) return fresh.slice(0, count);
-    const filler = shuffled(dvdEImages);
+    const filler = shuffled(sourcePool);
     const result = fresh.slice();
     for(let i = 0; result.length < count && i < filler.length; i++){
       result.push(filler[i]);
