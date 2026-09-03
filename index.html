@@ -9972,6 +9972,47 @@
     Events.on(pfMouseConstraint, 'startdrag', () => { photoFallStage.classList.add('grabbing'); pfDragging = true; });
     Events.on(pfMouseConstraint, 'enddrag', () => { photoFallStage.classList.remove('grabbing'); pfDragging = false; });
 
+    // ---------- 修正：「拖著物件去撞網頁邊界，會被拖穿過去」----------
+    // 成因：左右牆／地板都是靜態物體，正常掉落、堆疊時確實擋得住；但
+    // MouseConstraint 拖曳本質上是一條彈簧，每一步物理世界都在用外力
+    // 把抓著的物體「硬拉」向滑鼠/手指目前的位置。拖曳速度夠快、彈簧
+    // 硬度（上面調高到 0.5）加上去，牆壁的碰撞解算有時候來不及在同一
+    // 個時間步內完全擋下這股外力，物體的位置就會被彈簧拉到牆壁的另一
+    // 側去——等於用蠻力把它拖「穿」過牆，而不是真的被牆彈開。這不是牆
+    // 本身沒建好，是 Matter.js 用彈簧模擬拖曳時，外力跟碰撞解算互相
+    // 拉扯、偶爾碰撞這邊會輸的已知限制。
+    // 修法：不去跟這場拉扯搏鬥，而是在物理引擎每算完一步之後
+    // （afterUpdate），額外多一道跟牆壁完全無關、絕對不會被彈簧力道
+    // 蓋過去的「事後檢查」——只針對「目前正被抓著的那顆物體」
+    // （pfMouseConstraint.body，沒有人在拖曳時這裡是 null，不影響一般
+    // 掉落／堆疊的物體），如果它的位置已經超出視窗邊界（拿它自己的
+    // 包圍盒算出的半寬/半高當作安全距離），就直接用 Body.setPosition()
+    // 把它拉回邊界內、Body.setVelocity() 把撞牆方向的速度歸零——這一步
+    // 是直接覆寫位置，不受彈簧硬度或碰撞解算精細度影響，物理上等同
+    // 「這裡真的有一堵絕對過不去的牆」。只处理拖曳中的物體，其餘掉落／
+    // 堆疊中的照片完全不受影響，撞牆手感、彈開效果都維持原樣不變。
+    Events.on(pfEngine, 'afterUpdate', () => {
+      const draggedBody = pfMouseConstraint.body;
+      if(!draggedBody) return;
+      const viewportW = window.innerWidth;
+      const viewportH = window.innerHeight;
+      const halfW = (draggedBody.bounds.max.x - draggedBody.bounds.min.x) / 2;
+      const halfH = (draggedBody.bounds.max.y - draggedBody.bounds.min.y) / 2;
+      const minX = halfW, maxX = Math.max(halfW, viewportW - halfW);
+      const minY = halfH, maxY = Math.max(halfH, viewportH - halfH);
+      const pos = draggedBody.position;
+      const clampedX = Math.min(Math.max(pos.x, minX), maxX);
+      const clampedY = Math.min(Math.max(pos.y, minY), maxY);
+      if(clampedX !== pos.x || clampedY !== pos.y){
+        Matter.Body.setPosition(draggedBody, { x: clampedX, y: clampedY });
+        const vel = draggedBody.velocity;
+        Matter.Body.setVelocity(draggedBody, {
+          x: clampedX !== pos.x ? 0 : vel.x,
+          y: clampedY !== pos.y ? 0 : vel.y,
+        });
+      }
+    });
+
     photoFallStage.classList.add('active');
     document.body.style.overflow = 'hidden';
 
