@@ -10032,6 +10032,33 @@
     Events.on(pfMouseConstraint, 'startdrag', () => { photoFallStage.classList.add('grabbing'); pfDragging = true; });
     Events.on(pfMouseConstraint, 'enddrag', () => { photoFallStage.classList.remove('grabbing'); pfDragging = false; });
 
+    // ---------- 修正：「抓起來拖曳時會怪怪地往上飄，重力感覺跑掉」----------
+    // 成因：拖曳中的照片同時受兩股力：重力（一直往下拉）、MouseConstraint
+    // 這條彈簧（一直把它拉向游標）。Matter.js 每一步是先把重力加進
+    // body.force，才 integrate 出下一步位置，最後才輪到彈簧依 stiffness/
+    // damping 去修正位置／速度——重力造成的下墜速度，跟彈簧修正的量，兩者
+    // 是分開疊加的，密度（density: 0.0026）壓得很輕，一點點重力就會讓
+    // body 累積出不小的下墜速度，彈簧再去追、修正時難免 overshoot，兩股
+    // 力互相打架，看起來就是抓著的照片一下子被重力扯低、一下子被彈簧扯回
+    // 來甚至衝過頭，感覺像在飄、重力方向亂跑。首頁縮圖的拖曳完全沒有物理
+    // 引擎、沒有重力，單純讓元素跟著游標，所以才會感覺「正常、不會動」。
+    // 修法：只要目前有物件被抓著（pfMouseConstraint.body 非 null），在每一步
+    // 物理世界真正套用重力之前（beforeUpdate 觸發時機正好在 Engine.update()
+    // 內部套用重力那一步之前），主動施加一股跟這一步即將加上去的重力大小
+    // 完全相等、方向相反的力，兩者加總後這顆 body 這一步收到的淨重力等於
+    // 零——效果等同「被抓著的這段期間，這顆物件暫時不受重力影響」，只單純
+    // 被彈簧拉著跟游標走，行為就跟首頁縮圖一樣「不會自己飄」。放開之後這股
+    // 抵銷力就不會再套用，物件立刻恢復正常重力掉落，手感跟原本完全一樣，
+    // 也完全不影響其他沒被抓著的照片。
+    Events.on(pfEngine, 'beforeUpdate', () => {
+      const draggedBody = pfMouseConstraint.body;
+      if(!draggedBody) return;
+      Matter.Body.applyForce(draggedBody, draggedBody.position, {
+        x: -draggedBody.mass * pfEngine.gravity.x * pfEngine.gravity.scale,
+        y: -draggedBody.mass * pfEngine.gravity.y * pfEngine.gravity.scale,
+      });
+    });
+
     // ---------- 修正：「拖著物件移出視窗，回來時明明已經放開，卻還卡在
     // 抓著的狀態」----------
     // 成因：Matter.Mouse 綁的 mouseup 監聽器，只有在滑鼠指標還停留在
@@ -10129,40 +10156,44 @@
     // 已經被引擎當成不需要再處理」，兩張照片因此永久卡在重疊的畫面上，
     // 不管再等多久都不會自己彈開——這正是「疊在一起」的根本成因，不是
     // 碰撞判斷本身失準，是「還沒解完就先睡著」。
-    // 修法：每一步物理世界算完之後，額外檢查一輪「目前所有掉落中的物件
-    // （含飄動的 e），兩兩之間的外接矩形是不是還疊在一起」——只用
-    // body.bounds（Matter 每一步都會自動重算好的 AABB，這裡純讀取、不
-    // 需要另外量測，成本極低）粗略比對，不需要真的比對到去背圖精細的
-    // 遮罩形狀：只要外接矩形都沒疊到，裡面實際的圖案更不可能疊到，這裡
-    // 只是要抓出「有機會疊在一起」的候選，真正精確的分開手法還是交給
-    // Matter.js 自己的位置解算，這裡不直接改寫位置。只要抓到一對外接
-    // 矩形還有重疊、且至少一顆目前是睡著的，就把兩顆都叫醒
-    // （Matter.Sleeping.set(...,false)）——叫醒之後，接下來的每一步就會
-    // 重新交給引擎正常解算，已經調高的迭代次數會在接下來幾影格內把重疊
-    // 慢慢推開，配合 restitution 的回彈手感，看起來就是「流暢地彈開」，
-    // 而不是瞬間跳位；等真的分開、速度重新降到閾值以下，才會照 Matter.js
-    // 原本的機制自然再次睡著，不會被這段邏輯卡住一直醒著耗效能。
-    // 物件數量最多就是 fallCount（15 張）+ 1（e），兩兩比對頂多一百多次
-    // AABB 相交測試，每一步的成本可以忽略不計，不需要額外做任何空間
-    // 分割最佳化。
+    //
+    // 這裡原本的修法是每一步比對「所有物件兩兩之間的外接矩形（AABB）是否
+    // 還相交」，只要相交、且至少一顆在睡，就整組叫醒——但這正是後來發現
+    // 的「堆疊靜止後仍持續在抖動」的根本原因：這批照片本身帶著隨機旋轉
+    // 角度，一張旋轉過的照片，它「歪斜的實際外形」跟「跟座標軸對齊的外接
+    // 矩形」兩者範圍差很多，矩形通常比實際圖案大一圈；只要照片是斜著靠在
+    // 一起（這正是堆疊照片最常見、最正常的樣子），旁邊兩張的外接矩形幾乎
+    // 一定會相交，即使兩張照片其實只是穩穩貼著、根本没有真的疊到。結果是
+    // 只要兩顆一睡著，下一步 AABB 檢查幾乎必定判定「還疊著」，立刻又叫醒；
+    // 叫醒後角動量/速度隨即又降回閾值以下、幾影格內再次睡著，然後下一步
+    // 又被同一組 AABB 判定叫醒——如此一睡就醒、一醒就睡的迴圈，每次「醒來」
+    // 引擎都會重新對它套用碰撞解算跟些微的回彈（restitution），肉眼看起來
+    // 就是「明明已經靜止的堆疊，卻一直在細微發抖」，成因不是真的還在碰撞
+    // 摩擦，是這段「防呆」邏輯自己不斷把已經穩定的照片重新叫醒。
+    // 修法：不再用粗略的 AABB 相交去猜「可能疊到」，改成直接讀 Matter.js
+    // 每一步算完、正確判斷過的實際碰撞資訊（pfEngine.pairs.list——每一對
+    // 目前真的有碰撞關係的 body，都帶著 SAT 算出來的精確穿透深度
+    // collision.depth）。兩顆物體只是穩穩貼著、彼此擋住對方不再移動的
+    // 正常靜止接觸，這個深度會非常接近 0（Matter 的位置解算本來就會把
+    // 「正在解算中」的重疊收斂到幾乎為零才讓它睡著）；只有真的「還沒解完
+    // 就先睡著」那種明顯陷在一起的情況，深度才會超出這個範圍。只在深度
+    // 超過 PF_STUCK_OVERLAP_DEPTH 這個門檻時才叫醒，等於只挑出「真的還卡著
+    // 沒分開」的候選，跳過所有單純貼著、沒有實際卡住的正常靜止接觸，堆疊
+    // 完全靜止後就不會再被這段邏輯無故吵醒，也就不會再看到細微抖動；原本
+    // 要防的「PNG 疊在一起永遠黏住不會彈開」的情況一樣會被抓到、正常喚醒
+    // 分開。用引擎本來就會算好的 pairs.list，比原本兩兩 AABB 迴圈更準也
+    // 更省——不用自己重新跑一輪比對。
+    const PF_STUCK_OVERLAP_DEPTH = 4; // px，超過這個穿透深度才視為「真的卡住疊在一起」，一般貼合的靜止接觸深度趨近 0，遠低於這個門檻
     Events.on(pfEngine, 'afterUpdate', () => {
-      const list = pfItems.map(it => it.body);
-      if(pfDvdItem) list.push(pfDvdItem.body);
-      const n = list.length;
-      for(let i = 0; i < n; i++){
-        const a = list[i];
-        const ab = a.bounds;
-        for(let j = i + 1; j < n; j++){
-          const b = list[j];
-          if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理，不需要介入
-          const bb = b.bounds;
-          const overlap = ab.min.x < bb.max.x && ab.max.x > bb.min.x
-            && ab.min.y < bb.max.y && ab.max.y > bb.min.y;
-          if(overlap){
-            if(a.isSleeping) Matter.Sleeping.set(a, false);
-            if(b.isSleeping) Matter.Sleeping.set(b, false);
-          }
-        }
+      const pairs = pfEngine.pairs.list;
+      for(let i = 0; i < pairs.length; i++){
+        const pair = pairs[i];
+        if(!pair.isActive) continue;
+        const a = pair.bodyA, b = pair.bodyB;
+        if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理，不需要介入
+        if(pair.collision.depth < PF_STUCK_OVERLAP_DEPTH) continue; // 只是貼著的正常靜止接觸，不是真的卡住，不要叫醒
+        if(a.isSleeping) Matter.Sleeping.set(a, false);
+        if(b.isSleeping) Matter.Sleeping.set(b, false);
       }
     });
 
