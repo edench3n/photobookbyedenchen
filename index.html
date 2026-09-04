@@ -10742,6 +10742,219 @@
     if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; pfPhotoTapCandidateEl = null; }
   });
 
+  // ---------- 手機／觸控：堆疊頁面裡抓著的漂浮物件，補上第二根手指可以旋轉它 ----------
+  // 跟上面飄動的 e 那一整組（見 startDvdRotateGesture()／applyDvdTwoFingerRotation()
+  // 上方的完整說明）互相呼應的需求：使用者用一根手指抓著堆疊裡的某個漂浮
+  // 物件（已經走 Matter.Mouse／MouseConstraint 那套物理拖曳，見
+  // startPhotoFallEngine() 內 pfMouseConstraint 的建立）之後，再補上第二根
+  // 手指，兩指像轉盤子一樣繞著轉，這個物件的角度要跟著即時旋轉；放開旋轉
+  // 手指時如果還帶著轉動的角速度，要像甩出去一樣讓它自己繼續轉一段、自然
+  // 衰減停下來。
+  //
+  // 做法上跟飄動的 e 有一個關鍵差異：飄動的 e 完全脫離 Matter.js（自己手刻
+  // dvdRotationDeg／dvdRotationVel／stepDvdRotation() 那一套角度＋角速度＋
+  // 摩擦力衰減），這裡的物件則是貨真價實活在 Matter 物理世界裡的 body——
+  // 角度本身就是 body.angle，衰減、碰撞、跟鄰居互相推擠這些事，物理引擎
+  // 早就會做，不需要另外寫一套衰減動畫；旋轉手勢進行中直接呼叫
+  // Matter.Body.setAngle() 寫入角度，放開時改成呼叫
+  // Matter.Body.setAngularVelocity() 把最後一小段時間換算出的角速度交還
+  // 給引擎，之後就完全比照物理世界本來的規則自然運作。
+  //
+  // 核心難題：Matter.Mouse 直接綁 touchstart/touchmove/touchend 在
+  // photoFallStage 上把觸控當滑鼠處理，而且完全不分辨「哪一根手指」——
+  // 每次都直接讀 event.changedTouches[0] 當成滑鼠目前的位置（見
+  // startPhotoFallEngine() 內 pfMouse = Mouse.create(photoFallStage) 附近的
+  // 完整說明）。放任第二根（旋轉用）手指的觸控事件也傳到 Matter 手上，會：
+  //   1) 第二指按下的瞬間，Matter 把這一刻的滑鼠位置「跳」到第二指剛按下
+  //      的座標，抓著的物件跟著瞬間抖一下；
+  //   2) 第二指移動時，Matter 也會把它的位置誤當成主要拖曳手指的最新位置，
+  //      物件會跟著錯誤的手指亂飄；
+  //   3) 第二指放開時，Matter 的 touchend 處理一律把 mouse.button 設回
+  //      -1（等同「使用者放開了」），會讓主要手指明明還按著，卻被誤判成
+  //      整條拖曳直接結束、物件被瞬間丟下。
+  // 解法：在 document 上用「捕獲階段」（{capture:true}）攔截這些原生
+  // TouchEvent——捕獲階段一定比 Matter 掛在 photoFallStage 本身（屬於
+  // target 階段）的監聽器更早收到事件，只要命中旋轉手指就呼叫
+  // stopPropagation()，讓事件在往下傳到 photoFallStage、被 Matter 收到
+  // 之前就被攔下來，Matter 完全不會知道這根旋轉手指的存在；主要拖曳手指
+  // 的觸控事件完全不攔截，繼續正常流到 Matter 手上，拖曳手感不受任何影響。
+  let pfRotateTouchId = null;   // 目前負責旋轉手勢的第二根手指 identifier；null 代表沒有在做旋轉手勢
+  let pfPrimaryTouchId = null;  // 目前負責拖曳位置（已經被 Matter 抓住）的那根手指 identifier
+  let pfPrimaryTouchX = 0, pfPrimaryTouchY = 0; // 兩指連線的兩個端點座標，算法跟
+  let pfRotateTouchX = 0, pfRotateTouchY = 0;   // dvdPrimaryTouchX/dvdRotateTouchX 完全同一套精神（見上方飄動的 e 那組）
+  let pfRotateLastAngle = 0;    // 上一次量到的「兩指連線」角度（弧度），逐影格算差值累加，理由同 dvdRotateLastAngle
+  let pfRotateBody = null;      // 目前正在被兩指旋轉的物理 body（堆疊照片或飄動的 e 共用同一套）
+  let pfRotateSamples = [];     // 最近的 {t, angle} 取樣，放開時用來算甩轉的瞬時角速度，寫法比照 dvdRotateSamples
+  const PF_ROTATE_FLING_WINDOW_MS = 80; // 跟 DVD_ROTATE_FLING_WINDOW_MS 同一個概念、同一個時長
+  const PF_ROTATE_HIT_PADDING = 30; // px，第二指落下時的命中容錯。堆疊照片通常比飄動的 e
+    // 小一圈，兩指要同時準確落在同一張小照片上更難操作，容錯比 DVD_GRAB_PADDING_TOUCH 再留寬一點。
+  const PF_ROTATE_MAX_ANGULAR_VEL = 0.6; // rad/影格，甩轉放開時角速度的保底夾限，避免觸控座標量測雜訊在極端情況下轉出離譜的轉速
+
+  // 找出目前這顆 body 對應的 DOM 元素：堆疊照片（pfItems）或飄動的 e
+  // （pfDvdItem，共用既有的 #dvdBounce 元素）共用同一套查找。
+  function pfFindItemEl(body){
+    if(pfDvdItem && pfDvdItem.body === body) return dvdBounce;
+    const found = pfItems.find(it => it.body === body);
+    return found ? found.el : null;
+  }
+
+  // 跟 applyDvdTwoFingerRotation() 完全同一套精神：不管是主要拖曳手指、還是
+  // 旋轉手指移動，都重新算一次「兩指連線」角度、跟上一次記下的角度取差值
+  // 累加到 body.angle 上，角度基準值永遠跟著這一影格兩指的即時位置同步，
+  // 才不會有轉動軸心跟著拖曳方向跑偏的問題（原理、成因跟
+  // applyDvdTwoFingerRotation() 上方的完整說明一致，這裡不重複）。
+  function applyPfTwoFingerRotation(){
+    if(pfRotateTouchId === null || !pfRotateBody) return;
+    const Matter = window.Matter;
+    if(!Matter) return;
+    const angle = Math.atan2(pfRotateTouchY - pfPrimaryTouchY, pfRotateTouchX - pfPrimaryTouchX);
+    let deltaRad = angle - pfRotateLastAngle;
+    // 正規化到 -PI ~ PI：兩指連線角度剛好跨過 180° 那一瞬間，直接相減會
+    // 從接近 +PI 瞬間跳到接近 -PI（或反過來），修正回「這一影格實際轉動
+    // 的最短角度」，物件才不會在那一刻無故瞬間轉一大圈，理由同
+    // applyDvdTwoFingerRotation()。
+    while(deltaRad > Math.PI) deltaRad -= Math.PI * 2;
+    while(deltaRad < -Math.PI) deltaRad += Math.PI * 2;
+    pfRotateLastAngle = angle;
+    Matter.Body.setAngle(pfRotateBody, pfRotateBody.angle + deltaRad);
+    // 手動控制角度期間，順手把角速度歸零：避免物理引擎自己（例如還在跟
+    // 鄰居解重疊）疊加的角速度，跟這裡手動寫入的角度互相打架、抖動。
+    Matter.Body.setAngularVelocity(pfRotateBody, 0);
+
+    const now = performance.now();
+    pfRotateSamples.push({ t: now, angle: pfRotateBody.angle });
+    while(pfRotateSamples.length > 2 && now - pfRotateSamples[0].t > PF_ROTATE_FLING_WINDOW_MS){
+      pfRotateSamples.shift();
+    }
+  }
+
+  // 放開旋轉手指：把最後一小段時間的角度變化換算成放開當下的角速度，直接
+  // 寫回物理引擎（Matter.Body.setAngularVelocity），之後就完全交給 Matter
+  // 自己的角動量／frictionAir／碰撞接手，不需要另外寫一套衰減動畫——這正是
+  // 「活在物理世界裡的物件」跟飄動的 e（完全脫離 Matter，見
+  // finalizeDvdRotateVelocity()）最大的不同之處。
+  function finalizePfRotateVelocity(){
+    if(!pfRotateBody) return;
+    const now = performance.now();
+    pfRotateSamples.push({ t: now, angle: pfRotateBody.angle });
+    while(pfRotateSamples.length > 1 && now - pfRotateSamples[0].t > PF_ROTATE_FLING_WINDOW_MS){
+      pfRotateSamples.shift();
+    }
+    const first = pfRotateSamples[0];
+    const last = pfRotateSamples[pfRotateSamples.length - 1];
+    const dt = Math.max(1, last.t - first.t) / 1000;
+    // Matter.Body.angularVelocity 的單位是「每一次 Engine.update() 增加的
+    // 弧度」（見 pfLoopTick() 內固定用 PF_FIXED_STEP_MS 呼叫
+    // Matter.Engine.update() 那一套，一步固定對應 PF_FIXED_STEP_MS 這麼多
+    // 真實時間），不是「每秒」——這裡先算出真正的角速度（弧度／秒），再依
+    // 這個固定步長換算回「每一步」的單位，跟 Matter 內部自己因碰撞算出來
+    // 的 angularVelocity 是同一套單位、可以直接相容銜接，放開後的旋轉／
+    // 碰撞手感才會跟原本的物理世界一致，不會突然轉速對不上。
+    const angularVelPerSecond = (last.angle - first.angle) / dt;
+    const angularVelPerStep = angularVelPerSecond * (PF_FIXED_STEP_MS / 1000);
+    const clamped = Math.max(-PF_ROTATE_MAX_ANGULAR_VEL, Math.min(PF_ROTATE_MAX_ANGULAR_VEL, angularVelPerStep));
+    const Matter = window.Matter;
+    if(Matter) Matter.Body.setAngularVelocity(pfRotateBody, clamped);
+  }
+
+  function endPfRotateGesture(){
+    if(pfRotateTouchId === null) return;
+    finalizePfRotateVelocity();
+    pfRotateTouchId = null;
+    pfRotateBody = null;
+    pfRotateSamples = [];
+  }
+
+  // 第二根手指落下、確定要開始兩指旋轉手勢：只有目前確實有物件被抓著
+  // （pfMouseConstraint.body 非 null）、且還沒有另一根手指在做旋轉手勢時，
+  // 才需要判斷這一下是不是命中了那個正被抓著的物件（含它的觸控容錯範圍）。
+  document.addEventListener('touchstart', (e) => {
+    if(!pfMouseConstraint || !pfMouseConstraint.body || pfRotateTouchId !== null) return;
+    const draggedBody = pfMouseConstraint.body;
+    const el = pfFindItemEl(draggedBody);
+    if(!el) return;
+    const newTouch = e.changedTouches && e.changedTouches[0];
+    if(!newTouch) return;
+    // 這一刻 event.touches 裡，扣掉剛剛新落下的這一根，剩下的就是正在
+    // 拖曳位置的那根手指——不需要另外追蹤「哪根手指是主要拖曳手指」，
+    // 因為能走到這裡代表已經有物件被抓著，e.touches 裡除了這根新手指
+    // 之外的其他手指，必然就是那根正在拖曳的手指。
+    const primaryTouch = Array.prototype.find.call(e.touches, (t) => t.identifier !== newTouch.identifier);
+    if(!primaryTouch) return; // 理論上不會發生（代表根本沒有第二根手指），保底放行
+    const rect = el.getBoundingClientRect();
+    if(!dvdHitTest(rect, newTouch.clientX, newTouch.clientY, PF_ROTATE_HIT_PADDING)) return;
+
+    pfRotateTouchId = newTouch.identifier;
+    pfPrimaryTouchId = primaryTouch.identifier;
+    pfPrimaryTouchX = primaryTouch.clientX;
+    pfPrimaryTouchY = primaryTouch.clientY;
+    pfRotateTouchX = newTouch.clientX;
+    pfRotateTouchY = newTouch.clientY;
+    pfRotateBody = draggedBody;
+    pfRotateLastAngle = Math.atan2(pfRotateTouchY - pfPrimaryTouchY, pfRotateTouchX - pfPrimaryTouchX);
+    pfRotateSamples = [{ t: performance.now(), angle: draggedBody.angle }];
+    // 開始手動旋轉的當下，先把殘留的物理角速度（例如剛撞完鄰居還沒轉完）
+    // 歸零，避免手勢控制跟碰撞殘留互相疊加，理由同 startDvdRotateGesture()。
+    const Matter = window.Matter;
+    if(Matter) Matter.Body.setAngularVelocity(draggedBody, 0);
+
+    e.stopPropagation(); // 攔下來，不讓 Matter 收到這根手指的 touchstart（見上方完整說明）
+    e.preventDefault();
+  }, { capture: true, passive: false });
+
+  document.addEventListener('touchmove', (e) => {
+    if(pfRotateTouchId === null) return;
+    for(let i = 0; i < e.changedTouches.length; i++){
+      const t = e.changedTouches[i];
+      if(t.identifier === pfRotateTouchId){
+        pfRotateTouchX = t.clientX;
+        pfRotateTouchY = t.clientY;
+        applyPfTwoFingerRotation();
+        e.stopPropagation(); // 旋轉手指的移動絕對不能讓 Matter 收到，見上方完整說明
+        e.preventDefault();
+        return;
+      }
+      if(t.identifier === pfPrimaryTouchId){
+        // 主要拖曳手指移動：不攔截、正常放行給 Matter 處理拖曳，這裡只是
+        // 順便同步一份座標，讓旋轉的角度基準跟著這一影格的最新位置更新
+        // （跟 applyDvdTwoFingerRotation() 為什麼要吃兩種手指移動的理由
+        // 完全一樣，見該處完整說明），避免轉動軸心跟著拖曳方向跑偏。
+        pfPrimaryTouchX = t.clientX;
+        pfPrimaryTouchY = t.clientY;
+        applyPfTwoFingerRotation();
+      }
+    }
+  }, { capture: true, passive: false });
+
+  function pfHandleRotateTouchEnd(e){
+    if(pfRotateTouchId === null) return;
+    for(let i = 0; i < e.changedTouches.length; i++){
+      const t = e.changedTouches[i];
+      if(t.identifier === pfRotateTouchId){
+        endPfRotateGesture();
+        // 放開旋轉手指這個訊號也不能讓 Matter 收到——Matter 的 touchend
+        // 處理完全不分辨是哪根手指，一律直接把 mouse.button 設回 -1、
+        // 等同「使用者放開了」，會讓主要拖曳手指還按著卻被誤判成整個放開，
+        // 正在拖的物件突然被丟下——攔截掉才能確保只有主要手指真的放開時，
+        // 拖曳才會跟著結束。
+        e.stopPropagation();
+        e.preventDefault();
+        return;
+      }
+      if(t.identifier === pfPrimaryTouchId){
+        // 主要拖曳手指放開：整個拖曳即將由 Matter 自己收尾（這裡不攔截，
+        // 放行讓它正常收到 touchend），旋轉手勢沒有理由繼續留著，一併
+        // 結束、把最後一小段角速度寫回物理引擎，不然 pfRotateTouchId 會
+        // 一直卡在非 null，之後這根手指的殘影 identifier 也不會再對應到
+        // 任何實際存在的觸控。
+        endPfRotateGesture();
+        pfPrimaryTouchId = null;
+      }
+    }
+  }
+  document.addEventListener('touchend', pfHandleRotateTouchEnd, { capture: true, passive: false });
+  document.addEventListener('touchcancel', pfHandleRotateTouchEnd, { capture: true, passive: false });
+
   // ---------- 目前沒有任何地方呼叫這個函式 ----------
   // 掉落的堆疊物件改成漂浮物件圖片庫（去背圖）之後，點一下的行為已經
   // 改成換批、雙擊改成收起堆疊（見上面新的 pointerup 監聽器），不再開啟
