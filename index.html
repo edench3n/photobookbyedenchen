@@ -7980,6 +7980,11 @@
   // 第二根手指落下、確定要開始兩指旋轉手勢：記錄基準角度（跟第一根手指
   // 目前位置連線的角度），之後 dvdRotatePointerMove() 只需要逐影格算跟
   // 上一次的差值疊加上去即可（見上面 dvdRotateLastAngle 的完整說明）。
+  let dvdRotateTouchX = 0, dvdRotateTouchY = 0; // 目前負責旋轉手勢的第二根手指最新的螢幕座標，
+    // 跟 dvdPrimaryTouchX/dvdPrimaryTouchY 是同一種「兩指連線」端點，只是這根換成旋轉手指。
+    // 拆成獨立、隨時更新的變數（而不是只在旋轉手指自己的 pointermove 裡臨時用區域變數算），
+    // 是修正下面「拖曳中軸心跑偏」那個 bug 的關鍵，見 applyDvdTwoFingerRotation() 的說明。
+
   function startDvdRotateGesture(e){
     dvdRotatePointerId = e.pointerId;
     try{ dvdBounce.setPointerCapture(e.pointerId); }catch(err){}
@@ -7987,14 +7992,32 @@
     // 歸零，改成完全交給手勢直接控制角度，避免兩者疊加造成轉速異常、或者
     // 手一放開又混雜了撞牆殘留的角速度，跟使用者這一下的手勢完全對不上。
     dvdRotationVel = 0;
-    dvdRotateLastAngle = Math.atan2(e.clientY - dvdPrimaryTouchY, e.clientX - dvdPrimaryTouchX);
+    dvdRotateTouchX = e.clientX;
+    dvdRotateTouchY = e.clientY;
+    dvdRotateLastAngle = Math.atan2(dvdRotateTouchY - dvdPrimaryTouchY, dvdRotateTouchX - dvdPrimaryTouchX);
     dvdRotateSamples = [{ t: performance.now(), deg: dvdRotationDeg }];
   }
 
-  function dvdRotatePointerMove(e){
-    if(e.pointerId !== dvdRotatePointerId) return;
-    e.preventDefault();
-    const angle = Math.atan2(e.clientY - dvdPrimaryTouchY, e.clientX - dvdPrimaryTouchX);
+  // 修正「兩指旋轉時軸心跑偏」：不管是負責拖曳位置的主要手指動了、還是負責
+  // 旋轉的手指動了，都要呼叫這支函式，用「兩指目前各自最新的座標」重新算一次
+  // 「兩指連線」的角度、跟上一次記下的角度取差值來累加旋轉角度——這是市面上
+  // 兩指旋轉手勢（例如 Google 地圖雙指扭轉指北針、Photoshop／Procreate 的兩指
+  // 旋轉）共通的標準做法：角度基準永遠跟著「這一影格兩指的即時位置」同步更新，
+  // 不會只綁在其中一根手指的移動事件上。
+  //
+  // 原本的 bug：只有旋轉手指的 pointermove（原本的 dvdRotatePointerMove）會
+  // 重新算角度、更新 dvdRotateLastAngle 這個基準值；負責拖曳位置的主要手指
+  // 移動時（dvdPointerMove）只更新了 dvdPrimaryTouchX/Y，卻沒有同步更新
+  // dvdRotateLastAngle。於是「兩指連線」這個向量其實已經因為主要手指被拖著
+  // 移動而悄悄轉了一個角度，但基準值沒跟上；下一次旋轉手指再觸發 pointermove
+  // 時，算出來的 deltaRad 就會把「這段期間單純因為拖曳、主要手指位置改變」
+  // 也一起誤算成使用者主動做的旋轉手勢，看起來就像轉動的軸心跟著拖曳方向跑偏、
+  // 轉起來的角度跟手指實際轉的幅度對不上。
+  // 修法：兩根手指共用同一支函式，任何一根手指移動都立刻重新算一次角度並套用
+  // 差值，角度基準值永遠跟最新一影格同步，就不會再有這種累積誤差。
+  function applyDvdTwoFingerRotation(){
+    if(dvdRotatePointerId === null) return; // 目前沒有兩指旋轉手勢在進行，不用算
+    const angle = Math.atan2(dvdRotateTouchY - dvdPrimaryTouchY, dvdRotateTouchX - dvdPrimaryTouchX);
     let deltaRad = angle - dvdRotateLastAngle;
     // 正規化到 -PI ~ PI：兩指連線角度剛好跨過 180° 那一瞬間，直接相減會
     // 從接近 +PI 瞬間跳到接近 -PI（或反過來），這裡修正回「這一影格實際
@@ -8010,6 +8033,14 @@
     while(dvdRotateSamples.length > 2 && now - dvdRotateSamples[0].t > DVD_ROTATE_FLING_WINDOW_MS){
       dvdRotateSamples.shift();
     }
+  }
+
+  function dvdRotatePointerMove(e){
+    if(e.pointerId !== dvdRotatePointerId) return;
+    e.preventDefault();
+    dvdRotateTouchX = e.clientX;
+    dvdRotateTouchY = e.clientY;
+    applyDvdTwoFingerRotation();
   }
 
   // 結束旋轉手勢（放開手指、手勢被系統取消、或主要拖曳手指先放開）共用
@@ -8986,6 +9017,12 @@
     // 兩指旋轉可以同時進行，不會互相干擾。
     dvdPrimaryTouchX = e.clientX;
     dvdPrimaryTouchY = e.clientY;
+    // 主要手指的位置一改變，「兩指連線」的角度其實也跟著變了——如果兩指
+    // 旋轉手勢正在進行中，這裡要立刻重新算一次角度並套用差值（跟旋轉手指
+    // 自己移動時是同一套邏輯，見 applyDvdTwoFingerRotation() 的完整說明），
+    // 角度基準值才不會因為只有拖曳手指動、旋轉手指沒動而漏掉這段變化，
+    // 累積到下一次旋轉手指移動時才一次爆發出來，造成軸心跑偏。
+    applyDvdTwoFingerRotation();
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
 
     const now = performance.now();
@@ -10057,6 +10094,50 @@
         x: -draggedBody.mass * pfEngine.gravity.x * pfEngine.gravity.scale,
         y: -draggedBody.mass * pfEngine.gravity.y * pfEngine.gravity.scale,
       });
+    });
+
+    // ---------- 修正：「用滑鼠用力甩動照片時，會直接『穿』過其他照片、
+    // 疊合在一起，而不是把對方撞開」----------
+    // 成因：Matter.js 只有離散式碰撞偵測（discrete collision detection），
+    // 沒有內建「連續碰撞偵測」（CCD）。每一步物理世界的做法是先把外力
+    // 積分成速度、把速度積分成新位置，「移動完之後」才去檢查新位置有沒有
+    // 跟別的 body 重疊——如果這一步實際移動的距離，比自己或對方的體積還
+    // 大，新位置就有可能直接「跳過」對方整個碰撞範圍，兩者的外接盒
+    // （AABB）從頭到尾都沒有真正相交過，broadphase 階段自然完全偵測不到
+    // 這次碰撞，變成整個穿透過去，不是碰撞解算不夠精準，是根本沒有機會
+    // 判斷「有沒有撞到」。平常掉落、堆疊時速度不快，不會踩到這個問題；
+    // 但使用者主動用滑鼠快速拖曳、瞬間甩開一張照片時，MouseConstraint 這
+    // 條彈簧（見上面 stiffness 0.5 那段說明）會在單一物理步進內灌入非常
+    // 大的速度——尤其滑鼠移動夠快、兩次 mousemove 之間座標落差本身就很大
+    // 時——正是「用力甩動」最容易觸發整批穿透、看起來像疊在一起的情境；
+    // 甩出去之後鬆手，剛甩出去那一瞬間的高速殘留速度，同樣可能讓它飛過
+    // 去撞到的下一張照片時直接穿過去，不只是拖曳中的那顆會這樣。
+    // 修法：在 Engine.update() 真正把速度積分成新位置之前（beforeUpdate
+    // 觸發時機正好在這一步之前），把每一顆非靜態、非睡眠中 body 這一步
+    // 「即將移動的距離」（固定時間步下，body.speed 近似等於這一步會位移
+    // 的像素數）夾在一個安全上限之內——上限抓該顆 body 自己外接盒最短邊
+    // 的 55%，確保它這一步的位移量不會超過自己身形的一半，就不可能整個
+    // 跳過一顆差不多大小的鄰居、必定會先讓 AABB 相交、正常觸發碰撞判斷、
+    // 正常被撞開。只夾住「超出安全上限」的那一段速度大小、方向完全不變，
+    // 甩動的力道感覺還在（照片還是會被用力推開、飛甩出去），只是不會再
+    // 直接穿模疊在一起；平常正常掉落／堆疊的速度遠低於這個上限，完全不
+    // 受影響。
+    const PF_MAX_SPEED_RATIO = 0.55; // body 這一步最多移動自己外接盒最短邊的這個比例，避免整個跳過差不多大小的鄰居
+    Events.on(pfEngine, 'beforeUpdate', () => {
+      const bodies = Composite.allBodies(pfEngine.world);
+      for(let i = 0; i < bodies.length; i++){
+        const b = bodies[i];
+        if(b.isStatic || b.isSleeping) continue;
+        const speed = b.speed; // ≈ 固定時間步下，這一步即將位移的像素數
+        if(!speed) continue;
+        const boundsW = b.bounds.max.x - b.bounds.min.x;
+        const boundsH = b.bounds.max.y - b.bounds.min.y;
+        const maxSpeed = Math.max(4, Math.min(boundsW, boundsH) * PF_MAX_SPEED_RATIO);
+        if(speed > maxSpeed){
+          const scale = maxSpeed / speed;
+          Matter.Body.setVelocity(b, { x: b.velocity.x * scale, y: b.velocity.y * scale });
+        }
+      }
     });
 
     // ---------- 修正：「拖著物件移出視窗，回來時明明已經放開，卻還卡在
