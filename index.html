@@ -10669,12 +10669,20 @@
     pfLastBatchUrls = usedUrls;
   }
 
-  // ---------- 單擊／雙擊堆疊裡的漂浮物件：跟飄動的 e 一樣的互動 ----------
+  // ---------- 單擊／雙擊堆疊頁面畫面上任何地方：跟飄動的 e 一樣的互動 ----------
   // 堆疊裡掉落的每一個物件，現在都是「漂浮物件圖片庫」（dvdEImages）的
   // 去背圖，不再是可以點進去看細節的相片，所以不再用「點一下開啟照片
-  // 詳細頁」這套行為；改成套用跟飄動的 e 完全一樣的互動語意：單擊（點在
-  // 任何一個掉落物件上）換一批新的漂浮物件，雙擊直接收起整組堆疊、回到
-  // 首頁。
+  // 詳細頁」這套行為；改成套用跟飄動的 e 完全一樣的互動語意：單擊換一批
+  // 新的漂浮物件，雙擊直接收起整組堆疊、回到首頁。
+  // ---------- 修正：「不限定要點在照片上，點畫面空白處也要算」----------
+  // 原本這裡會先用 e.target.closest('.photo-fall-item') 判斷這一下是不是
+  // 落在某個掉落物件上，沒點中任何物件（例如點在照片跟照片間的空白縫隙、
+  // 或整批物件還沒掉滿畫面時的空白區域）就直接無視，不會觸發換批／收起。
+  // 現在改成不管有沒有點中特定物件，只要這一下是落在 #photoFallStage 這個
+  // 涵蓋全螢幕的容器範圍內（見 CSS .photo-fall-stage.active 的
+  // pointer-events:auto，容器本身在 active 狀態下會撐滿整個視窗），就算一次
+  // 有效候選——這裡不再需要記錄「點中的是哪個物件」，純粹只看位置有沒有
+  // 明顯位移（拖曳）來分辨「點一下」跟「拖曳」。
   // 堆疊照片同時支援兩種互動：Matter.Mouse（見 startPhotoFallEngine() 內
   // 綁在 photoFallStage 上的原生滑鼠事件）負責物理拖曳／甩動；這裡另外
   // 加一組獨立的 Pointer Events 偵測「單純點一下、沒有拖曳位移」的情況，
@@ -10682,32 +10690,25 @@
   // 完全比照上面飄動的 e 那組 dvdTapCandidatePointerId 邏輯；單擊／雙擊
   // 的判斷（用 dvdLastRealClickTime／pfPhotoLastRealClickTime 記錄上一次
   // 有效點擊的時間，兩下間隔夠近才算雙擊）也完全比照同一套寫法——單擊
-  // 一律立即觸發，不再等一段觀察期才確認不是雙擊，只是這裡是「點在任何
-  // 一個掉落物件上」都算一次有效點擊，不限定同一個物件。兩組系統（這裡
-  // 跟飄動的 e 那組）各自
-  // 獨立運作、互不干擾：這裡完全不呼叫 preventDefault()，Matter 原生的
-  // mousedown/mousemove/mouseup 拖曳照樣正常運作。
+  // 一律立即觸發，不再等一段觀察期才確認不是雙擊。兩組系統（這裡跟飄動的
+  // e 那組）各自獨立運作、互不干擾：這裡完全不呼叫 preventDefault()，
+  // Matter 原生的 mousedown/mousemove/mouseup 拖曳照樣正常運作，抓著照片
+  // 拖曳、甩動不會被這裡誤判成點擊（拖曳一定會超過 PF_PHOTO_TAP_MAX_MOVE
+  // 這個位移門檻）。
   const PF_PHOTO_TAP_MAX_MOVE = 10;
   const PF_PHOTO_DOUBLE_CLICK_MS = 320;
-  let pfPhotoTapCandidateEl = null;
   let pfPhotoTapCandidatePointerId = null;
   let pfPhotoTapStartX = 0, pfPhotoTapStartY = 0;
   let pfPhotoLastRealClickTime = 0;
   photoFallStage.addEventListener('pointerdown', (e) => {
     if(photoFallState !== 'active') return; // entering/exiting/reshuffling 這些過渡狀態不處理，避免點到即將被清掉的舊物件
-    const itemEl = e.target && e.target.closest ? e.target.closest('.photo-fall-item') : null;
-    if(!itemEl || !itemEl._pf) return;
-    pfPhotoTapCandidateEl = itemEl;
     pfPhotoTapCandidatePointerId = e.pointerId;
     pfPhotoTapStartX = e.clientX;
     pfPhotoTapStartY = e.clientY;
   });
   window.addEventListener('pointerup', (e) => {
     if(pfPhotoTapCandidatePointerId === null || e.pointerId !== pfPhotoTapCandidatePointerId) return;
-    const itemEl = pfPhotoTapCandidateEl;
     pfPhotoTapCandidatePointerId = null;
-    pfPhotoTapCandidateEl = null;
-    if(!itemEl || !itemEl.isConnected) return; // 這次手勢途中，物件可能剛好被換批清掉了
     const dx = e.clientX - pfPhotoTapStartX, dy = e.clientY - pfPhotoTapStartY;
     if(Math.hypot(dx, dy) > PF_PHOTO_TAP_MAX_MOVE) return; // 明顯位移＝拖曳，不算點擊
     if(document.body.classList.contains('detail-active') || document.body.classList.contains('preview-active')) return;
@@ -10739,7 +10740,7 @@
     }
   });
   window.addEventListener('pointercancel', (e) => {
-    if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; pfPhotoTapCandidateEl = null; }
+    if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; }
   });
 
   // ---------- 手機／觸控：堆疊頁面裡抓著的漂浮物件，補上第二根手指可以旋轉它 ----------
