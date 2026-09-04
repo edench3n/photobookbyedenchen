@@ -10701,7 +10701,27 @@
   let pfPhotoTapStartX = 0, pfPhotoTapStartY = 0;
   let pfPhotoLastRealClickTime = 0;
   photoFallStage.addEventListener('pointerdown', (e) => {
-    if(photoFallState !== 'active') return; // entering/exiting/reshuffling 這些過渡狀態不處理，避免點到即將被清掉的舊物件
+    // ---------- 修正：「雙擊回首頁，點畫面空白處沒反應，只有點在飄動物件
+    // 的圖片上才有效」----------
+    // 成因：這裡原本是 `if(photoFallState !== 'active') return;`，把
+    // entering/exiting/reshuffling 這些過渡狀態全部一起擋掉。問題出在
+    // 'reshuffling'：使用者雙擊的「第一下」單擊一落下，下面 pointerup
+    // 的邏輯就會立即呼叫 reshufflePhotoFallBatch()，把 photoFallState
+    // 從 'active' 改成 'reshuffling'（見該函式開頭）——「第二下」的
+    // pointerdown 這時候檢查到的 photoFallState 已經是 'reshuffling'，
+    // 被這行直接 return 擋掉，pfPhotoTapCandidatePointerId 完全沒被設
+    // 進去，等一下 pointerup 判斷雙擊時開頭就因為 candidate 是 null
+    // 直接 return，第二下形同沒發生過，雙擊永遠判斷不成立。飄動的 e
+    // （dvdBounce）那組獨立的 pointerdown 監聽器（見上面
+    // dvdTapCandidatePointerId 那組）完全沒有這條 photoFallState 限制，
+    // 只看是否點在它身上，所以「點在飄動物件的圖片上」雙擊就正常，點
+    // 其他空白處雙擊就沒反應——正是使用者回報的落差。修法：pointerdown
+    // 這裡放寬成 'active' 或 'reshuffling' 都接受（下面 pointerup 本來
+    // 就已經完整處理了 reshuffling 時雙擊要呼叫
+    // interruptReshuffleForExit() 的分支，只是這個候選記錄一直沒機會
+    // 走到那裡），只有真正的 entering/exiting 這兩個動畫過渡狀態才繼續
+    // 忽略，避免點到即將被清掉的舊物件。
+    if(photoFallState !== 'active' && photoFallState !== 'reshuffling') return;
     pfPhotoTapCandidatePointerId = e.pointerId;
     pfPhotoTapStartX = e.clientX;
     pfPhotoTapStartY = e.clientY;
