@@ -1642,6 +1642,58 @@
      加這條規則確保滑鼠事件不會被它攔截、穿透到底下真正該接收事件的東西。 */
   body.photo-fall-active #photoGrid{ pointer-events:none; }
 
+  /* ---------- 堆疊頁面長按：擷取目前畫面當「桌布」的預覽彈窗 ----------
+     長按本身完全不顯示任何提示（沒有進度條、沒有閃光），直到真的擷取
+     完成才跳出這個預覽——平常維持 display:none，不佔用任何 layout /
+     合成成本，也不會被外面兩張隱形圖片庫工具（Matter/pfPhotoTap 那組
+     pointer 事件）誤判成一個可以點擊的物件。 */
+  .wallpaper-preview-overlay{
+    position:fixed;
+    inset:0;
+    z-index:999999; /* 蓋過全站所有東西，包含飄動的 e (99999) 跟 fixed-header (1000) */
+    display:none;
+    align-items:center;
+    justify-content:center;
+    flex-direction:column;
+    gap:18px;
+    background:rgba(255,255,255,0.96);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    padding:24px;
+    box-sizing:border-box;
+  }
+  .wallpaper-preview-overlay.active{ display:flex; }
+  .wallpaper-preview-img{
+    max-width:min(86vw, 480px);
+    max-height:70vh;
+    object-fit:contain;
+    box-shadow:0 12px 40px rgba(0,0,0,0.18);
+    border-radius:4px;
+    background:#fff;
+  }
+  .wallpaper-preview-actions{
+    display:flex;
+    gap:14px;
+    align-items:center;
+  }
+  .wallpaper-preview-btn{
+    font-family:inherit;
+    font-size:14px;
+    letter-spacing:0.02em;
+    padding:10px 22px;
+    border-radius:999px;
+    border:1px solid #111;
+    background:#111;
+    color:#fff;
+    cursor:pointer;
+    text-decoration:none;
+    line-height:1.2;
+  }
+  .wallpaper-preview-btn.secondary{
+    background:transparent;
+    color:#111;
+  }
+
   ::selection{ background:#000; color:#fff; }
 </style>
 </head>
@@ -1699,6 +1751,16 @@
   <!-- 雙擊飄動的 e 觸發的照片物理掉落堆疊舞台，平常是空的、display:none，
        見上面 CSS .photo-fall-stage 的完整說明。 -->
   <div class="photo-fall-stage" id="photoFallStage" aria-hidden="true"></div>
+
+  <!-- 堆疊頁面長按擷取畫面之後才會出現的桌布預覽彈窗，平常是空的、
+       display:none，見上面 CSS .wallpaper-preview-overlay 的完整說明。 -->
+  <div class="wallpaper-preview-overlay" id="wallpaperPreviewOverlay" aria-hidden="true">
+    <img class="wallpaper-preview-img" id="wallpaperPreviewImg" alt="">
+    <div class="wallpaper-preview-actions">
+      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg">下載</a>
+      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn">關閉</button>
+    </div>
+  </div>
 
   <div class="hover-preview" id="hoverPreview"></div>
 
@@ -10700,6 +10762,30 @@
   let pfPhotoTapCandidatePointerId = null;
   let pfPhotoTapStartX = 0, pfPhotoTapStartY = 0;
   let pfPhotoLastRealClickTime = 0;
+
+  // ---------- 長按堆疊畫面：把目前這個瞬間的構圖擷取成「桌布」 ----------
+  // 跟上面單擊／雙擊共用同一組 pointerdown 起點（同一根手指、同一次
+  // 按下），額外疊加一個「按住不放超過 PF_LONGPRESS_MS 都沒有明顯位移」
+  // 的計時器——純粹是額外觀察，完全不影響單擊/雙擊本來的判斷。放開手指
+  // 這件事本身（pointerup）如果來得比計時器快，代表使用者只是單純點一下
+  // 或雙擊，計時器會在放開的當下被取消，長按邏輯完全不會被觸發，行為
+  // 對單擊／雙擊使用者來說零差異。長按期間刻意不做任何視覺提示（沒有
+  // 進度條、沒有變色），計時器一到直接靜靜擷取、跳出預覽——這正是使用者
+  // 要的「長按時不要顯示任何東西」。
+  const PF_LONGPRESS_MS = 550;
+  let pfLongPressTimer = null;
+  let pfLongPressPointerId = null;
+  let pfLongPressStartX = 0, pfLongPressStartY = 0;
+  let pfLongPressFired = false; // 這次手勢已經被判定成長按、已經觸發過擷取，放開手指時要跳過單擊/雙擊判斷
+  function clearPfLongPressTimer(){
+    if(pfLongPressTimer !== null){ clearTimeout(pfLongPressTimer); pfLongPressTimer = null; }
+  }
+  window.addEventListener('pointermove', (e) => {
+    if(pfLongPressTimer === null || e.pointerId !== pfLongPressPointerId) return;
+    const dx = e.clientX - pfLongPressStartX, dy = e.clientY - pfLongPressStartY;
+    if(Math.hypot(dx, dy) > PF_PHOTO_TAP_MAX_MOVE) clearPfLongPressTimer(); // 明顯位移＝拖曳／甩動，不算長按
+  });
+
   photoFallStage.addEventListener('pointerdown', (e) => {
     // ---------- 修正：「雙擊回首頁，點畫面空白處沒反應，只有點在飄動物件
     // 的圖片上才有效」----------
@@ -10725,8 +10811,34 @@
     pfPhotoTapCandidatePointerId = e.pointerId;
     pfPhotoTapStartX = e.clientX;
     pfPhotoTapStartY = e.clientY;
+
+    // 長按只在真正 'active'（畫面上穩定顯示著這批物件）時才排程；
+    // 'reshuffling' 這個過渡狀態擷取到的會是正在飛出畫面的舊照片，
+    // 沒有意義，直接跳過，等單擊/雙擊那組邏輯自己處理就好。
+    if(photoFallState === 'active'){
+      pfLongPressFired = false;
+      pfLongPressPointerId = e.pointerId;
+      pfLongPressStartX = e.clientX;
+      pfLongPressStartY = e.clientY;
+      clearPfLongPressTimer();
+      pfLongPressTimer = setTimeout(() => {
+        pfLongPressTimer = null;
+        // 計時器這段期間手指放開了（候選被 pointerup／pointercancel 清空）
+        // 或狀態已經變了，就放棄，不要憑空觸發一次擷取。
+        if(pfPhotoTapCandidatePointerId !== pfLongPressPointerId) return;
+        if(photoFallState !== 'active') return;
+        pfLongPressFired = true;
+        pfPhotoTapCandidatePointerId = null; // 避免等一下真的放開時，又被下面的單擊/雙擊邏輯多算一次
+        capturePhotoFallWallpaper();
+      }, PF_LONGPRESS_MS);
+    }
   });
   window.addEventListener('pointerup', (e) => {
+    if(e.pointerId === pfLongPressPointerId) clearPfLongPressTimer();
+    if(pfLongPressFired && e.pointerId === pfLongPressPointerId){
+      pfLongPressFired = false;
+      return; // 長按已經處理過擷取，這次放開不要再被當成一次點擊
+    }
     if(pfPhotoTapCandidatePointerId === null || e.pointerId !== pfPhotoTapCandidatePointerId) return;
     pfPhotoTapCandidatePointerId = null;
     const dx = e.clientX - pfPhotoTapStartX, dy = e.clientY - pfPhotoTapStartY;
@@ -10761,6 +10873,150 @@
   });
   window.addEventListener('pointercancel', (e) => {
     if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; }
+    if(e.pointerId === pfLongPressPointerId){ clearPfLongPressTimer(); pfLongPressFired = false; }
+  });
+
+  // ---------- 長按擷取：把堆疊畫面目前的構圖畫成「桌布」 ----------
+  // 這裡不是呼叫瀏覽器的螢幕截圖 API（網頁本身沒有這個權限），而是把
+  // 目前每個漂浮物件在 Matter 物理世界裡的實際位置（pfBoxCenter）、角度
+  // （body.angle）、跟畫面上呈現用的尺寸，原封不動地用 <canvas> 重畫一次，
+  // 重現使用者長按那一刻眼睛看到的構圖——純白底、只有這些去背 PNG，不含
+  // 任何標題文字、按鈕、時鐘等版面元素（因為根本沒有把它們畫進 canvas）。
+  //
+  // 三種輸出比例（手機直式 9:19.5／平板 3:4／桌機橫式 16:9）沿用全站
+  // 既有的裝置寬度斷點（DESKTOP_BREAKPOINT、640px，見上面宣告處），不再
+  // 另外發明一套判斷。構圖本身的寬高比很少剛好等於輸出比例，所以用
+  // 「等比例縮放＋置中」（跟 CSS object-fit:contain 同樣的精神）讓構圖
+  // 貼齊輸出畫布其中一組邊，另一軸留白，絕對不會裁掉任何一個物件的
+  // 一部分。
+  function pfWallpaperContainFit(boxW, boxH, natW, natH){
+    if(!natW || !natH) return { w: boxW, h: boxH };
+    const boxRatio = boxW / boxH, natRatio = natW / natH;
+    // 跟 CSS object-fit:contain 完全同一個公式：圖片自己的長寬比比容器
+    // 「更寬」就以寬度為準縮，否則以高度為準縮，維持圖片原始比例、
+    // 絕不變形、也絕不超出容器範圍。
+    return natRatio > boxRatio
+      ? { w: boxW, h: boxW / natRatio }
+      : { w: boxH * natRatio, h: boxH };
+  }
+
+  function capturePhotoFallWallpaper(){
+    try{
+      if(!pfItems.length && !pfDvdItem) return; // 畫面上什麼都沒有，沒什麼好擷取的
+
+      // 收集目前每個「已經真的載入完成、看得到」的物件：圖片元素本身
+      // （直接沿用畫面上現有的 <img>，不重新下載）、物理世界目前的中心點
+      // 跟角度、以及顯示用的 box 尺寸（用來換算 object-fit:contain 之後
+      // 圖片實際佔的大小，而不是整個可能留白的 box）。
+      const entries = [];
+      pfItems.forEach(({ body, el, w, h }) => {
+        const img = el.querySelector('img');
+        if(!img || !img.complete || !img.naturalWidth) return; // 還在 pf-pending（尚未載入完成）的跳過，避免擷取到空白
+        const c = pfBoxCenter(body);
+        entries.push({ img, cx: c.x, cy: c.y, angle: body.angle, boxW: w, boxH: h });
+      });
+      if(pfDvdItem && dvdBounceImgEl && dvdBounceImgEl.complete && dvdBounceImgEl.naturalWidth){
+        const c = pfBoxCenter(pfDvdItem.body);
+        entries.push({ img: dvdBounceImgEl, cx: c.x, cy: c.y, angle: pfDvdItem.body.angle, boxW: pfDvdItem.w, boxH: pfDvdItem.h });
+      }
+      if(!entries.length) return;
+
+      // 算出每個物件旋轉後的四個角落座標，彙整成整批構圖的外接邊界——
+      // 這個邊界之後會被整批等比例縮放去貼齊輸出畫布，邊界的極值點自然
+      // 就會落在畫布邊緣上，也就是「PNG 邊緣精準靠齊照片邊界」的由來。
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      entries.forEach(entry => {
+        const fit = pfWallpaperContainFit(entry.boxW, entry.boxH, entry.img.naturalWidth, entry.img.naturalHeight);
+        entry.drawW = fit.w; entry.drawH = fit.h;
+        const hw = fit.w / 2, hh = fit.h / 2;
+        const cos = Math.cos(entry.angle), sin = Math.sin(entry.angle);
+        // (lx,ly) 是物件自己座標系裡的四個角落，套用跟畫面上 CSS
+        // `rotate(angle)` 同一個旋轉方向，再平移回物件中心，換算成世界座標。
+        [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].forEach(([lx, ly]) => {
+          const wx = entry.cx + lx * cos - ly * sin;
+          const wy = entry.cy + lx * sin + ly * cos;
+          if(wx < minX) minX = wx; if(wx > maxX) maxX = wx;
+          if(wy < minY) minY = wy; if(wy > maxY) maxY = wy;
+        });
+      });
+      const contentW = maxX - minX, contentH = maxY - minY;
+      if(!(contentW > 0) || !(contentH > 0)) return;
+
+      // 手機／平板／桌機三組固定輸出解析度，跟全站既有的裝置寬度斷點
+      // （DESKTOP_BREAKPOINT=1100、640）保持一致，不另外發明新的判斷。
+      const vw = window.innerWidth;
+      let canvasW, canvasH;
+      if(vw <= 640){ canvasW = 1080; canvasH = 2340; } // 9:19.5，手機直式
+      else if(vw <= DESKTOP_BREAKPOINT){ canvasW = 1536; canvasH = 2048; } // 3:4，平板
+      else { canvasW = 1920; canvasH = 1080; } // 16:9，桌機橫式
+
+      const canvas = document.createElement('canvas');
+      canvas.width = canvasW;
+      canvas.height = canvasH;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasW, canvasH);
+
+      // 取「寬度縮放比」跟「高度縮放比」兩者較小的那個，保證整批構圖
+      // 完整落在畫布範圍內（短邊那側會剛好貼齊，長邊那側置中留白）。
+      const scale = Math.min(canvasW / contentW, canvasH / contentH);
+      const offsetX = (canvasW - contentW * scale) / 2 - minX * scale;
+      const offsetY = (canvasH - contentH * scale) / 2 - minY * scale;
+
+      entries.forEach(entry => {
+        ctx.save();
+        ctx.translate(entry.cx * scale + offsetX, entry.cy * scale + offsetY);
+        ctx.rotate(entry.angle);
+        ctx.drawImage(
+          entry.img,
+          -entry.drawW * scale / 2, -entry.drawH * scale / 2,
+          entry.drawW * scale, entry.drawH * scale
+        );
+        ctx.restore();
+      });
+
+      // 輸出成 JPEG：因為畫布本身一開始就已經鋪滿白色底色（見上面
+      // ctx.fillRect），JPEG 不支援透明度也完全不受影響，畫面上看到的
+      // 白底不會變成黑底或其他顏色。0.92 的品質在檔案大小與畫質之間
+      // 是常見的折衷值，PNG 去背圖邊緣經過這個流程重新合成到白底之後，
+      // 也不再需要保留 alpha 通道，用 JPEG 檔案可以小上不少。
+      canvas.toBlob((blob) => {
+        if(!blob) return;
+        showWallpaperPreview(URL.createObjectURL(blob));
+      }, 'image/jpeg', 0.92);
+    } catch(err){
+      // 擷取失敗（例如圖片解碼中途被瀏覽器某些安全限制擋下）就靜靜放棄，
+      // 不影響堆疊模式本身任何既有功能，使用者大不了再長按一次。
+      console.warn('擷取堆疊畫面失敗：', err);
+    }
+  }
+
+  const wallpaperPreviewOverlay = document.getElementById('wallpaperPreviewOverlay');
+  const wallpaperPreviewImg = document.getElementById('wallpaperPreviewImg');
+  const wallpaperDownloadBtn = document.getElementById('wallpaperDownloadBtn');
+  const wallpaperCloseBtn = document.getElementById('wallpaperCloseBtn');
+  let wallpaperPreviewObjectUrl = null; // 目前這張預覽圖的 blob URL，關閉時要釋放，避免累積記憶體
+
+  function showWallpaperPreview(objectUrl){
+    if(!wallpaperPreviewOverlay || !wallpaperPreviewImg) { URL.revokeObjectURL(objectUrl); return; }
+    if(wallpaperPreviewObjectUrl) URL.revokeObjectURL(wallpaperPreviewObjectUrl); // 上一張還沒被使用者關掉就長按了下一次，先把上一張釋放掉
+    wallpaperPreviewObjectUrl = objectUrl;
+    wallpaperPreviewImg.src = objectUrl;
+    if(wallpaperDownloadBtn) wallpaperDownloadBtn.href = objectUrl;
+    wallpaperPreviewOverlay.classList.add('active');
+    wallpaperPreviewOverlay.setAttribute('aria-hidden', 'false');
+  }
+  function hideWallpaperPreview(){
+    if(!wallpaperPreviewOverlay) return;
+    wallpaperPreviewOverlay.classList.remove('active');
+    wallpaperPreviewOverlay.setAttribute('aria-hidden', 'true');
+    if(wallpaperPreviewObjectUrl){ URL.revokeObjectURL(wallpaperPreviewObjectUrl); wallpaperPreviewObjectUrl = null; }
+    if(wallpaperPreviewImg) wallpaperPreviewImg.src = '';
+  }
+  if(wallpaperCloseBtn) wallpaperCloseBtn.addEventListener('click', hideWallpaperPreview);
+  // 點背景（不是點在圖片或按鈕上）也能直接關閉，跟其他全站彈窗手感一致。
+  if(wallpaperPreviewOverlay) wallpaperPreviewOverlay.addEventListener('click', (e) => {
+    if(e.target === wallpaperPreviewOverlay) hideWallpaperPreview();
   });
 
   // ---------- 手機／觸控：堆疊頁面裡抓著的漂浮物件，補上第二根手指可以旋轉它 ----------
