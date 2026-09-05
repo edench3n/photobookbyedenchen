@@ -11075,6 +11075,62 @@
     return { u0, u1, v0, v1 };
   }
 
+  // ---------- 桌布擷取專用：遮罩還沒建好時，當場掃一次像素，不要留白 ----------
+  // 上面 pfMaskVisibleUVBounds() 讀的是「撞牆判斷」那套遮罩（pfAlphaMaskCache）——
+  // 那套遮罩是背景暖機、非同步慢慢建好的（見 predecodeDvdEImage()／
+  // requestAlphaMask() 的完整說明），使用者長按的當下，不保證每一張正好
+  // 落在構圖最外緣、決定外接框邊界的那張圖，剛好已經建好遮罩。只要那一張
+  // 剛好還沒建好、退回整個外框矩形，這個方向的邊界就會多出一截透明留白——
+  // 這正是「其餘物件都貼齊了，只有剛好卡在最外緣的那個沒貼齊」的成因。
+  // 修法：擷取這個當下不等背景暖機，直接對這張圖的 <img> 元素跑一次同步
+  // 掃描（畫到一張夠精細但不會太大的離線 canvas 上、讀出 alpha 找出真正
+  // 有畫到東西的像素範圍），跟 pfAlphaMaskCache 用的是同一套邏輯，只是
+  // 「現在就要答案」而不是排隊等背景閒置時間。用一個獨立的小快取
+  // （pfWallpaperUvCache，用圖片網址當 key）記住結果，同一張圖之後不管
+  // 在哪一次擷取裡再被用到（甚至遮罩之後才姍姍來遲建好），都不用重新掃。
+  const pfWallpaperUvCache = new Map();
+  const PF_WALLPAPER_TRIM_CAP_DIM = 480; // 夠精細（每邊誤差 <1/480 張圖尺寸），同時控制單次擷取的運算量
+  function pfLiveTrimUVBounds(img){
+    const src = img.currentSrc || img.src;
+    if(src && pfWallpaperUvCache.has(src)) return pfWallpaperUvCache.get(src);
+    let result = null;
+    try{
+      const natW = img.naturalWidth, natH = img.naturalHeight;
+      if(natW && natH){
+        const scale = Math.min(1, PF_WALLPAPER_TRIM_CAP_DIM / Math.max(natW, natH));
+        const w = Math.max(1, Math.round(natW * scale)), h = Math.max(1, Math.round(natH * scale));
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const cx = cv.getContext('2d', { willReadFrequently: true });
+        cx.drawImage(img, 0, 0, w, h);
+        const data = cx.getImageData(0, 0, w, h).data; // tainted canvas 會在這裡丟出例外，交給下面 catch 優雅退回
+        let minX = w, minY = h, maxX = -1, maxY = -1;
+        for(let y = 0; y < h; y++){
+          const row = y * w;
+          for(let x = 0; x < w; x++){
+            if(data[(row + x) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD){
+              if(x < minX) minX = x; if(x > maxX) maxX = x;
+              if(y < minY) minY = y; if(y > maxY) maxY = y;
+            }
+          }
+        }
+        if(maxX >= minX && maxY >= minY){
+          result = { u0: minX / w, u1: (maxX + 1) / w, v0: minY / h, v1: (maxY + 1) / h };
+        }
+      }
+    }catch(err){
+      result = null; // tainted canvas 或其他讀取失敗，優雅退回整個外框矩形，不影響擷取功能本身
+    }
+    if(src) pfWallpaperUvCache.set(src, result); // 失敗也快取 null，避免同一張壞圖每次擷取都重新嘗試一次
+    return result;
+  }
+
+  // 統一入口：先試已經建好的撞牆遮罩（幾乎零成本），沒有的話才當場掃描
+  // （見上面完整說明），兩者都拿不到才回傳 null，讓呼叫端退回整個外框矩形。
+  function pfResolveVisibleUVBounds(entry){
+    return pfMaskVisibleUVBounds(entry.maskEntry) || pfLiveTrimUVBounds(entry.img);
+  }
+
   function capturePhotoFallWallpaper(){
     try{
       if(!pfItems.length && !pfDvdItem) return; // 畫面上什麼都沒有，沒什麼好擷取的
@@ -11131,7 +11187,7 @@
         // 遮罩時，優雅退回整個外框矩形（跟其餘所有「遮罩還沒就緒就退回
         // 矩形」的地方用同一套退場邏輯，不影響功能，只是外接框可能因此
         // 比較寬鬆）。
-        const uv = pfMaskVisibleUVBounds(entry.maskEntry);
+        const uv = pfResolveVisibleUVBounds(entry);
         const lx0 = uv ? (uv.u0 - 0.5) * fit.w : -hw;
         const lx1 = uv ? (uv.u1 - 0.5) * fit.w : hw;
         const ly0 = uv ? (uv.v0 - 0.5) * fit.h : -hh;
