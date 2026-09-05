@@ -6988,10 +6988,38 @@
   // 呼叫這支的當下如果遮罩還沒準備好，撞牆判斷會暫時退回「矩形 vs 矩形」
   // 的舊行為（見下面 getCachedAlphaMask() 的說明），不會等待、也不會報錯，
   // 等遮罩真的建立好之後，下一次撞牆判斷自然就會開始用上精確版本。
+  // ---------- 擴大偵錯新增：遮罩「真正就緒」的通知機制 ----------
+  // 給下面「掉落照片撞擊時隔著一圈透明屏障」的修法用：原本 requestAlphaMask()
+  // 只負責觸發建立＋寫進快取，呼叫端要嘛不管（讓下一次撞牆判斷自然撿到），
+  // 要嘛只能自己重複輪詢 getCachedAlphaMask() 猜遮罩好了沒。這裡補一個
+  // 輕量的訂閱機制：呼叫 onAlphaMaskReady(src, cb) 時，如果這張圖的遮罩
+  // 早就在快取裡（不管是真的建好的 {mask,w,h}，還是確定沒有遮罩可用的
+  // null），直接同步呼叫 cb；還沒好，就先把 cb 記進等待名單，等
+  // requestAlphaMask() 內部真正 finish() 的那一刻，一併通知所有正在等
+  // 這張圖的呼叫端。沒有任何人訂閱時（Map 裡沒有這個 key），完全不影響
+  // 原本 requestAlphaMask()／getCachedAlphaMask() 的行為與效能。
+  const pfAlphaMaskWaiters = new Map();
+  function onAlphaMaskReady(src, callback){
+    if(!src){ callback(null); return; }
+    if(pfAlphaMaskCache.has(src)){ callback(pfAlphaMaskCache.get(src)); return; }
+    const list = pfAlphaMaskWaiters.get(src);
+    if(list) list.push(callback);
+    else pfAlphaMaskWaiters.set(src, [callback]);
+  }
   function requestAlphaMask(src, imgEl){
     if(!src || !imgEl || pfAlphaMaskCache.has(src) || pfAlphaMaskPending.has(src)) return;
     pfAlphaMaskPending.add(src);
-    const finish = (result) => { pfAlphaMaskCache.set(src, result); pfAlphaMaskPending.delete(src); };
+    const finish = (result) => {
+      pfAlphaMaskCache.set(src, result);
+      pfAlphaMaskPending.delete(src);
+      // 通知所有正在等這張圖遮罩就緒的訂閱者（見上面 onAlphaMaskReady()
+      // 的完整說明），通知完就把名單清掉，每個 callback 只會被叫到一次。
+      const waiters = pfAlphaMaskWaiters.get(src);
+      if(waiters){
+        pfAlphaMaskWaiters.delete(src);
+        waiters.forEach(cb => cb(result));
+      }
+    };
 
     // ---------- 修正：「頭幾秒還是會lag」----------
     // buildAlphaMaskFromSource() 內部要畫一張最大到 800px 見方的 canvas、
@@ -9607,7 +9635,37 @@
   // 「現在」是不是手機版面，不用在頁面一載入就先算好、之後也不會因為
   // 轉橫向、拉伸視窗寬度而跟著變（掉落張數只在雙擊、真正進場那一刻決定
   // 一次，中途改變視窗寬度不會讓「已經掉下來的照片數量」跟著增減）。
-  function photoFallCount(){ return isDetailMobile() ? 8 : 15; }
+  // ---------- 擴大偵錯修正：「堆疊頁面偶爾會出現重複的圖片」的真正根源 ----------
+  // 掉落張數原本是寫死的固定值（8／15），跟「漂浮物件圖片庫」
+  // （dvdEImages，掉落畫面實際取材的來源）目前真正有幾張完全無關。只要
+  // 圖庫張數（還要再扣掉飄動的 e 本身正在顯示、被排除在候選池外的那一張，
+  // 見 pickInitialFallBatch()／pickReshuffleBatch() 內的 excluded 邏輯）
+  // 低於這個固定值，不管下面選片的演算法再怎麼優化「盡量不重複」，數學上
+  // 就是湊不出這麼多張彼此都不同的圖，一定得有幾張重複——這不是選片邏輯
+  // 的錯，是「要求的張數」本身超過圖庫能提供的張數上限。圖庫張數如果剛好
+  // 落在 8 或 15 附近（例如 14、15、16 張），會讓這個「必然重複」的情況
+  // 特別容易被踩到，而且换批時 pickReshuffleBatch() 還要再排除「上一批
+  // 用過的」，候選池又會更緊繃——使用者體感就是「有時候會重複、有時候
+  // 不會」，正好對應圖庫張數在這個邊界上下、外加每次排除的張數略有出入
+  // 所造成的機率波動，不是隨機的巧合。
+  // 修法：掉落張數改成「理想值」跟「圖庫目前實際可用張數」兩者取小——
+  // 圖庫不夠大時，寧可這一批掉落的張數少一點，也不要為了硬湊滿張數而
+  // 塞進使用者一眼就能看出來的重複圖片。dvdEImages 還沒開始建池
+  // （.length === 0，例如背景抓取圖片庫還沒完成、或這個網站根本沒設定
+  // 這個資料夾）時，先維持原本的理想值，交給 pickInitialFallBatch() 自己
+  // 「圖庫是空的就退回完整陣列」的保險機制去處理，不受這裡影響；扣掉
+  // 保留給飄動的 e 用的那一張之後，最少也維持顯示 1 張，不會讓整個功能
+  // 因為圖庫太小就完全掉不出任何東西。
+  function photoFallCount(){
+    const desired = isDetailMobile() ? 8 : 15;
+    const libraryCount = dvdEImages.length;
+    if(!libraryCount) return desired;
+    // 保留 1 張給飄動的 e 本身正在顯示的那張（pickInitialFallBatch()／
+    // pickReshuffleBatch() 都會把它從候選池排除），圖庫只有 1 張時沒得
+    // 再扣，直接整個當候選池用。
+    const usable = libraryCount > 1 ? libraryCount - 1 : libraryCount;
+    return Math.max(1, Math.min(desired, usable));
+  }
   const PHOTO_FALL_SHRINK_MS = 420;      // 縮圖＋編號收起（縮小至消失）的時長
   const PHOTO_FALL_IDX_FADE_MS = 260;    // 編號淡出比縮圖快一點，兩者收起節奏才有層次，不是死板同步
   const PHOTO_FALL_CLOCK_FADE_MS = 200;  // 下方時鐘「快速」淡出，明顯比縮圖收起更短促
@@ -9618,6 +9676,16 @@
   const PHOTO_FALL_EXIT_GRAVITY_SCALE = 1.9; // 收起時（地板拿掉）在 PHOTO_FALL_GRAVITY 之上再額外加重的重力倍率，讓「掉出畫面」這段明顯比平常堆疊時更快、更乾脆，維持跟基礎重力之間原本的相對比例不變
   const PHOTO_FALL_EXIT_MAX_WAIT_MS = 1700;  // 保底：不管有沒有偵測到全部掉出畫面，最多等這麼久就強制收尾，避免極端情況卡住
   const PHOTO_FALL_LOAD_MAX_WAIT_MS = 650; // 單張照片還沒暖機好時，最多等圖片載入這麼久，逾時就先讓它跟其他張一起開始掉落（見下面 spawnFallingPhotos() 裡的說明），避免單一張慢的照片拖累、跟其他張脫節，看起來像「停頓一下才掉下去」
+  // 擴大偵錯新增：單張照片的像素遮罩（撞牆判斷要用來貼合實際輪廓，見
+  // buildFallItemBody() 的完整說明）還沒就緒時，最多願意多等這麼久才
+  // 死心、改用退回的外框矩形先摔下去（見下面 spawnFallingPhotos() 裡
+  // 「短暫等遮罩就緒」那段的完整說明）。數字刻意抓得比 PHOTO_FALL_LOAD_MAX_WAIT_MS
+  // 短很多：遮罩取樣解析度本身就壓得很小（PF_ALPHA_MASK_MAX_DIM，見該處
+  // 說明），只要中繼畫布已經畫好、真正開始跑分批迴圈，通常一兩個
+  // requestIdleCallback（一輪大約 10~20ms 內）就能跑完，不需要跟「等一張
+  // 圖片真的從網路下載完成」用同一個量級的容忍時間；抓太長反而會讓少數
+  // 真的遲遲排不到隊的照片，拖慢它「看起來已經在畫面上」的時間點。
+  const PHOTO_FALL_MASK_MAX_WAIT_MS = 220;
 
   let matterLoadPromise = null;
   function loadMatterJS(){
@@ -9841,7 +9909,19 @@
       const url = entry.src;
       const im = new Image();
       im.src = url;
-      const store = () => cache.set(url, im);
+      // ---------- 擴大偵錯新增：暖機的同時，順便提前登記這張圖的像素遮罩 ----------
+      // 原本這張圖的撞牆用遮罩（pfAlphaMaskCache）完全不靠這裡觸發，而是
+      // 被動等整個圖庫背景 staggered 預載（predecodeDvdEImage()）排隊排到
+      // 它才會開始建立——這一批（fallCount 張）只是整個圖庫裡的一小部分，
+      // 完全有可能還沒被那條背景佇列排到。decode() 成功代表 naturalWidth/
+      // naturalHeight 已經有正確值，這裡剛好是呼叫 requestAlphaMask() 最早、
+      // 也最保險的時間點——比等真正 spawnFallingPhotos() 建立物理 body 那
+      // 一刻才臨時觸發（如果沒有這一步，遮罩甚至可能連「登記」都還沒
+      // 登記過）足足提早了一整段「首頁縮圖收起＋Matter.js 載入」的時間，
+      // 大幅提高等到真的要摔下去那一刻遮罩已經算好的機率，是下面
+      // spawnFallingPhotos() 裡新增的「短暫等遮罩就緒」修法能夠生效、
+      // 又不需要真的等太久的關鍵前置動作。
+      const store = () => { cache.set(url, im); requestAlphaMask(url, im); };
       if(im.decode){
         tasks.push(im.decode().then(store, () => {})); // 失敗不快取，見上方說明
       } else {
@@ -10717,7 +10797,40 @@
           img.draggable = false;
           el.appendChild(img);
           photoFallStage.appendChild(el);
-          dropItem(el, itemW, itemH, startX, startY, photo); // 已經暖好：跟原本行為一致，立刻掉落
+          // ---------- 擴大偵錯修正：「有些 PNG 撞擊時，旁邊隔著一圈看不見
+          // 的透明屏障」的根本成因 ----------
+          // 原本這裡不管這張圖的像素遮罩（pfAlphaMaskCache，buildFallItemBody()
+          // 用來拆出貼合真實輪廓碰撞體的關鍵資料，完整說明見該函式上方）
+          // 準不準備好，一律立刻呼叫 dropItem()——dropItem() 內部是「當下」
+          // 讀一次 getCachedAlphaMask()，遮罩這一刻還沒好，就會走
+          // buildFallItemBody() 內建的優雅退回，摔下去一顆「整張外框矩形」
+          // 的碰撞體。這顆 body 一旦建立，形狀就固定住了：Matter.js 沒有
+          // 「稍後遮罩終於準備好，自動把已經在世界裡的 body 換成貼合形狀
+          // 的複合物體」這種機制，這張照片接下來全程掉落／堆疊期間，撞到
+          // 的永遠是它的外框矩形而不是圖案本身——肉眼看起來就是「明明還
+          // 隔著一段透明留白，卻已經被隔空擋住」，剛好符合使用者回報「有
+          // 些 png 撞擊時不是用實際邊界」的描述。而且這個「遮罩來不來得及」
+          // 完全跟哪幾張圖被排進這一批、圖庫排隊到哪、裝置效能快慢有關，
+          // 沒有固定規律，正是「有時候」才會發生的原因，跟「掉落圖片重複」
+          // 那個 bug 只是剛好都跟「這一批到底輪到哪幾張、準備好了沒」有關，
+          // 彼此成因其實完全獨立，不是同一個問題的兩種症狀。
+          // 修法：改成呼叫 onAlphaMaskReady() 訂閱這張圖遮罩「真正就緒」的
+          // 那一刻——已經好了（不管是真的建好，還是確定沒有遮罩可用的
+          // null）會同步觸發，維持原本「已經暖好就立刻掉落」的零延遲手感，
+          // 完全不會多等一拍；上面 warmFallBatch() 已經在暖機的同一刻順便
+          // 提前登記過遮罩建立（見該處說明），多數情況這裡都會直接命中
+          // 這條「早就好了」的同步路徑。極少數還沒排到隊的情況，短暫等最多
+          // PHOTO_FALL_MASK_MAX_WAIT_MS——遮罩取樣解析度本身就很小，這段
+          // 時間通常綽綽有餘；真的等不到，保底 timer 也會先讓它跟其他張一起
+          // 掉落，行為退回修法之前的樣子，不會讓掉落節奏被拖累或卡住。
+          let pfMaskWaitDone = false;
+          const pfDropAfterMaskOrTimeout = () => {
+            if(pfMaskWaitDone) return;
+            pfMaskWaitDone = true;
+            dropItem(el, itemW, itemH, startX, startY, photo);
+          };
+          onAlphaMaskReady(srcUrl, pfDropAfterMaskOrTimeout);
+          setTimeout(pfDropAfterMaskOrTimeout, PHOTO_FALL_MASK_MAX_WAIT_MS);
         } else {
           // 沒趕上暖機時間的少數照片：這裡不再像原本那樣先無條件摔一顆
           // body 下去、只靠 <img> 自己的 opacity 淡入來「補」畫面——那樣
@@ -10760,7 +10873,25 @@
           };
           const markLoadedAndDrop = () => {
             img.classList.add('loaded');
-            startFalling();
+            // 這張圖沒趕上 warmFallBatch() 的暖機時間，代表遮罩多半也還
+            // 沒被登記過（warmFallBatch() 是唯一提前觸發它的地方，見該處
+            // 說明）。圖片這時才剛真的解碼完成，naturalWidth/Height 已經
+            // 有效，是呼叫 requestAlphaMask() 最早可行的時間點；跟上面
+            // 「已經暖好」分支共用同一套「短暫等遮罩就緒」修法（完整成因
+            // 說明見那裡），這裡不重複貼一次。這張照片本來就已經是走比較
+            // 慢的路徑，這裡再等的 PHOTO_FALL_MASK_MAX_WAIT_MS 是疊加在
+            // 圖片下載時間之上，但仍然遠低於外層 forceDropTimer
+            // （PHOTO_FALL_LOAD_MAX_WAIT_MS）留的容忍空間，不會讓這張照片
+            // 因此比原本更晚才「看起來已經在畫面上」。
+            requestAlphaMask(srcUrl, img);
+            let pfMaskWaitDone2 = false;
+            const pfDropAfterMaskOrTimeout2 = () => {
+              if(pfMaskWaitDone2) return;
+              pfMaskWaitDone2 = true;
+              startFalling();
+            };
+            onAlphaMaskReady(srcUrl, pfDropAfterMaskOrTimeout2);
+            setTimeout(pfDropAfterMaskOrTimeout2, PHOTO_FALL_MASK_MAX_WAIT_MS);
           };
           img.onload = () => {
             if(img.decode){ img.decode().then(markLoadedAndDrop).catch(markLoadedAndDrop); }
@@ -10872,22 +11003,25 @@
   let pfLongPressCandidatePointerId = null;
   let pfLongPressStartX = 0, pfLongPressStartY = 0;
   let pfLongPressStartTime = 0;
-  // ---------- 新增：桌機（滑鼠）按住不放，不等放開就直接觸發 ----------
-  // 上面 pointerup 那組判斷法（比對「放開那一刻」跟「按下那一刻」的真實
-  // 時間差）是刻意為了修正手機版剛進站、物理運算最吃重時 setTimeout 會被
-  // 延後到 pointerup 之後才觸發的問題（見上方完整說明）——但這個修法的
-  // 副作用是：不管在哪個裝置上，長按這件事永遠要等「放開」那一刻才會
-  // 判斷、才會真的觸發擷取，桌機使用者會覺得「按著不放沒反應，鬆手瞬間
-  // 才跳出來」，跟直覺的「長按=按住當下就生效」不一樣。
-  // 桌機用滑鼠操作，不會遇到手機那種「第一批照片同時落下、主執行緒被
-  // 物理運算塞爆」的情境（拖曳/長按這類互動本來就是等使用者輸入，不會
-  // 跟畫面剛進場那幾秒物理批次計算撞在一起到需要靠這個修法解決的程度），
-  // 所以額外幫滑鼠（pointerType === 'mouse'）加一個真正的 setTimeout：
-  // 按下的當下就排定，時間一到、只要滑鼠還按著原地沒放開、也還沒被判定
-  // 成拖曳，就直接觸發擷取，不用等 pointerup。放開或位移過大時另外清掉
-  // 這個計時器（見下面 pointerup／pointercancel），避免已經放開了計時器
-  // 還在背景多觸發一次。觸控裝置不受影響，繼續沿用原本「放開時才判斷」
-  // 的寫法。
+  // ---------- 不等放開就直接觸發（桌機／手機／平板一致） ----------
+  // 原本只有滑鼠（pointerType === 'mouse'）才會排這個 setTimeout，觸控
+  // 裝置一律沿用「放開那一刻才判斷」的寫法——理由是手機剛進站、第一批
+  // 8~15 張照片同時落下互相碰撞找位置的那幾秒，主執行緒被物理運算塞爆，
+  // setTimeout 常常被延後到使用者已經放開手指之後才觸發，長按因此看起來
+  // 「完全沒反應」（完整成因見上面 PF_LONGPRESS_MS 那段說明）。但這個
+  // 保守寫法的代價，是手機／平板使用者永遠要等鬆手那一刻才會跳出擷取
+  // 畫面，跟桌機「按住當下就生效」的直覺不一致，使用者體感上覺得「按著
+  // 不放沒反應」。
+  // 改成不分裝置、一律排這個 setTimeout：按下的當下就排定，時間一到、
+  // 只要手指/滑鼠還按著原地沒放開、也還沒被判定成拖曳，就直接觸發擷取，
+  // 不用等放開。原本擔心的「手機剛進站物理最吃重時計時器被延後」這個
+  // 情境並沒有消失，但下面 pointerup 那組「比對放開那一刻跟按下那一刻的
+  // 真實時間差」的判斷邏輯完全沒拿掉、繼續掛著當保底：計時器準時觸發就
+  // 直接在按住當下跳出來（新行為）；萬一真的卡到延後、使用者已經放開
+  // 手指，pointerup 那組判斷還是會抓到「其實已經按滿 550ms」而照樣觸發
+  // （退回原本行為），兩者互不衝突——見下面計時器 callback 內
+  // `pfLongPressCandidatePointerId = null` 那行，一旦其中一邊先觸發過，
+  // 就會清掉候選 id，讓另一邊的判斷自然失效，不會重複擷取兩次。
   let pfLongPressCurrentX = 0, pfLongPressCurrentY = 0;
   let pfLongPressTimer = null;
   window.addEventListener('pointermove', (e) => {
@@ -10942,24 +11076,24 @@
       pfLongPressCurrentY = e.clientY;
       pfLongPressStartTime = Date.now();
 
-      // 桌機滑鼠：不等放開，按住滿 PF_LONGPRESS_MS 且還在原地就直接觸發
-      // （見上方「新增：桌機（滑鼠）按住不放，不等放開就直接觸發」說明）。
-      if(e.pointerType === 'mouse'){
-        if(pfLongPressTimer !== null) clearTimeout(pfLongPressTimer);
-        const firedPointerId = e.pointerId;
-        pfLongPressTimer = setTimeout(() => {
-          pfLongPressTimer = null;
-          if(pfLongPressCandidatePointerId !== firedPointerId) return; // 已經放開或被取消，不重複觸發
-          const ldx = pfLongPressCurrentX - pfLongPressStartX, ldy = pfLongPressCurrentY - pfLongPressStartY;
-          const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE; // 明顯位移＝拖曳，不算長按
-          const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
-          if(isStillish && noOverlay && photoFallState === 'active'){
-            pfLongPressCandidatePointerId = null; // 標記已處理，放開時 pointerup 那組判斷不再重複觸發一次
-            pfPhotoTapCandidatePointerId = null; // 避免放開時又被算成一次單擊
-            capturePhotoFallWallpaper();
-          }
-        }, PF_LONGPRESS_MS);
-      }
+      // 不等放開，按住滿 PF_LONGPRESS_MS 且還在原地就直接觸發——不分
+      // 裝置／pointerType，桌機／手機／平板行為一致（見上方「不等放開就
+      // 直接觸發」說明；下面 pointerup 那組真實時間差判斷繼續保留當保底，
+      // 不會因為這裡不分裝置而被拿掉）。
+      if(pfLongPressTimer !== null) clearTimeout(pfLongPressTimer);
+      const firedPointerId = e.pointerId;
+      pfLongPressTimer = setTimeout(() => {
+        pfLongPressTimer = null;
+        if(pfLongPressCandidatePointerId !== firedPointerId) return; // 已經放開或被取消，不重複觸發
+        const ldx = pfLongPressCurrentX - pfLongPressStartX, ldy = pfLongPressCurrentY - pfLongPressStartY;
+        const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE; // 明顯位移＝拖曳，不算長按
+        const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
+        if(isStillish && noOverlay && photoFallState === 'active'){
+          pfLongPressCandidatePointerId = null; // 標記已處理，放開時 pointerup 那組判斷不再重複觸發一次
+          pfPhotoTapCandidatePointerId = null; // 避免放開時又被算成一次單擊
+          capturePhotoFallWallpaper();
+        }
+      }, PF_LONGPRESS_MS);
     }
   });
   window.addEventListener('pointerup', (e) => {
