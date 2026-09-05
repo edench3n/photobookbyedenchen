@@ -9744,17 +9744,27 @@
   const PHOTO_FALL_GRAVITY = 1.8; // 進場掉落＋堆疊期間的基礎重力，微調自 1.2
   const PHOTO_FALL_EXIT_GRAVITY_SCALE = 1.9; // 收起時（地板拿掉）在 PHOTO_FALL_GRAVITY 之上再額外加重的重力倍率，讓「掉出畫面」這段明顯比平常堆疊時更快、更乾脆，維持跟基礎重力之間原本的相對比例不變
   const PHOTO_FALL_EXIT_MAX_WAIT_MS = 1700;  // 保底：不管有沒有偵測到全部掉出畫面，最多等這麼久就強制收尾，避免極端情況卡住
-  const PHOTO_FALL_LOAD_MAX_WAIT_MS = 650; // 單張照片還沒暖機好時，最多等圖片載入這麼久，逾時就先讓它跟其他張一起開始掉落（見下面 spawnFallingPhotos() 裡的說明），避免單一張慢的照片拖累、跟其他張脫節，看起來像「停頓一下才掉下去」
+  // PHOTO_FALL_LOAD_MAX_WAIT_MS：原本用來強迫「圖片還沒載入完成也先掉下去」
+  // 的保底逾時，已經因為「永遠不要用外框矩形頂替」這項要求被拿掉（見下面
+  // spawnFallingPhotos() 裡的完整說明）——強迫提早掉落，必定會摔下去一顆
+  // 還沒套用遮罩的矩形，這正是要避免的狀況。改成老實等圖片真的載入、遮罩
+  // 真的建好才掉落，這個常數不再被使用，保留只是留個紀錄。
   // 擴大偵錯新增：單張照片的像素遮罩（撞牆判斷要用來貼合實際輪廓，見
   // buildFallItemBody() 的完整說明）還沒就緒時，最多願意多等這麼久才
   // 死心、改用退回的外框矩形先摔下去（見下面 spawnFallingPhotos() 裡
-  // 「短暫等遮罩就緒」那段的完整說明）。數字刻意抓得比 PHOTO_FALL_LOAD_MAX_WAIT_MS
-  // 短很多：遮罩取樣解析度本身就壓得很小（PF_ALPHA_MASK_MAX_DIM，見該處
-  // 說明），只要中繼畫布已經畫好、真正開始跑分批迴圈，通常一兩個
-  // requestIdleCallback（一輪大約 10~20ms 內）就能跑完，不需要跟「等一張
-  // 圖片真的從網路下載完成」用同一個量級的容忍時間；抓太長反而會讓少數
-  // 真的遲遲排不到隊的照片，拖慢它「看起來已經在畫面上」的時間點。
-  const PHOTO_FALL_MASK_MAX_WAIT_MS = 220;
+  // 「短暫等遮罩就緒」那段的完整說明）。
+  // ---------- 修正：「只想讓還沒跑完的那幾張多等，跑完的正常掉」 ----------
+  // requestAlphaMask() 內部不管遮罩真的建好、讀取失敗（tainted canvas）
+  // 還是連 fetch 備援都失敗，最終一定會呼叫到 finish()（見該函式），也就是
+  // onAlphaMaskReady() 保證一定會被觸發、不會真的無限卡住——所以掉落前
+  // 不需要再另外賭一個「猜多久才夠」的等待時間：已經準備好的照片（多數
+  // 情況）維持同步、零延遲掉落；真正還在跑的那幾張，不管實際跑多久，都
+  // 老實等到真正跑完那一刻才掉下來，不會像原本那樣猜錯時間就提早放棄、
+  // 退回矩形撞擊。這裡只留一個非常寬鬆的
+  // PHOTO_FALL_MASK_ULTIMATE_TIMEOUT_MS 當「萬一真的卡死」（例如網路完全
+  // 中斷、fetch 備援也吊在那邊永遠不 resolve）的最後防線，數字刻意抓得
+  // 很長，正常情況下這個時限完全不會被觸發到。
+  const PHOTO_FALL_MASK_ULTIMATE_TIMEOUT_MS = 8000;
 
   let matterLoadPromise = null;
   function loadMatterJS(){
@@ -10889,18 +10899,37 @@
           // null）會同步觸發，維持原本「已經暖好就立刻掉落」的零延遲手感，
           // 完全不會多等一拍；上面 warmFallBatch() 已經在暖機的同一刻順便
           // 提前登記過遮罩建立（見該處說明），多數情況這裡都會直接命中
-          // 這條「早就好了」的同步路徑。極少數還沒排到隊的情況，短暫等最多
-          // PHOTO_FALL_MASK_MAX_WAIT_MS——遮罩取樣解析度本身就很小，這段
-          // 時間通常綽綽有餘；真的等不到，保底 timer 也會先讓它跟其他張一起
-          // 掉落，行為退回修法之前的樣子，不會讓掉落節奏被拖累或卡住。
+          // 這條「早就好了」的同步路徑。
+          // ---------- 修正：「永遠不要用外框矩形頂替」 ----------
+          // 原本不管 onAlphaMaskReady() 通知回來的結果是「真的建好遮罩」還是
+          // 「確定沒有遮罩可用」（null），一律照樣呼叫 dropItem()——後者這種
+          // 情況 dropItem() 內部會读到 getCachedAlphaMask() 是 null，走
+          // buildFallItemBody() 內建的優雅退回，一樣摔下去一顆外框矩形，
+          // 只是不是因為「等太久」，是因為遮罩本身確定建不出來（例如圖片
+          // 跨網域又沒有正確 CORS 標頭、canvas 被判定 tainted，讀取遮罩用的
+          // fetch 備援也失敗）。使用者要求任何情況都不要用矩形頂替，所以
+          // 改成看 onAlphaMaskReady() 回傳的結果：真的拿到遮罩才呼叫
+          // dropItem() 正常掉落；確定沒有遮罩可用，就直接把這格 DOM 元素
+          // 整個移除，這一批這個位置少一張，不建立任何物理 body——跟下面
+          // 「圖片重試後仍載入失敗」用的是同一套「乾脆跳過，不將就頂替」
+          // 的處理方式。
           let pfMaskWaitDone = false;
-          const pfDropAfterMaskOrTimeout = () => {
+          const pfDropOnMaskResult = (maskResult) => {
             if(pfMaskWaitDone) return;
             pfMaskWaitDone = true;
-            dropItem(el, itemW, itemH, startX, startY, photo);
+            if(maskResult){
+              dropItem(el, itemW, itemH, startX, startY, photo);
+            } else if(el.parentNode){
+              el.parentNode.removeChild(el);
+            }
           };
-          onAlphaMaskReady(srcUrl, pfDropAfterMaskOrTimeout);
-          setTimeout(pfDropAfterMaskOrTimeout, PHOTO_FALL_MASK_MAX_WAIT_MS);
+          onAlphaMaskReady(srcUrl, pfDropOnMaskResult);
+          // 極端保底：理論上 requestAlphaMask() 內部不管成功或失敗最終都
+          // 一定會呼叫 finish()、觸發上面的訂閱（見該函式完整說明），這個
+          // timeout 正常情況永遠不會被用到；只防萬一真的卡死（例如網路
+          // 徹底中斷、fetch 備援也吊在那邊永遠不 resolve），到時一樣視同
+          // 「沒有遮罩可用」直接跳過，不會退回矩形頂替。
+          setTimeout(() => pfDropOnMaskResult(null), PHOTO_FALL_MASK_ULTIMATE_TIMEOUT_MS);
         } else {
           // 沒趕上暖機時間的少數照片：這裡不再像原本那樣先無條件摔一顆
           // body 下去、只靠 <img> 自己的 opacity 淡入來「補」畫面——那樣
@@ -10909,59 +10938,62 @@
           // 改成：先把整格用 pf-pending 藏起來（見上面 CSS 的說明），完全
           // 不建立物理 body、也不加進 pfItems——這一刻它在畫面上「根本
           // 不存在」，不是「存在但空白」。等 onload → decode 真的成功、
-          // 確定像素已經準備好，才在 markLoadedAndDrop() 裡把「拿掉隱藏」
-          // 跟「呼叫 dropItem() 開始掉落」這兩件事同一刻一起做，使用者
-          // 看到的就是這張照片「一準備好，立刻從畫面外開始掉落」，跟其他
-          // 提早暖好的照片視覺語言一致，只是掉落的時間點稍微晚一點點。
+          // 遮罩也真的建好，才在 markLoadedAndDrop() 裡把「拿掉隱藏」跟
+          // 「呼叫 dropItem() 開始掉落」這兩件事同一刻一起做，使用者看到
+          // 的就是這張照片「一準備好，立刻從畫面外開始掉落」，跟其他提早
+          // 暖好的照片視覺語言一致，只是掉落的時間點稍微晚一點點。
           img = document.createElement('img');
           img.alt = '';
           img.draggable = false;
           el.appendChild(img);
           el.classList.add('pf-pending');
-          // 修正「掉落的照片有點不順暢，有時候會停住一下才掉下去」：極少數
-          // 照片可能因為短時間內對圖片服務發出大量並發請求，被暫時性延遲
-          // （常見成因見上面 warmFallBatch() 的說明），遲遲沒有觸發 onload。
-          // 原本這裡完全沒有時間上限，這張照片就會一路停在「畫面上還看不到」
-          // 的 pf-pending 狀態，等到它終於載入完成才突然掉下來——這時其他
-          // 張早就落地、甚至已經停住，看起來就是「這一張特別頓了一下才掉
-          // 下來」，整批的掉落節奏因此不順暢。
-          // 拆成兩件各自獨立的事：「開始掉落」（dropItem，決定物理／時間點）
-          // 跟「顯示真實圖片」（加上 .loaded，決定畫面內容）不再綁死在同一刻
-          // 才能發生——加一個保底逾時，不管圖片載入好了沒，最多等
-          // PHOTO_FALL_LOAD_MAX_WAIT_MS 就先讓它跟其他張一起開始掉落（逾時
-          // 當下圖片內容可能還是空的，但一落地／掉落中，只要 onload／decode
-          // 真的完成，revealImage() 還是會自然淡入，不影響最終一定會顯示
-          // 真實照片這件事，只是不再讓單一一張慢的照片拖累、跟其他張脫節）。
+          // ---------- 修正：「永遠不要用外框矩形頂替」 ----------
+          // 原本這裡另外設了一個 PHOTO_FALL_LOAD_MAX_WAIT_MS（650ms）的
+          // forceDropTimer：不管圖片有沒有真的載入完成，時間一到就先讓
+          // 它跟其他張一起掉下去——但圖片還沒載入完成，代表連
+          // requestAlphaMask() 都還沒機會被呼叫（那要等 onload／decode
+          // 完成才有效的 naturalWidth/Height 可用，見下面 markLoadedAndDrop()
+          // 說明），這種情況下摔下去的必定是一顆沒有遮罩、退回外框矩形的
+          // body，正是使用者要徹底避免的狀況。既然使用者確認「晚一點掉
+          // 下來沒關係」，這裡直接拿掉這個會強迫提早掉落的 timer，改成
+          // 老實等圖片真的載入、解碼、遮罩也真的建好，才呼叫 dropItem()；
+          // 圖片真的載入失敗（見下面 onerror，重試一次後仍失敗），或
+          // 遮罩真的建不出來（見 markLoadedAndDrop() 裡的完整說明），都
+          // 是直接把這格元素整個移除、跳過這張，不會用任何退化版本頂替
+          // 上場，不管是空白方塊還是外框矩形。
           let dropped = false;
-          let forceDropTimer = null; // 先宣告成 null：下面 img.complete 命中快取時可能同一行就同步呼叫 startFalling()，早於下面真正排入 setTimeout 那一行，這裡要先有變數可以安全參照
           const startFalling = () => {
             if(dropped) return;
             dropped = true;
-            if(forceDropTimer !== null) clearTimeout(forceDropTimer);
             el.classList.remove('pf-pending');
             dropItem(el, itemW, itemH, startX, startY, photo);
+          };
+          const giveUpFalling = () => {
+            if(dropped) return;
+            dropped = true;
+            if(el.parentNode) el.parentNode.removeChild(el);
           };
           const markLoadedAndDrop = () => {
             img.classList.add('loaded');
             // 這張圖沒趕上 warmFallBatch() 的暖機時間，代表遮罩多半也還
             // 沒被登記過（warmFallBatch() 是唯一提前觸發它的地方，見該處
             // 說明）。圖片這時才剛真的解碼完成，naturalWidth/Height 已經
-            // 有效，是呼叫 requestAlphaMask() 最早可行的時間點；跟上面
-            // 「已經暖好」分支共用同一套「短暫等遮罩就緒」修法（完整成因
-            // 說明見那裡），這裡不重複貼一次。這張照片本來就已經是走比較
-            // 慢的路徑，這裡再等的 PHOTO_FALL_MASK_MAX_WAIT_MS 是疊加在
-            // 圖片下載時間之上，但仍然遠低於外層 forceDropTimer
-            // （PHOTO_FALL_LOAD_MAX_WAIT_MS）留的容忍空間，不會讓這張照片
-            // 因此比原本更晚才「看起來已經在畫面上」。
+            // 有效，是呼叫 requestAlphaMask() 最早可行的時間點。跟上面
+            // 「已經暖好」分支共用同一套「只看真的拿到遮罩才掉落，確定
+            // 沒有就跳過」的修法（完整成因說明見那裡的「永遠不要用外框
+            // 矩形頂替」段落）。
             requestAlphaMask(srcUrl, img);
-            let pfMaskWaitDone2 = false;
-            const pfDropAfterMaskOrTimeout2 = () => {
-              if(pfMaskWaitDone2) return;
-              pfMaskWaitDone2 = true;
-              startFalling();
+            const pfDropOnMaskResult2 = (maskResult2) => {
+              if(maskResult2){
+                startFalling();
+              } else {
+                giveUpFalling();
+              }
             };
-            onAlphaMaskReady(srcUrl, pfDropAfterMaskOrTimeout2);
-            setTimeout(pfDropAfterMaskOrTimeout2, PHOTO_FALL_MASK_MAX_WAIT_MS);
+            onAlphaMaskReady(srcUrl, pfDropOnMaskResult2);
+            // 極端保底，理由跟上面「已經暖好」分支的同名保底完全一致：
+            // 正常情況不會被觸發，只防萬一真的卡死。
+            setTimeout(() => pfDropOnMaskResult2(null), PHOTO_FALL_MASK_ULTIMATE_TIMEOUT_MS);
           };
           img.onload = () => {
             if(img.decode){ img.decode().then(markLoadedAndDrop).catch(markLoadedAndDrop); }
@@ -10972,19 +11004,16 @@
           // 先別急著死心：帶一點隨機延遲（避開所有失敗的圖片在同一瞬間
           // 又一起重試、重蹈覆轍撞上同一波併發限制）重新指定一次 src，
           // 給它一次全新的機會。只重試這一次；如果重試也失敗，代表這張
-          // 照片這一輪真的沒辦法用——這時如果還沒因為上面的保底逾時開始
-          // 掉落，直接把還藏著的 DOM 元素整個移除，這個位置這一批就少一張，
-          // 不建立任何物理 body；如果已經先掉落了（逾時保底先觸發），維持
-          // 掉落中、只是永遠不會有圖片內容，不會出現「其他張都已經停很久
-          // 之後突然又冒出一張圖」的違和感。
+          // 照片這一輪真的沒辦法用——直接把還藏著的 DOM 元素整個移除，
+          // 這個位置這一批就少一張，不建立任何物理 body，不用任何退化
+          // 版本頂替上場。
           let retried = false;
           img.onerror = () => {
             if(!retried){
               retried = true;
               setTimeout(() => { img.src = srcUrl; }, 300 + Math.random() * 400);
-            } else if(!dropped && el.parentNode){
-              clearTimeout(forceDropTimer);
-              el.parentNode.removeChild(el);
+            } else {
+              giveUpFalling();
             }
           };
           img.src = srcUrl;
@@ -10997,7 +11026,6 @@
           // img 也早就在 el 裡面了，不會有任何一影格是「顯示出來卻還沒
           // 塞圖片」的狀態。
           if(img.complete && img.naturalWidth > 0) markLoadedAndDrop();
-          if(!dropped) forceDropTimer = setTimeout(startFalling, PHOTO_FALL_LOAD_MAX_WAIT_MS); // 已經同步命中快取、掉落了就不用再排這個逾時
           photoFallStage.appendChild(el);
         }
       } else {
