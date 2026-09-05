@@ -7363,11 +7363,21 @@
   // 拿來量撞牆矩形、從來不會真的顯示給使用者看，不需要參與大小平均），
   // 這種情況不傳這個參數即可，CSS 那邊的 var(--dvd-area-scale, 1) 預設值
   // 會接手，行為等同沒有這個機制時的原本固定高度。
-  function setDvdBounceImageSrc(src, areaScale){
+  function setDvdBounceImageSrc(src, areaScale, shouldApply){
     if(!dvdBounceImgEl) return Promise.resolve();
     const scaleValue = (typeof areaScale === 'number' && areaScale > 0) ? areaScale : 1;
     // 真正把新圖套到「畫面上看得見」的這顆 <img> 上，並重新量測撞牆矩形。
     const apply = () => {
+      // 修正「單擊換一批之後，飄動的 e 偶爾會凍結在原地、再也不會掉落」：
+      // 呼叫端（目前只有 promoteBatchPhotoToDvd()）可以傳入 shouldApply()，
+      // 在真正把新圖套上畫面的這一刻，多確認一次「這次換圖是不是已經被
+      // 使用者更快的下一次換批取代掉」——已經過期就直接跳過，不寫入畫面，
+      // 避免「圖案已經換了，但物理 body 卻永遠不會被重建」的殭屍狀態
+      // （完整成因見 promoteBatchPhotoToDvd() 上方的說明）。其餘呼叫端
+      // （例如撞牆換圖 cycleDvdEImage()、進站套用內建預設圖）不會傳這個
+      // 參數，shouldApply 是 undefined，這裡的判斷式直接跳過，行為完全
+      // 不受影響。
+      if(shouldApply && !shouldApply()) return;
       // 保險登記：這張圖既然能走到這裡（畫面外 Image() 已經 decode()／
       // onload 完成），就代表它確定解碼好了，一併寫進 dvdEDecodedSrcSet，
       // 涵蓋內建預設圖、備援路徑等原本不會經過 predecodeDvdEImage() 的
@@ -11972,23 +11982,52 @@
   // 目前顯示中的圖案），這裡只是換了它現在顯示、碰撞用的是哪一張圖，
   // 進到 preview 頁時自然就是「這張換上來的新圖，從它當下的位置」開始
   // 飄動，不需要另外銜接。
+  // ---------- 偵錯修正：「單擊換一批之後，飄動的 e 偶爾會凍結在原地、
+  // 沒有任何碰撞／物理效果，再點幾次換批也只會換照片、不會掉下去」----------
+  // 成因：原本這個函式一進來就立刻做兩件「不可逆」的事——把目前這顆
+  // body 從物理世界移除、pfDvdItem 設回 null——然後才開始非同步等
+  // setDvdBounceImageSrc() 的 decode() 真正完成。decode 需要一點時間
+  // （網路慢、或圖片剛好沒被 warmFallBatch() 提前暖到），這段等待期間
+  // 使用者完全有可能已經又快速點了下一次「單擊換一批」：reshufflePhotoFallBatch()
+  // 這一輪的 pfSpawnGeneration 會因此再被推進一次（見 spawnFallingPhotos()
+  // 內的世代編號機制）。等第一次呼叫的 decode 終於完成，下面原本就有的
+  // 世代比對會正確判定「這次已經過期」而直接 return——但問題是
+  // setDvdBounceImageSrc() 內部的 apply()（真正把新圖寫進畫面上那顆
+  // <img> 的動作）完全不知道世代這回事，早就在這次 return 之前，把
+  // 畫面上的圖案換成了「即將被放棄」的那張新照片。使用者看到的就是
+  // 「圖案已經換了，但物理 body 卻永遠沒有被重建」——而且因為舊 body 在
+  // 一開始就已經被移除、pfDvdItem 也已經是 null，之後不管再點幾次換批，
+  // 都只是各自處理「自己那一份」，沒有任何後續呼叫會回頭接手修好這個
+  // 已經被放棄的舊物件，畫面上就會看到這個殭屍狀態一路持續下去。
+  //
+  // 修法：把「移除舊 body、清空 pfDvdItem」延後到「確定這次換圖沒有過期」
+  // 之後才做，改成先在畫面外把新圖 decode 好，直到真正要套用的那一刻
+  // （setDvdBounceImageSrc 內的 apply()，靠新增的 shouldApply 參數把世代
+  // 判斷提早搬進去，見該函式的完整說明）都還沒過期，才真的動手：讀舊
+  // body 的座標／角度、移除舊 body、建立新 body、指派新的 pfDvdItem，
+  // 一次到位完成。萬一這次真的過期了，整個函式提早結束，舊的 e（不管是
+  // 圖案、位置、還是物理效果）完全沒被動過、繼續正常掉落／堆疊/可拖曳，
+  // 使用者不會看到任何中斷——真正會生效的，只有「最後沒有被更快一次
+  // 換批取代掉」的那次呼叫，感覺就是單純换成最新那一張,不會再有中間這段
+  // 凍結殭屍的空窗期。
   function promoteBatchPhotoToDvd(photo){
     if(!photo || !photo.src) return;
-    const Matter = window.Matter;
-    let centerX = null, centerY = null, angle = 0;
-    if(Matter && pfEngine && pfDvdItem){
-      const c = pfBoxCenter(pfDvdItem.body);
-      centerX = c.x; centerY = c.y; angle = pfDvdItem.body.angle;
-      Matter.Composite.remove(pfEngine.world, pfDvdItem.body);
-    }
-    pfDvdItem = null;
     const mySpawnGeneration = pfSpawnGeneration; // 沿用跟 spawnFallingPhotos() 一樣的世代比對，避免下面 decode 完成時，其實已經是另一輪換批或整個堆疊模式都結束了
-    setDvdBounceImageSrc(photo.src, photo.scale).then(() => {
+    const stillCurrent = () => pfEngine && pfSpawnGeneration === mySpawnGeneration;
+    setDvdBounceImageSrc(photo.src, photo.scale, stillCurrent).then(() => {
       const M = window.Matter;
       // 保險：decode 這段期間，使用者可能已經雙擊收掉整個堆疊模式
       // （pfEngine 被清空），或是又緊接著點了下一次換批（世代不對）——
-      // 兩種情況都不該再把這顆遲到的 body 加進一個已經作廢的物理世界。
-      if(!M || !pfEngine || pfSpawnGeneration !== mySpawnGeneration) return;
+      // 兩種情況都不該再動舊的 body／pfDvdItem，直接放棄這次即可（見
+      // 上面完整說明，舊物件全程沒被動過，不需要做任何復原）。
+      if(!M || !stillCurrent()) return;
+      let centerX = null, centerY = null, angle = 0;
+      if(pfEngine && pfDvdItem){
+        const c = pfBoxCenter(pfDvdItem.body);
+        centerX = c.x; centerY = c.y; angle = pfDvdItem.body.angle;
+        M.Composite.remove(pfEngine.world, pfDvdItem.body);
+      }
+      pfDvdItem = null;
       measureDvdSize();
       const cx = centerX !== null ? centerX : (dvdX + dvdW / 2);
       const cy = centerY !== null ? centerY : (dvdY + dvdH / 2);
