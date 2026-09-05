@@ -11497,7 +11497,14 @@
       canvas.width = canvasW;
       canvas.height = canvasH;
       const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
+      // ---------- 底色改成跟擷取當下的堆疊背景顏色一致 ----------
+      // 原本這裡固定寫死 '#ffffff'，不管使用者當時把背景換成哪個顏色，
+      // 截出來的桌布底色永遠是白色，跟畫面上看到的不一致。改成直接讀
+      // pfBgColorIndex 目前指到哪一個顏色：-1 代表還沒點過、維持白色
+      // （PHOTO_FALL_BG_WHITE），其餘就是 PHOTO_FALL_BG_COLORS 陣列裡
+      // 目前生效的那個顏色，跟畫面上 photoFallStage 當下的背景色保持同步。
+      const pfCaptureBgColor = pfBgColorIndex === -1 ? PHOTO_FALL_BG_WHITE : PHOTO_FALL_BG_COLORS[pfBgColorIndex];
+      ctx.fillStyle = pfCaptureBgColor;
       ctx.fillRect(0, 0, canvasW, canvasH);
 
       // ---------- 對齊方式：左、右、下三邊都精準貼齊，只有上方可能留白 ----------
