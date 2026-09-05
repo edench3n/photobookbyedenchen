@@ -10840,6 +10840,30 @@
   let pfLongPressCandidatePointerId = null;
   let pfLongPressStartX = 0, pfLongPressStartY = 0;
   let pfLongPressStartTime = 0;
+  // ---------- 新增：桌機（滑鼠）按住不放，不等放開就直接觸發 ----------
+  // 上面 pointerup 那組判斷法（比對「放開那一刻」跟「按下那一刻」的真實
+  // 時間差）是刻意為了修正手機版剛進站、物理運算最吃重時 setTimeout 會被
+  // 延後到 pointerup 之後才觸發的問題（見上方完整說明）——但這個修法的
+  // 副作用是：不管在哪個裝置上，長按這件事永遠要等「放開」那一刻才會
+  // 判斷、才會真的觸發擷取，桌機使用者會覺得「按著不放沒反應，鬆手瞬間
+  // 才跳出來」，跟直覺的「長按=按住當下就生效」不一樣。
+  // 桌機用滑鼠操作，不會遇到手機那種「第一批照片同時落下、主執行緒被
+  // 物理運算塞爆」的情境（拖曳/長按這類互動本來就是等使用者輸入，不會
+  // 跟畫面剛進場那幾秒物理批次計算撞在一起到需要靠這個修法解決的程度），
+  // 所以額外幫滑鼠（pointerType === 'mouse'）加一個真正的 setTimeout：
+  // 按下的當下就排定，時間一到、只要滑鼠還按著原地沒放開、也還沒被判定
+  // 成拖曳，就直接觸發擷取，不用等 pointerup。放開或位移過大時另外清掉
+  // 這個計時器（見下面 pointerup／pointercancel），避免已經放開了計時器
+  // 還在背景多觸發一次。觸控裝置不受影響，繼續沿用原本「放開時才判斷」
+  // 的寫法。
+  let pfLongPressCurrentX = 0, pfLongPressCurrentY = 0;
+  let pfLongPressTimer = null;
+  window.addEventListener('pointermove', (e) => {
+    if(pfLongPressCandidatePointerId !== null && e.pointerId === pfLongPressCandidatePointerId){
+      pfLongPressCurrentX = e.clientX;
+      pfLongPressCurrentY = e.clientY;
+    }
+  }, { passive: true });
 
   photoFallStage.addEventListener('pointerdown', (e) => {
     // ---------- 修正：「雙擊回首頁，點畫面空白處沒反應，只有點在飄動物件
@@ -10882,7 +10906,28 @@
       pfLongPressCandidatePointerId = e.pointerId;
       pfLongPressStartX = e.clientX;
       pfLongPressStartY = e.clientY;
+      pfLongPressCurrentX = e.clientX;
+      pfLongPressCurrentY = e.clientY;
       pfLongPressStartTime = Date.now();
+
+      // 桌機滑鼠：不等放開，按住滿 PF_LONGPRESS_MS 且還在原地就直接觸發
+      // （見上方「新增：桌機（滑鼠）按住不放，不等放開就直接觸發」說明）。
+      if(e.pointerType === 'mouse'){
+        if(pfLongPressTimer !== null) clearTimeout(pfLongPressTimer);
+        const firedPointerId = e.pointerId;
+        pfLongPressTimer = setTimeout(() => {
+          pfLongPressTimer = null;
+          if(pfLongPressCandidatePointerId !== firedPointerId) return; // 已經放開或被取消，不重複觸發
+          const ldx = pfLongPressCurrentX - pfLongPressStartX, ldy = pfLongPressCurrentY - pfLongPressStartY;
+          const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE; // 明顯位移＝拖曳，不算長按
+          const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
+          if(isStillish && noOverlay && photoFallState === 'active'){
+            pfLongPressCandidatePointerId = null; // 標記已處理，放開時 pointerup 那組判斷不再重複觸發一次
+            pfPhotoTapCandidatePointerId = null; // 避免放開時又被算成一次單擊
+            capturePhotoFallWallpaper();
+          }
+        }, PF_LONGPRESS_MS);
+      }
     }
   });
   window.addEventListener('pointerup', (e) => {
@@ -10890,6 +10935,7 @@
     // 避免這次放開同時被算成一次點擊。
     if(pfLongPressCandidatePointerId !== null && e.pointerId === pfLongPressCandidatePointerId){
       pfLongPressCandidatePointerId = null;
+      if(pfLongPressTimer !== null){ clearTimeout(pfLongPressTimer); pfLongPressTimer = null; } // 桌機計時器還沒到時間就放開了，取消它
       const ldx = e.clientX - pfLongPressStartX, ldy = e.clientY - pfLongPressStartY;
       const heldMs = Date.now() - pfLongPressStartTime;
       const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE; // 明顯位移＝拖曳/甩動，不算長按
@@ -10934,7 +10980,10 @@
   });
   window.addEventListener('pointercancel', (e) => {
     if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; }
-    if(pfLongPressCandidatePointerId === e.pointerId){ pfLongPressCandidatePointerId = null; }
+    if(pfLongPressCandidatePointerId === e.pointerId){
+      pfLongPressCandidatePointerId = null;
+      if(pfLongPressTimer !== null){ clearTimeout(pfLongPressTimer); pfLongPressTimer = null; }
+    }
   });
 
   // ---------- 長按擷取：把堆疊畫面目前的構圖畫成「桌布」 ----------
@@ -10969,16 +11018,35 @@
       // （直接沿用畫面上現有的 <img>，不重新下載）、物理世界目前的中心點
       // 跟角度、以及顯示用的 box 尺寸（用來換算 object-fit:contain 之後
       // 圖片實際佔的大小，而不是整個可能留白的 box）。
+      // ---------- 過濾離群值：位置已經跑到視窗範圍很外面的物件，不列入構圖 ----------
+      // 物理引擎偶爾會讓某個物件（不管是一般照片還是飄動的 e）因為高速碰撞、
+      // 拖曳甩動、或穿牆等極端情況，飛到／掉到遠遠超出視窗範圍的座標，卻還
+      // 沒被判定成「已出界」而從 pfItems 清掉（那個判定通常要等換批/收尾流程
+      // 才會跑一次，不是每一影格都在檢查）。這種跑掉的離群值如果被算進下面
+      // 「整批外接框」，會把外接框硬撐到涵蓋那個超遠的座標，其餘所有正常
+      // 停在畫面上的照片，相對之下就只佔外接框裡極小一塊、縮放後被擠壓成
+      // 畫面一角一小撮——這正是「東西超級小、擠在上面/下面」的成因。
+      // 用比視窗本身寬鬆很多的範圍（上下左右各抓 1 倍視窗尺寸的緩衝）當
+      // 篩選門檻：真正還在畫面上、或只是稍微超出邊界一點（例如正要掉出去
+      // 的動畫中途）的物件都留著，只擋掉明顯離譜的離群值。
+      const vwCap = window.innerWidth, vhCap = window.innerHeight;
+      const capMinX = -vwCap, capMaxX = vwCap * 2;
+      const capMinY = -vhCap, capMaxY = vhCap * 2;
+      const inCaptureRange = (cx, cy) => cx >= capMinX && cx <= capMaxX && cy >= capMinY && cy <= capMaxY;
+
       const entries = [];
       pfItems.forEach(({ body, el, w, h }) => {
         const img = el.querySelector('img');
         if(!img || !img.complete || !img.naturalWidth) return; // 還在 pf-pending（尚未載入完成）的跳過，避免擷取到空白
         const c = pfBoxCenter(body);
+        if(!inCaptureRange(c.x, c.y)) return; // 離群值，跳過（見上方完整說明）
         entries.push({ img, cx: c.x, cy: c.y, angle: body.angle, boxW: w, boxH: h });
       });
       if(pfDvdItem && dvdBounceImgEl && dvdBounceImgEl.complete && dvdBounceImgEl.naturalWidth){
         const c = pfBoxCenter(pfDvdItem.body);
-        entries.push({ img: dvdBounceImgEl, cx: c.x, cy: c.y, angle: pfDvdItem.body.angle, boxW: pfDvdItem.w, boxH: pfDvdItem.h });
+        if(inCaptureRange(c.x, c.y)){
+          entries.push({ img: dvdBounceImgEl, cx: c.x, cy: c.y, angle: pfDvdItem.body.angle, boxW: pfDvdItem.w, boxH: pfDvdItem.h });
+        }
       }
       if(!entries.length) return;
 
