@@ -1500,6 +1500,18 @@
     color:#ffffff !important;
   }
 
+  /* ---------- 堆疊畫面背景變成黑色時，上排文字（fixed-header）同步變白 ----------
+     只在背景色剛好切到黑色（PHOTO_FALL_BG_COLORS 陣列第一個 '#000000'）時，
+     JS（見 advancePhotoFallBackgroundColor() / resetPhotoFallBackgroundColor()）
+     才會幫 body 加上這個 class；其餘顏色（含白色）都不會加，維持文字原本
+     的黑色，所以只要背景不是黑色，這條規則完全不生效。跟上面
+     preview-header-white 用同一種寫法（!important 蓋過 .fixed-header 內部
+     各元素各自的顏色設定），確保上排每一段文字都會一起變白。 */
+  body.pf-bg-black .fixed-header,
+  body.pf-bg-black .fixed-header *{
+    color:#ffffff !important;
+  }
+
   .hidden{ display:none !important; }
 
   /* ---------- 飄動字雙擊觸發的「照片物理掉落堆疊」模式 ----------
@@ -9667,7 +9679,12 @@
   function advancePhotoFallBackgroundColor(){
     if(!photoFallStage) return;
     pfBgColorIndex = (pfBgColorIndex + 1) % PHOTO_FALL_BG_COLORS.length;
-    photoFallStage.style.backgroundColor = PHOTO_FALL_BG_COLORS[pfBgColorIndex];
+    const nextColor = PHOTO_FALL_BG_COLORS[pfBgColorIndex];
+    photoFallStage.style.backgroundColor = nextColor;
+    // 背景剛好推進到黑色，就把上排文字（.fixed-header）一起切成白色，
+    // 其他任何顏色（含繞回白色起點）都要記得把這個 class 拿掉，見上面
+    // CSS body.pf-bg-black 規則的完整說明。
+    document.body.classList.toggle('pf-bg-black', nextColor === '#000000');
   }
   // 收起堆疊、回到首頁時呼叫（見 exitPhotoFallMode() 開頭）：把顏色淡回
   // 白色、同時把索引重設回 -1，確保下一次重新雙擊進場時，背景一定是從
@@ -9675,6 +9692,9 @@
   function resetPhotoFallBackgroundColor(){
     pfBgColorIndex = -1;
     if(photoFallStage) photoFallStage.style.backgroundColor = PHOTO_FALL_BG_WHITE;
+    // 回到首頁時背景一定變回白色，上排文字也要跟著恢復黑色，不能讓
+    // pf-bg-black 殘留在 body 上。
+    document.body.classList.remove('pf-bg-black');
   }
 
   // 掉落張數：手機版縮圖／版面本來就比桌機窄，塞太多張容易太擠、堆疊起來
