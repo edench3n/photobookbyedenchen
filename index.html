@@ -11174,33 +11174,68 @@
       }
       if(!entries.length) return;
 
-      // 算出每個物件旋轉後的四個角落座標，彙整成整批構圖的外接邊界——
-      // 這個邊界之後會被整批等比例縮放去貼齊輸出畫布，邊界的極值點自然
-      // 就會落在畫布邊緣上，也就是「PNG 邊緣精準靠齊照片邊界」的由來。
+      // 算出每個物件旋轉後的外接邊界，彙整成整批構圖的外接邊界——這個
+      // 邊界之後會被整批等比例縮放去貼齊輸出畫布，邊界的極值點自然就會
+      // 落在畫布邊緣上，也就是「PNG 邊緣精準靠齊照片邊界」的由來。
+      // ---------- 修正：「怎麼調整縮放/位移公式，左右下三邊還是貼不齊」----------
+      // 成因：這批素材是去背異形圖（薑、章魚、金屬螺旋條、公仔……），輪廓
+      // 完全不規則。原本這裡的做法是先在「角度＝0」的座標系裡算出一個貼合
+      // 可見像素的矩形（uv u0/u1/v0/v1），再把這個矩形的「四個角落」套用
+      // entry.angle 旋轉到世界座標，拿旋轉後的四個角落取 min/max 當外接框。
+      // 這個做法對「實心矩形」成立（矩形旋轉後的極值必然落在角落），但對
+      // 不規則形狀是錯的：角度＝0 時量出來、剛好貼合像素的矩形，一旦被
+      // 旋轉，矩形本身的四個角落大多根本不是實際有色彩的地方（不規則形狀
+      // 塞不滿矩形的四個角），旋轉後的角落反而比「圖案這個角度下真正的
+      // 輪廓」更往外凸出一截。結果就是拿來定基準的 minX/maxX/minY/maxY
+      // 系統性地偏大，貼齊的其實是「這個被高估的外接框」，實際圖案跟畫布
+      // 邊緣之間永遠留著一截空白——不管怎麼調整下面的 scale/offsetX/offsetY
+      // 公式都沒用，因為問題出在「量測」這一步，不是「換算」這一步。
+      // 修法：改成直接用遮罩建立時就記錄下來的 boundary（最外緣像素逐點的
+      // 正規化座標列表，見 pfMaskVisibleUVBounds() 的完整說明），把每一個
+      // 邊界點個別套用旋轉＋平移換算成世界座標，再對所有點（而不是只有
+      // 4 個角落）取 min/max。這樣算出來的才是「這個形狀在目前這個旋轉
+      // 角度下」真正貼合的外接框，不會再被角度＝0 時量出的矩形放大。只有
+      // 在真的拿不到逐點 boundary（例如當場即時掃描 pfLiveTrimUVBounds()
+      // 只給得出矩形、或整張遮罩都還沒就緒）時，才退回原本「矩形四角落」
+      // 的近似算法，當作優雅退場，不影響功能，只是那個物件的外接框可能
+      // 因此比較寬鬆。
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       entries.forEach(entry => {
         const fit = pfWallpaperContainFit(entry.boxW, entry.boxH, entry.img.naturalWidth, entry.img.naturalHeight);
         entry.drawW = fit.w; entry.drawH = fit.h;
         const hw = fit.w / 2, hh = fit.h / 2;
-        // 優先用遮罩算出的「真正可見範圍」縮小外接框的計算範圍（見上面
-        // pfMaskVisibleUVBounds() 的完整說明）；遮罩還沒就緒或這張圖沒有
-        // 遮罩時，優雅退回整個外框矩形（跟其餘所有「遮罩還沒就緒就退回
-        // 矩形」的地方用同一套退場邏輯，不影響功能，只是外接框可能因此
-        // 比較寬鬆）。
-        const uv = pfResolveVisibleUVBounds(entry);
-        const lx0 = uv ? (uv.u0 - 0.5) * fit.w : -hw;
-        const lx1 = uv ? (uv.u1 - 0.5) * fit.w : hw;
-        const ly0 = uv ? (uv.v0 - 0.5) * fit.h : -hh;
-        const ly1 = uv ? (uv.v1 - 0.5) * fit.h : hh;
         const cos = Math.cos(entry.angle), sin = Math.sin(entry.angle);
-        // (lx,ly) 是物件自己座標系裡的四個角落，套用跟畫面上 CSS
-        // `rotate(angle)` 同一個旋轉方向，再平移回物件中心，換算成世界座標。
-        [[lx0, ly0], [lx1, ly0], [lx1, ly1], [lx0, ly1]].forEach(([lx, ly]) => {
+        const addWorldPoint = (lx, ly) => {
           const wx = entry.cx + lx * cos - ly * sin;
           const wy = entry.cy + lx * sin + ly * cos;
           if(wx < minX) minX = wx; if(wx > maxX) maxX = wx;
           if(wy < minY) minY = wy; if(wy > maxY) maxY = wy;
-        });
+        };
+        // 優先用遮罩逐點 boundary（見上方完整說明），沒有的話才退回
+        // pfResolveVisibleUVBounds() 給的矩形（uv 還是沒有就用整個外框），
+        // 對矩形只好退回「四個角落」的近似算法。
+        const boundary = entry.maskEntry && entry.maskEntry.boundary;
+        if(boundary && boundary.length){
+          for(let i = 0; i < boundary.length; i += 2){
+            const lx = (boundary[i] - 0.5) * fit.w;
+            const ly = (boundary[i + 1] - 0.5) * fit.h;
+            addWorldPoint(lx, ly);
+          }
+        } else {
+          // 優先用遮罩算出的「真正可見範圍」縮小外接框的計算範圍（見上面
+          // pfMaskVisibleUVBounds() 的完整說明）；遮罩還沒就緒或這張圖沒有
+          // 遮罩時，優雅退回整個外框矩形（跟其餘所有「遮罩還沒就緒就退回
+          // 矩形」的地方用同一套退場邏輯，不影響功能，只是外接框可能因此
+          // 比較寬鬆）。
+          const uv = pfResolveVisibleUVBounds(entry);
+          const lx0 = uv ? (uv.u0 - 0.5) * fit.w : -hw;
+          const lx1 = uv ? (uv.u1 - 0.5) * fit.w : hw;
+          const ly0 = uv ? (uv.v0 - 0.5) * fit.h : -hh;
+          const ly1 = uv ? (uv.v1 - 0.5) * fit.h : hh;
+          // (lx,ly) 是物件自己座標系裡的四個角落，套用跟畫面上 CSS
+          // `rotate(angle)` 同一個旋轉方向，再平移回物件中心，換算成世界座標。
+          [[lx0, ly0], [lx1, ly0], [lx1, ly1], [lx0, ly1]].forEach(([lx, ly]) => addWorldPoint(lx, ly));
+        }
       });
       const contentW = maxX - minX, contentH = maxY - minY;
       if(!(contentW > 0) || !(contentH > 0)) return;
