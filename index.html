@@ -7192,6 +7192,38 @@
         grid[gy * gridW + gx] = (total > 0 && solid / total >= PF_BODY_GRID_CELL_MAJORITY) ? 1 : 0;
       }
     }
+    // ---------- 擴大偵錯修正：「有些 PNG 撞擊時邊界像空氣一樣，畫面上又
+    // 幾乎看不到東西」的根本成因 ----------
+    // 上面用的是「這一格超過一半面積有畫到東西才算實心」(majority) 這個
+    // 門檻，對細線條、稀疏羽化邊緣這類本來就「顏色佔比低」的去背圖非常
+    // 不友善：完全可能整張圖算下來，每一格都不到一半覆蓋率，grid 整個是
+    // 全 0。這種情況下面的 run-length 合併會直接一個矩形都拆不出來，
+    // buildFallItemBody() 只能被迫退回「整張外框矩形」當碰撞體——但這張圖
+    // 本身視覺上幾乎是空的，使用者看到的就是「一個幾乎隱形的東西，卻用
+    // 一整個看不見的矩形框在撞人」，正是「隱形空氣物件」跟「撞擊沒有貼合
+    // 實際邊緣」這兩個回報共同的根源。
+    // 修法：先檢查這一輪嚴格門檻是不是真的一格實心都沒有；如果是，改用
+    // 寬鬆很多的「這一格只要有畫到任何一個像素就算實心」(any) 門檻重算一次
+    // ——這樣細線條、稀疏圖案至少能貼著它「真正存在的那一小條像素」建立
+    // 碰撞體，而不是整批被判定成空白、退化成一個滿版矩形。只有連這個寬鬆
+    // 門檻都真的一格都沒有（也就是這張圖去背後根本是完全透明、沒有任何
+    // 顏色的極端情況）才會維持全 0，交給下面 return null 那一段處理。
+    let hasSolidCell = false;
+    for(let i = 0; i < grid.length; i++){ if(grid[i]){ hasSolidCell = true; break; } }
+    if(!hasSolidCell){
+      for(let gy = 0; gy < gridH; gy++){
+        const y0 = Math.floor(gy * srcH / gridH), y1 = Math.max(y0 + 1, Math.floor((gy + 1) * srcH / gridH));
+        for(let gx = 0; gx < gridW; gx++){
+          const x0 = Math.floor(gx * srcW / gridW), x1 = Math.max(x0 + 1, Math.floor((gx + 1) * srcW / gridW));
+          let anySolid = 0;
+          for(let sy = y0; sy < y1 && !anySolid; sy++){
+            const rowBase = sy * srcW;
+            for(let sx = x0; sx < x1; sx++){ if(maskEntry.mask[rowBase + sx] === 1){ anySolid = 1; break; } }
+          }
+          grid[gy * gridW + gx] = anySolid;
+        }
+      }
+    }
     const cellW = w / gridW, cellH = h / gridH;
     const rects = [];
     for(let gy = 0; gy < gridH; gy++){
@@ -7301,13 +7333,31 @@
       if(typeof angle === 'number') Body.setAngle(body, angle);
       return body;
     }
-    const body = Bodies.rectangle(x, y, w, h, Object.assign({}, options, { slop: 0.01, chamfer: { radius: 3 } }));
-    // 退回單一矩形 body 時，body.position 本來就等於外框正中心，偏移量是
-    // 零向量——跟上面複合物體共用同一套 pfBoxCenter() 讀取邏輯，不用另外
-    // 特判「這顆是不是複合物體」。
-    body.plugin = body.plugin || {};
-    body.plugin.pfCenterOffset = { x: 0, y: 0 };
-    return body;
+    // ---------- 擴大偵錯修正：「永遠不要用外框矩形頂替」延伸到這裡 ----------
+    // 走到這裡代表 buildFallItemPhysicsRects() 沒能拆出任何矩形。原本不分
+    // 青紅皂白，一律退回一個貼齊整張外框的矩形 body——這個退回路徑原本是
+    // 設計給「遮罩根本還沒建好」(maskEntry 是 null/undefined) 這種暫時性
+    // 情況用的保險；但現在所有呼叫端都已經改成「先等遮罩真的就緒才呼叫
+    // 這支函式」，maskEntry 幾乎不可能真的是空的。真正會走到這裡的，反而
+    // 是「遮罩確實建好了（就算套用完上面的寬鬆門檻），這張圖去背後還是
+    // 完全沒有任何顏色」這種圖片本身有問題的極端情況——這時退回滿版矩形，
+    // 等於摔下去一個使用者幾乎看不見、卻用整個外框在撞人的「隱形空氣
+    // 物件」，正是這次要徹底避免的狀況。
+    // 修法：只有「遮罩根本不存在」才用矩形頂替（維持原本對「還沒就緒」
+    // 這種暫時狀態的容忍）；遮罩確實存在但真的一格都拆不出來，直接回傳
+    // null，交給呼叫端（spawnFallingPhotos() 的 dropItem()／
+    // promoteBatchPhotoToDvd()）把這張圖當「不能用」跳過，不建立任何
+    // body，不將就頂替上場。
+    if(!maskEntry){
+      const body = Bodies.rectangle(x, y, w, h, Object.assign({}, options, { slop: 0.01, chamfer: { radius: 3 } }));
+      // 退回單一矩形 body 時，body.position 本來就等於外框正中心，偏移量是
+      // 零向量——跟上面複合物體共用同一套 pfBoxCenter() 讀取邏輯，不用另外
+      // 特判「這顆是不是複合物體」。
+      body.plugin = body.plugin || {};
+      body.plugin.pfCenterOffset = { x: 0, y: 0 };
+      return body;
+    }
+    return null;
   }
 
   // 共用：把「質心 → 外框正中心」這段固定的本地偏移量，依 body 目前的
@@ -8014,7 +8064,24 @@
     if(dvdEImageRecentHistory.length > DVD_E_IMAGE_NO_REPEAT_COUNT){
       dvdEImageRecentHistory.shift(); // 只需要留最近這幾張，舊的自然淘汰
     }
-    setDvdBounceImageSrc(nextEntry.src, nextEntry.scale);
+    // ---------- 擴大偵錯修正：「堆疊頁面第一批偶爾跟飄動物件重複的 PNG」----------
+    // 成因：setDvdBounceImageSrc() 內部要等畫面外的 Image().decode() 真的
+    // resolve 才會把 dvdActiveImgSrc 換成這張新圖（見該函式「無縫直接切換」
+    // 的完整說明）——這是一個非同步過程。pickInitialFallBatch() 在雙擊進場
+    // 那一刻會讀取當下的 dvdActiveImgSrc、把同一張圖從掉落候選池排除；但
+    // 如果使用者「剛進站就快速雙擊」，很可能剛好撞上「飄動的 e 才剛撞牆、
+    // 這次換圖的 decode() 還沒 resolve」的空檔——pickInitialFallBatch() 排除
+    // 的是舊圖，這個還在飛行中的 decode() 之後照樣會完成、把 dvdActiveImgSrc
+    // 換成新圖，等 startPhotoFallEngine() 真正幫 e 建立物理身體時，讀到的
+    // 已經是這張「從沒被排除過」的新圖——這張圖完全可能同時也被抽進掉落
+    // 批次，畫面上就會看到兩張一模一樣的 PNG。
+    // 修法：借用 setDvdBounceImageSrc() 原本就有、給 promoteBatchPhotoToDvd()
+    // 用的 shouldApply 保護參數——只要套用新圖那一刻已經進入堆疊模式
+    // （photoFallModeActive 為 true，enterPhotoFallMode() 一開頭就會設定），
+    // 就直接放棄這次套用，dvdActiveImgSrc 會維持雙擊當下真正顯示的那張，
+    // 跟 pickInitialFallBatch() 排除的是同一張，不會再對不起來。堆疊模式
+    // 以外的正常撞牆換圖（shouldApply() 這時回傳 true）完全不受影響。
+    setDvdBounceImageSrc(nextEntry.src, nextEntry.scale, () => !photoFallModeActive);
   }
   // =====================================================================
   // ⚠️ 以下這段（末速度偵測 + 定速回穩規則）已經跟使用者來回確認、調到
@@ -10379,8 +10446,28 @@
       // 不管碰撞體被拆成幾塊，分類判斷都還是一致的。
       collisionFilter: { category: PF_CATEGORY_DVD },
     });
-    Composite.add(pfEngine.world, dvdBody);
-    pfDvdItem = { body: dvdBody, w: dvdW, h: dvdH };
+    // ---------- 擴大偵錯修正：飄動物件本身是全程唯一、畫面上一定要有東西
+    // 的主角，不能套用「拆不出形狀就整個跳過」那套規則 ----------
+    // buildFallItemBody() 現在遇到「遮罩確實建好、但這張圖真的沒有任何
+    // 顏色」的極端情況會回傳 null（完整成因見該函式內的說明）——一般掉落
+    // 照片遇到這種情況可以直接跳過這一張（反正還有其他張），但這裡是
+    // 「飄動的 e 本身」，使用者雙擊當下一定期待看到它原地開始受重力，
+    // 不能因為這麼極端的邊角情況就讓它整個消失不見。這裡多一層保險：
+    // 拿到 null 才退回貼齊外框的矩形（跟 buildFallItemBody() 內部原本
+    // 「遮罩根本不存在」時用的是同一種退回方式），維持「一定要有東西可以
+    // 讓使用者抓、讓其他照片撞」這個更優先的需求；正常情況（遮罩有效、
+    // 拆得出形狀）完全不會走到這裡，行為不受影響。
+    const dvdBodyFinal = dvdBody || Bodies.rectangle(
+      dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH,
+      Object.assign({ slop: 0.01, chamfer: { radius: 3 } }, {
+        angle: dvdRotationDeg * Math.PI / 180,
+        restitution: 0.3, friction: 0.55, frictionAir: 0.012, density: 0.0026,
+        collisionFilter: { category: PF_CATEGORY_DVD },
+      })
+    );
+    if(!dvdBody){ dvdBodyFinal.plugin = dvdBodyFinal.plugin || {}; dvdBodyFinal.plugin.pfCenterOffset = { x: 0, y: 0 }; }
+    Composite.add(pfEngine.world, dvdBodyFinal);
+    pfDvdItem = { body: dvdBodyFinal, w: dvdW, h: dvdH };
     dvdBounce.style.transition = 'none';
 
     // 拖曳：Matter.Mouse 直接綁在舞台容器上接收滑鼠事件，命中判斷（哪個
@@ -10763,6 +10850,17 @@
         density: 0.0022,
         angle: (Math.random() - 0.5) * 0.6,
       });
+      // ---------- 擴大偵錯修正：「隱形空氣物件」跟「buildFallItemBody() 一
+      // 定會回傳合法 body」這個假設連動的最後一步 ----------
+      // buildFallItemBody() 現在遇到「遮罩確實建好、但這張圖去背後真的沒有
+      // 任何顏色」的極端情況會回傳 null（完整成因見該函式內的說明），不再
+      // 保證一定會給一個 body。這裡補上判斷：拿到 null 就把這格 DOM 元素
+      // 整個移除、不建立任何物理 body、不加進 pfItems，等同「這張圖有問題，
+      // 這一批這個位置乾脆少一張」，不會有滿版矩形頂替上場的空氣物件。
+      if(!body){
+        if(el.parentNode) el.parentNode.removeChild(el);
+        return;
+      }
       Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.14);
       Composite.add(pfEngine.world, body);
       // 直接把這張照片對應的 body／尺寸／原始 photo 物件存在 DOM 元素自己
@@ -12164,18 +12262,28 @@
       const cx = centerX !== null ? centerX : (dvdX + dvdW / 2);
       const cy = centerY !== null ? centerY : (dvdY + dvdH / 2);
       const dvdMaskEntry = getCachedAlphaMask(photo.src);
-      const dvdBody = buildFallItemBody(M, dvdMaskEntry, cx, cy, dvdW, dvdH, {
+      const dvdBodyOptions = {
         angle,
         restitution: 0.3, // 跟其他掉落照片／e 進場落下用同一組手感參數，見 startPhotoFallEngine() 內同一段的完整說明
         friction: 0.55,
         frictionAir: 0.012,
         density: 0.0026,
         collisionFilter: { category: PF_CATEGORY_DVD }, // 見 startPhotoFallEngine() 內同一個屬性的完整說明
-      });
-      M.Composite.add(pfEngine.world, dvdBody);
-      pfDvdItem = { body: dvdBody, w: dvdW, h: dvdH };
+      };
+      const dvdBody = buildFallItemBody(M, dvdMaskEntry, cx, cy, dvdW, dvdH, dvdBodyOptions);
+      // ---------- 擴大偵錯修正：換批接手時同樣不能讓飄動物件消失 ----------
+      // 舊 body 在上面已經被移除、pfDvdItem 也已經被清成 null——buildFallItemBody()
+      // 遇到「這張圖去背後真的沒有任何顏色」的極端情況會回傳 null（完整
+      // 成因見該函式內的說明），這裡如果不處理，pfDvdItem 會停在 null、
+      // 飄動物件從畫面上整個消失，比原本的殭屍狀態更糟。跟 startPhotoFallEngine()
+      // 同一套保險：拿到 null 才退回貼齊外框的矩形，確保飄動物件全程都有
+      // 東西存在；正常情況完全不會走到這裡。
+      const dvdBodyFinal = dvdBody || M.Bodies.rectangle(cx, cy, dvdW, dvdH, Object.assign({ slop: 0.01, chamfer: { radius: 3 } }, dvdBodyOptions));
+      if(!dvdBody){ dvdBodyFinal.plugin = dvdBodyFinal.plugin || {}; dvdBodyFinal.plugin.pfCenterOffset = { x: 0, y: 0 }; }
+      M.Composite.add(pfEngine.world, dvdBodyFinal);
+      pfDvdItem = { body: dvdBodyFinal, w: dvdW, h: dvdH };
       dvdBounce.style.transition = 'none';
-      if(M.Sleeping) M.Sleeping.set(dvdBody, false); // 保險：確保新 body 從這一影格就正常受重力／碰撞影響，不會意外一開始就被引擎判定成睡眠
+      if(M.Sleeping) M.Sleeping.set(dvdBodyFinal, false); // 保險：確保新 body 從這一影格就正常受重力／碰撞影響，不會意外一開始就被引擎判定成睡眠
     });
   }
 
@@ -12514,7 +12622,7 @@
         // openPreviewPage() 內的說明），不需要重建，直接跳過這一段。
         measureDvdSize();
         const dvdMaskEntry = dvdActiveImgSrc ? getCachedAlphaMask(dvdActiveImgSrc) : null;
-        const dvdBody = buildFallItemBody(Matter, dvdMaskEntry, dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, {
+        const dvdBodyOptions2 = {
           // 同 startPhotoFallEngine() 內的修正：帶入目前飄動角度
           // （dvdRotationDeg），避免重新掉回堆疊那一刻先瞬間轉正成 0 度、
           // 才開始下墜，改成維持原本傾斜的樣子自然往下掉。
@@ -12524,9 +12632,15 @@
           frictionAir: 0.012,
           density: 0.0026,
           collisionFilter: { category: PF_CATEGORY_DVD }, // 見 startPhotoFallEngine() 內同一個屬性的說明
-        });
-        Matter.Composite.add(pfEngine.world, dvdBody);
-        pfDvdItem = { body: dvdBody, w: dvdW, h: dvdH };
+        };
+        const dvdBody = buildFallItemBody(Matter, dvdMaskEntry, dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, dvdBodyOptions2);
+        // 同上面另外三處一致的保險：buildFallItemBody() 遇到「遮罩存在但
+        // 真的沒有任何顏色」的極端情況會回傳 null，這裡也要退回矩形，
+        // 不能讓飄動物件在關閉 preview 回到堆疊頁面這一刻整個消失。
+        const dvdBodyFinal2 = dvdBody || Matter.Bodies.rectangle(dvdX + dvdW / 2, dvdY + dvdH / 2, dvdW, dvdH, Object.assign({ slop: 0.01, chamfer: { radius: 3 } }, dvdBodyOptions2));
+        if(!dvdBody){ dvdBodyFinal2.plugin = dvdBodyFinal2.plugin || {}; dvdBodyFinal2.plugin.pfCenterOffset = { x: 0, y: 0 }; }
+        Matter.Composite.add(pfEngine.world, dvdBodyFinal2);
+        pfDvdItem = { body: dvdBodyFinal2, w: dvdW, h: dvdH };
         dvdBounce.style.transition = 'none';
       }
       // 只有在物理世界真的已經被停下來的情況下（pfRunnerPaused，見該旗標
