@@ -11010,6 +11010,33 @@
       : { w: boxH * natRatio, h: boxH };
   }
 
+  // ---------- 桌布擷取專用：從 alpha 遮罩算出這張圖「真正有畫到東西」的
+  // 可見範圍（正規化 0..1 座標），不含大片透明留白 ----------
+  // 這批素材都是去背異形圖（老薑、章魚、螺旋金屬條……），實際上色的形狀
+  // 往往比它的外框矩形小上一截，甚至中間鏤空（跟 dropItem() 內「堆疊照片
+  // 永遠碰不到彼此真實邊緣」那段是同一個根本成因，完整說明見該處）。下面
+  // capturePhotoFallWallpaper() 算「整批外接框」時，如果直接用整個外框
+  // 矩形當每張圖的範圍，外接框就會把這些透明留白也算進去——邊界本身雖然
+  // 精準貼齊畫布邊緣，但貼齊的是「留白留到的地方」，肉眼看起來就是實際
+  // 圖案跟畫布邊緣之間還空著一截，感覺沒有真正「靠齊」。
+  // 這裡直接沿用遮罩建立時已經算好的 boundary（遮罩最外緣像素的正規化
+  // 座標列表，見 finishMask() 的說明）：一個方向上最極端的實心像素，
+  // 必然同時也是邊界像素（否則四周都是實心、不可能是最外緣），所以只要
+  // 掃過 boundary 這個較小的清單就能算出完整、準確的可見範圍，不需要重新
+  // 掃一次整張遮罩網格。
+  function pfMaskVisibleUVBounds(maskEntry){
+    if(!maskEntry || !maskEntry.boundary || !maskEntry.boundary.length) return null;
+    const b = maskEntry.boundary;
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for(let i = 0; i < b.length; i += 2){
+      const u = b[i], v = b[i + 1];
+      if(u < u0) u0 = u; if(u > u1) u1 = u;
+      if(v < v0) v0 = v; if(v > v1) v1 = v;
+    }
+    if(!(u1 > u0) || !(v1 > v0)) return null;
+    return { u0, u1, v0, v1 };
+  }
+
   function capturePhotoFallWallpaper(){
     try{
       if(!pfItems.length && !pfDvdItem) return; // 畫面上什麼都沒有，沒什麼好擷取的
@@ -11040,12 +11067,15 @@
         if(!img || !img.complete || !img.naturalWidth) return; // 還在 pf-pending（尚未載入完成）的跳過，避免擷取到空白
         const c = pfBoxCenter(body);
         if(!inCaptureRange(c.x, c.y)) return; // 離群值，跳過（見上方完整說明）
-        entries.push({ img, cx: c.x, cy: c.y, angle: body.angle, boxW: w, boxH: h });
+        const photo = el._pf && el._pf.photo;
+        const maskEntry = photo && photo.src ? getCachedAlphaMask(photo.src) : null;
+        entries.push({ img, cx: c.x, cy: c.y, angle: body.angle, boxW: w, boxH: h, maskEntry });
       });
       if(pfDvdItem && dvdBounceImgEl && dvdBounceImgEl.complete && dvdBounceImgEl.naturalWidth){
         const c = pfBoxCenter(pfDvdItem.body);
         if(inCaptureRange(c.x, c.y)){
-          entries.push({ img: dvdBounceImgEl, cx: c.x, cy: c.y, angle: pfDvdItem.body.angle, boxW: pfDvdItem.w, boxH: pfDvdItem.h });
+          const maskEntry = getCachedAlphaMask(dvdActiveImgSrc);
+          entries.push({ img: dvdBounceImgEl, cx: c.x, cy: c.y, angle: pfDvdItem.body.angle, boxW: pfDvdItem.w, boxH: pfDvdItem.h, maskEntry });
         }
       }
       if(!entries.length) return;
@@ -11058,10 +11088,20 @@
         const fit = pfWallpaperContainFit(entry.boxW, entry.boxH, entry.img.naturalWidth, entry.img.naturalHeight);
         entry.drawW = fit.w; entry.drawH = fit.h;
         const hw = fit.w / 2, hh = fit.h / 2;
+        // 優先用遮罩算出的「真正可見範圍」縮小外接框的計算範圍（見上面
+        // pfMaskVisibleUVBounds() 的完整說明）；遮罩還沒就緒或這張圖沒有
+        // 遮罩時，優雅退回整個外框矩形（跟其餘所有「遮罩還沒就緒就退回
+        // 矩形」的地方用同一套退場邏輯，不影響功能，只是外接框可能因此
+        // 比較寬鬆）。
+        const uv = pfMaskVisibleUVBounds(entry.maskEntry);
+        const lx0 = uv ? (uv.u0 - 0.5) * fit.w : -hw;
+        const lx1 = uv ? (uv.u1 - 0.5) * fit.w : hw;
+        const ly0 = uv ? (uv.v0 - 0.5) * fit.h : -hh;
+        const ly1 = uv ? (uv.v1 - 0.5) * fit.h : hh;
         const cos = Math.cos(entry.angle), sin = Math.sin(entry.angle);
         // (lx,ly) 是物件自己座標系裡的四個角落，套用跟畫面上 CSS
         // `rotate(angle)` 同一個旋轉方向，再平移回物件中心，換算成世界座標。
-        [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].forEach(([lx, ly]) => {
+        [[lx0, ly0], [lx1, ly0], [lx1, ly1], [lx0, ly1]].forEach(([lx, ly]) => {
           const wx = entry.cx + lx * cos - ly * sin;
           const wy = entry.cy + lx * sin + ly * cos;
           if(wx < minX) minX = wx; if(wx > maxX) maxX = wx;
