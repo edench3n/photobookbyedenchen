@@ -1526,6 +1526,20 @@
                              的成因——Matter.Mouse 從頭到尾沒收到任何一次 mousedown。 */
     display:none;
     cursor:grab;
+    /* ---------- 新功能：點擊堆疊畫面切換背景顏色 ----------
+       這個容器本身已經是蓋滿整個視窗、疊在首頁格子之上的滿版圖層（見上面
+       z-index/inset 說明），本來完全透明、沒有設背景色，使用者實際看到的
+       「白色背景」其實是透出底下 body 的白底。這裡直接把背景色放在這個
+       容器身上（預設跟 body 一樣是白色，視覺上完全沒有差異），之後 JS
+       只要改這個容器的 background-color，就能蓋住底下的白色、呈現使用者
+       想要的顏色，不需要動到 body 本身（body 的白色背景要留給首頁其他
+       所有頁面/狀態使用，不能被這裡的顏色循環影響到）。
+       transition 用一個很短的時間（.16s）做 background-color 的淡入淡出：
+       CSS 對同一個屬性從舊值換成新值本身就會自動內插撥放，不需要另外寫
+       opacity 疊層或 keyframes，換色／換回白色都同樣套用這一條規則，效果
+       自然一致。 */
+    background-color:#ffffff;
+    transition: background-color .16s ease;
   }
   .photo-fall-stage.active{ display:block; pointer-events:auto; }
   .photo-fall-stage.grabbing{ cursor:grabbing; }
@@ -9638,6 +9652,31 @@
   let photoFallModeActive = false; // entering/active/exiting 這整段期間都是 true
   const photoFallStage = document.getElementById('photoFallStage');
 
+  // ---------- 新功能：點擊堆疊畫面切換背景顏色 ----------
+  // 固定的色碼循環清單，依照使用者指定的順序排列；白色本身不放進這個
+  // 陣列——它是「還沒點擊過」的預設起始狀態，也是收起堆疊、回到首頁時
+  // 要淡回去的目標色，不屬於循環本身的一部分，見下面 advance／reset 兩個
+  // 函式的分工。
+  const PHOTO_FALL_BG_COLORS = ['#000000', '#b6f1ff', '#f93d3d', '#f7f746', '#c1c1c1', '#3640ff', '#12ff5a', '#efe6c7'];
+  const PHOTO_FALL_BG_WHITE = '#ffffff';
+  let pfBgColorIndex = -1; // -1 代表目前是白色；點一次背景，index 往後推進一格，超過陣列長度就從頭循環（見 advancePhotoFallBackgroundColor()）
+  // 單擊畫面（不管點中的是空白背景還是某張漂浮物件，見下面 photoFallStage
+  // 的 pointerup／飄動的 e 的 handleDvdSingleClick() 兩處呼叫點）就往後
+  // 推進一格顏色，用 (index+1) % length 保證永遠落在陣列範圍內、繞完一輪
+  // 自動從頭開始，達到「無限循環」的效果。
+  function advancePhotoFallBackgroundColor(){
+    if(!photoFallStage) return;
+    pfBgColorIndex = (pfBgColorIndex + 1) % PHOTO_FALL_BG_COLORS.length;
+    photoFallStage.style.backgroundColor = PHOTO_FALL_BG_COLORS[pfBgColorIndex];
+  }
+  // 收起堆疊、回到首頁時呼叫（見 exitPhotoFallMode() 開頭）：把顏色淡回
+  // 白色、同時把索引重設回 -1，確保下一次重新雙擊進場時，背景一定是從
+  // 白色重新開始，不會沿用上一輪堆疊模式結束前停留的顏色。
+  function resetPhotoFallBackgroundColor(){
+    pfBgColorIndex = -1;
+    if(photoFallStage) photoFallStage.style.backgroundColor = PHOTO_FALL_BG_WHITE;
+  }
+
   // 掉落張數：手機版縮圖／版面本來就比桌機窄，塞太多張容易太擠、堆疊起來
   // 每張都很小，所以手機版改成只掉 8 張，桌機／平板維持原本的 15 張。用
   // isDetailMobile()（window.innerWidth<=640）判斷，跟全站手機/桌機分流
@@ -10065,6 +10104,7 @@
   // 行為不變。
   function handleDvdSingleClick(){
     if(photoFallState !== 'active') return;
+    advancePhotoFallBackgroundColor(); // 點擊畫面（這次點中的是飄動的 e）也算一次有效點擊，背景顏色跟著推進一格
     reshufflePhotoFallBatch();
   }
 
@@ -10980,9 +11020,23 @@
   // 這個位移門檻）。
   const PF_PHOTO_TAP_MAX_MOVE = 10;
   const PF_PHOTO_DOUBLE_CLICK_MS = 320;
+  // ---------- 修正：「連續狂點背景換色，容易被誤判成雙擊、意外跳回首頁」 ----------
+  // 雙擊判定原本只看「兩次點擊的時間間隔夠近」，完全沒管兩次點擊的位置——
+  // 但使用者換背景顏色的正常操作，就是在畫面各處連續單擊，兩次點擊間隔
+  // 常常本來就會落在 PF_PHOTO_DOUBLE_CLICK_MS 這個時間窗內，於是很容易在
+  // 完全沒有「雙擊」意圖的情況下被誤判成雙擊、整組堆疊被收掉、跳回首頁。
+  // 真正的雙擊（不管滑鼠或手指）兩次落點幾乎一定在同一個位置附近；改成
+  // 額外要求兩次點擊的座標距離也要夠近（PF_PHOTO_DOUBLE_CLICK_MAX_DIST）
+  // 才算數，跟原生作業系統判斷雙擊的邏輯一致（時間 + 距離缺一不可）。這樣
+  // 使用者在背景不同位置快速連點換色不會誤觸回首頁，但只要真的在同一個
+  // 地方點兩下（不管點在背景還是點在 png 物件上），依然會正常觸發回首頁，
+  // 「雙擊任何地方回首頁」這個功能本身沒有被拿掉，只是不再誤判。
+  const PF_PHOTO_DOUBLE_CLICK_MAX_DIST = 40;
   let pfPhotoTapCandidatePointerId = null;
   let pfPhotoTapStartX = 0, pfPhotoTapStartY = 0;
+  let pfPhotoTapStartIsPng = false; // 這次候選點擊按下時，是否落在某個 .photo-fall-item（飄落的 png 物件）上，還是落在空白背景
   let pfPhotoLastRealClickTime = 0;
+  let pfPhotoLastRealClickX = 0, pfPhotoLastRealClickY = 0; // 上一次「有效點擊」的落點座標，用來判斷這一次是不是跟上一次靠得夠近，才能算雙擊
 
   // ---------- 長按堆疊畫面：把目前這個瞬間的構圖擷取成「桌布」 ----------
   // 跟上面單擊／雙擊各自獨立一組候選狀態（同一根手指、同一次按下，但
@@ -11066,6 +11120,12 @@
       pfPhotoTapCandidatePointerId = e.pointerId;
       pfPhotoTapStartX = e.clientX;
       pfPhotoTapStartY = e.clientY;
+      // 按下的當下就記錄這一下是不是點在某個 png 物件（.photo-fall-item）
+      // 上——單擊要「點 png 換一批」還是「點背景換顏色」，靠的是這個判斷；
+      // 用 pointerdown 當下的 e.target 而不是等 pointerup 再判斷，是因為
+      // 位移量已經另外用 PF_PHOTO_TAP_MAX_MOVE 限制在 10px 內算「點一下」，
+      // 按下與放開這麼小的範圍內幾乎不會跨到别的元素，用哪一刻判斷結果一致。
+      pfPhotoTapStartIsPng = !!(e.target && e.target.closest && e.target.closest('.photo-fall-item'));
     }
 
     // 長按候選獨立追蹤，用比單擊/雙擊更寬鬆的門檻：只要不是 'idle'
@@ -11139,10 +11199,16 @@
     // 下面已經寫好、專門處理「換批途中被雙擊打斷」的 interruptReshuffleForExit()
     // 分支，無縫接上收場流程，行為不受影響。
     const nowClick = Date.now();
-    if(nowClick - pfPhotoLastRealClickTime <= PF_PHOTO_DOUBLE_CLICK_MS){
+    // 雙擊：時間夠近「而且」這一下的落點跟上一次有效點擊的落點也夠近，
+    // 兩個條件都成立才算數（原因見上面 PF_PHOTO_DOUBLE_CLICK_MAX_DIST
+    // 宣告處的完整說明——避免連續點擊畫面不同位置換色被誤判成雙擊）。
+    const dblDx = e.clientX - pfPhotoLastRealClickX, dblDy = e.clientY - pfPhotoLastRealClickY;
+    const isNearLastClick = Math.hypot(dblDx, dblDy) <= PF_PHOTO_DOUBLE_CLICK_MAX_DIST;
+    if(nowClick - pfPhotoLastRealClickTime <= PF_PHOTO_DOUBLE_CLICK_MS && isNearLastClick){
       // 判定成雙擊：直接收起整組堆疊——跟 handleDvdDoubleClick() 的邏輯
       // 完全一致，含「換批動畫進行中又被雙擊打斷」的處理
-      // （interruptReshuffleForExit()）。
+      // （interruptReshuffleForExit()）。雙擊回首頁不分點在 png 物件還是
+      // 空白背景上，維持「畫面任何地方雙擊都回首頁」。
       pfPhotoLastRealClickTime = 0;
       if(photoFallState === 'active'){
         exitPhotoFallMode();
@@ -11151,7 +11217,18 @@
       }
     } else {
       pfPhotoLastRealClickTime = nowClick;
-      if(photoFallState === 'active') reshufflePhotoFallBatch(); // 立即觸發，不再等待觀察期（見上方完整說明）
+      pfPhotoLastRealClickX = e.clientX;
+      pfPhotoLastRealClickY = e.clientY;
+      if(photoFallState === 'active'){
+        // ---------- 換一批只認 png 物件、換背景色只認空白背景 ----------
+        // 點在飄落的 png 物件上：換一批新的漂浮物件，不改變背景顏色；
+        // 點在物件跟物件間的空白背景上：只推進背景顏色，不觸發換批。
+        if(pfPhotoTapStartIsPng){
+          reshufflePhotoFallBatch();
+        } else {
+          advancePhotoFallBackgroundColor();
+        }
+      }
     }
   });
   window.addEventListener('pointercancel', (e) => {
@@ -12105,6 +12182,12 @@
   function exitPhotoFallMode(){
     if(!pfEngine) return;
     photoFallState = 'exiting';
+    // 收起堆疊、準備回首頁的這一刻，就讓背景開始淡回白色（見
+    // resetPhotoFallBackgroundColor() 的完整說明）：這時 .photo-fall-stage
+    // 還是 display:block、CSS transition 正常生效，淡色動畫會跟接下來
+    // 照片一路掉出畫面下緣的動畫同時播放，使用者感受到的是「畫面收起的
+    // 同時背景也跟著淡回白色」這一個連續的收場動作，不是分成兩段。
+    resetPhotoFallBackgroundColor();
     const Matter = window.Matter;
     const { Composite } = Matter;
 
