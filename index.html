@@ -1644,14 +1644,18 @@
 
   /* ---------- 堆疊頁面長按：擷取目前畫面當「桌布」的預覽彈窗 ----------
      長按本身完全不顯示任何提示（沒有進度條、沒有閃光），直到真的擷取
-     完成才跳出這個預覽——平常維持 display:none，不佔用任何 layout /
-     合成成本，也不會被外面兩張隱形圖片庫工具（Matter/pfPhotoTap 那組
-     pointer 事件）誤判成一個可以點擊的物件。 */
+     完成才跳出這個預覽。改用 opacity/visibility 而不是 display:none 來
+     控制顯示，是為了讓「跳出預覽」跟「按關閉退回堆疊頁面」這兩段過場
+     都能有淡入/淡出動畫——display:none 沒辦法做 transition（要嘛整個
+     消失、要嘛整個出現，中間沒有過渡狀態）。visibility:hidden 則能保證
+     平常完全不佔用互動層（不會被點到、也不會攔截底下 Matter/pfPhotoTap
+     那組 pointer 事件），跟原本 display:none 想要的效果一致，只差在多了
+     淡入淡出這段動畫期間。 */
   .wallpaper-preview-overlay{
     position:fixed;
     inset:0;
     z-index:999999; /* 蓋過全站所有東西，包含飄動的 e (99999) 跟 fixed-header (1000) */
-    display:none;
+    display:flex;
     align-items:center;
     justify-content:center;
     flex-direction:column;
@@ -1661,8 +1665,22 @@
     -webkit-backdrop-filter: blur(6px);
     padding:24px;
     box-sizing:border-box;
+    opacity:0;
+    visibility:hidden;
+    pointer-events:none;
+    /* 淡出：opacity 先過渡完，visibility 才切成 hidden（用 transition-delay
+       卡在 opacity 動畫結束的那一刻），避免動畫途中就先被 visibility:hidden
+       整個瞬間隱藏、看起來像沒有淡出效果。 */
+    transition: opacity 180ms ease, visibility 0s linear 180ms;
   }
-  .wallpaper-preview-overlay.active{ display:flex; }
+  .wallpaper-preview-overlay.active{
+    opacity:1;
+    visibility:visible;
+    pointer-events:auto;
+    /* 淡入：visibility 立刻切成 visible（0s 延遲），opacity 才開始過渡，
+       跟淡出剛好相反的順序。 */
+    transition: opacity 180ms ease, visibility 0s linear 0s;
+  }
   .wallpaper-preview-img{
     max-width:min(86vw, 480px);
     max-height:70vh;
@@ -9856,10 +9874,40 @@
     const sourcePool = withoutDvd.length ? withoutDvd : dvdEImages;
     const fresh = shuffled(sourcePool.filter(p => p && !pfLastBatchUrls.has(p.src)));
     if(fresh.length >= count) return fresh.slice(0, count);
-    const filler = shuffled(sourcePool);
+    // ---------- 修正：「堆疊頁面偶爾會出現重複的 PNG 圖片」----------
+    // 成因：上面 fresh 湊不滿 count 張的時候（扣掉上一批用過的照片、扣掉
+    // 飄動的 e 目前這張之後，剩下的候選不夠），原本直接拿「完整
+    // sourcePool 重新洗牌」當作補位來源，一張一張往 result 裡塞，卻沒有
+    // 檢查這些補位的照片是不是早就已經在 fresh（也就是已經在 result）裡
+    // 選過了——sourcePool 本身跟 fresh 的來源是同一個池子，重新洗牌只是
+    // 打亂順序，並不會把已經選過的排除掉，所以補位這幾張很容易又抽中
+    // 跟 fresh 裡某一張完全相同的照片，導致同一批掉落畫面上出現兩張一
+    // 模一樣的 PNG。這不是每次換批都會發生（fresh 剛好湊滿 count 張的
+    // 時候完全不會走到這段補位邏輯），只有 fresh 不夠、需要補位的那幾次
+    // 才會踩到，正好符合使用者回報「偶爾」而不是每次都有的描述；圖庫
+    // 張數跟 count（8 或 15）愈接近、換批換得愈頻繁，愈容易踩中。
+    // 修法：補位來源先排除掉 fresh 裡已經選過的照片（用 usedSrcs 這個
+    // Set 追蹤），只從「真正還沒被選進這一批」的照片裡補位；只有連這個
+    // 補位來源都不夠（圖庫裡完全不重複的照片總數本來就比 count 少，物理
+    // 上湊不出 count 張彼此都不同的組合，例如圖庫總共只有 5 張圖卻要求
+    // 掉 15 張）這種真正沒辦法的極端情況，才退回允許重複，並且用「依序
+    // 循環」而不是「重新洗牌後盼運氣不中」的方式明確補滿，確保張數一定
+    // 正確、不會少算。
     const result = fresh.slice();
-    for(let i = 0; result.length < count && i < filler.length; i++){
-      result.push(filler[i]);
+    const usedSrcs = new Set(result.map(p => p.src));
+    const fillerPool = shuffled(sourcePool.filter(p => p && !usedSrcs.has(p.src)));
+    for(let i = 0; result.length < count && i < fillerPool.length; i++){
+      result.push(fillerPool[i]);
+      usedSrcs.add(fillerPool[i].src);
+    }
+    if(result.length < count){
+      // 真正的極端情況：圖庫裡不重複的照片總數本身就比 count 少，上面
+      // 已經把所有不重複的候選都用完了還是湊不滿——只能開始允許重複，
+      // 依序循環整個 sourcePool 補滿剩下的名額。
+      const lastResortPool = shuffled(sourcePool);
+      while(result.length < count && lastResortPool.length){
+        result.push(lastResortPool[result.length % lastResortPool.length]);
+      }
     }
     return result;
   }
@@ -10764,27 +10812,34 @@
   let pfPhotoLastRealClickTime = 0;
 
   // ---------- 長按堆疊畫面：把目前這個瞬間的構圖擷取成「桌布」 ----------
-  // 跟上面單擊／雙擊共用同一組 pointerdown 起點（同一根手指、同一次
-  // 按下），額外疊加一個「按住不放超過 PF_LONGPRESS_MS 都沒有明顯位移」
-  // 的計時器——純粹是額外觀察，完全不影響單擊/雙擊本來的判斷。放開手指
-  // 這件事本身（pointerup）如果來得比計時器快，代表使用者只是單純點一下
-  // 或雙擊，計時器會在放開的當下被取消，長按邏輯完全不會被觸發，行為
-  // 對單擊／雙擊使用者來說零差異。長按期間刻意不做任何視覺提示（沒有
-  // 進度條、沒有變色），計時器一到直接靜靜擷取、跳出預覽——這正是使用者
-  // 要的「長按時不要顯示任何東西」。
+  // 跟上面單擊／雙擊各自獨立一組候選狀態（同一根手指、同一次按下，但
+  // 分開追蹤，互不干擾），只看「放開的那一刻，距離按下那一刻經過了多久
+  // （真實時間差）」，不用 setTimeout 計時器。
+  // ---------- 修正：「手機版剛進入堆疊頁面、第一批照片剛落下時，長按
+  // 完全沒有反應」----------
+  // 成因：原本的寫法是排一個 setTimeout(..., PF_LONGPRESS_MS)，按住不放
+  // 的這段期間如果時間一到就直接觸發擷取。手機剛進場、第一批 8~15 張
+  // 照片同時落下、彼此碰撞找位置堆好的那幾秒，正是整段體驗裡物理運算
+  // 最吃重的時刻（見上面 startPhotoFallEngine() 內一大段關於手機效能的
+  // 說明）——主執行緒被物理計算大量佔用時，setTimeout 的 callback 不保證
+  // 準時執行，只保證「不會比排定時間更早」，忙碌期間常常被硬生生延後
+  // 好幾百毫秒甚至更久。使用者實際按住的時間明明已經超過 550ms，但這個
+  // 延後的 callback 到使用者已經放開手指、pointerup 都觸發過了才輪到
+  // 執行——這時候已經太晚，長按因此看起來「完全沒反應」，而且發生機率
+  // 剛好就集中在最吃資源的「第一批」，換批之後（世界已經穩定、沒有大量
+  // 物理運算搶主執行緒）計時器準時觸發，長按才恢復正常，正是使用者
+  // 回報的落差成因。
+  // 修法：整段改成不依賴任何計時器——按下時只記錄一個時間戳記
+  // （pfLongPressStartTime），真正的判斷延後到放開手指那一刻，直接用
+  // 兩個真實時間戳記相減，看這段按住的時間是不是達到 PF_LONGPRESS_MS。
+  // pointerdown／pointerup 這兩個事件本身一定會準時送達（跟單擊/雙擊
+  // 賴以判斷的機制完全一樣可靠），這個判斷不管中途主執行緒多忙、卡了
+  // 多久，都不會受影響——即使物理運算讓畫面掉格，使用者放開手指這個
+  // 動作跟事件本身還是會準確被瀏覽器記錄下時間，判斷永遠準確。
   const PF_LONGPRESS_MS = 550;
-  let pfLongPressTimer = null;
-  let pfLongPressPointerId = null;
+  let pfLongPressCandidatePointerId = null;
   let pfLongPressStartX = 0, pfLongPressStartY = 0;
-  let pfLongPressFired = false; // 這次手勢已經被判定成長按、已經觸發過擷取，放開手指時要跳過單擊/雙擊判斷
-  function clearPfLongPressTimer(){
-    if(pfLongPressTimer !== null){ clearTimeout(pfLongPressTimer); pfLongPressTimer = null; }
-  }
-  window.addEventListener('pointermove', (e) => {
-    if(pfLongPressTimer === null || e.pointerId !== pfLongPressPointerId) return;
-    const dx = e.clientX - pfLongPressStartX, dy = e.clientY - pfLongPressStartY;
-    if(Math.hypot(dx, dy) > PF_PHOTO_TAP_MAX_MOVE) clearPfLongPressTimer(); // 明顯位移＝拖曳／甩動，不算長按
-  });
+  let pfLongPressStartTime = 0;
 
   photoFallStage.addEventListener('pointerdown', (e) => {
     // ---------- 修正：「雙擊回首頁，點畫面空白處沒反應，只有點在飄動物件
@@ -10801,43 +10856,49 @@
     // （dvdBounce）那組獨立的 pointerdown 監聽器（見上面
     // dvdTapCandidatePointerId 那組）完全沒有這條 photoFallState 限制，
     // 只看是否點在它身上，所以「點在飄動物件的圖片上」雙擊就正常，點
-    // 其他空白處雙擊就沒反應——正是使用者回報的落差。修法：pointerdown
-    // 這裡放寬成 'active' 或 'reshuffling' 都接受（下面 pointerup 本來
-    // 就已經完整處理了 reshuffling 時雙擊要呼叫
+    // 其他空白處雙擊就沒反應——正是使用者回報的落差。修法：單擊/雙擊
+    // 的候選記錄放寬成 'active' 或 'reshuffling' 都接受（下面 pointerup
+    // 本來就已經完整處理了 reshuffling 時雙擊要呼叫
     // interruptReshuffleForExit() 的分支，只是這個候選記錄一直沒機會
     // 走到那裡），只有真正的 entering/exiting 這兩個動畫過渡狀態才繼續
     // 忽略，避免點到即將被清掉的舊物件。
-    if(photoFallState !== 'active' && photoFallState !== 'reshuffling') return;
-    pfPhotoTapCandidatePointerId = e.pointerId;
-    pfPhotoTapStartX = e.clientX;
-    pfPhotoTapStartY = e.clientY;
+    if(photoFallState === 'active' || photoFallState === 'reshuffling'){
+      pfPhotoTapCandidatePointerId = e.pointerId;
+      pfPhotoTapStartX = e.clientX;
+      pfPhotoTapStartY = e.clientY;
+    }
 
-    // 長按只在真正 'active'（畫面上穩定顯示著這批物件）時才排程；
-    // 'reshuffling' 這個過渡狀態擷取到的會是正在飛出畫面的舊照片，
-    // 沒有意義，直接跳過，等單擊/雙擊那組邏輯自己處理就好。
-    if(photoFallState === 'active'){
-      pfLongPressFired = false;
-      pfLongPressPointerId = e.pointerId;
+    // 長按候選獨立追蹤，用比單擊/雙擊更寬鬆的門檻：只要不是 'idle'
+    // （根本沒有堆疊模式）或 'exiting'（正在整批飛出畫面），連 'entering'
+    // 這個過渡狀態也照樣先記下按下的時間——使用者剛雙擊完 dvdBounce
+    // 進入堆疊模式，很可能緊接著就長按，這一下按下的當下 photoFallState
+    // 極可能還停在 'entering'（要等 Matter.js 真的載入完成才會翻成
+    // 'active'，見 startPhotoFallEngine() 開頭說明）。等放開手指、真的要
+    // 判斷是否成立長按時（見下面 pointerup），使用者這時已經按住超過
+    // 550ms，'entering' 幾乎一定早就轉成 'active'；真的還沒轉成的極端
+    // 情況，下面判斷式也會因為要求當下必須是 'active' 才觸發擷取而自然
+    // 放棄，不會擷取到一張空白或半成品的畫面。
+    if(photoFallState !== 'idle' && photoFallState !== 'exiting'){
+      pfLongPressCandidatePointerId = e.pointerId;
       pfLongPressStartX = e.clientX;
       pfLongPressStartY = e.clientY;
-      clearPfLongPressTimer();
-      pfLongPressTimer = setTimeout(() => {
-        pfLongPressTimer = null;
-        // 計時器這段期間手指放開了（候選被 pointerup／pointercancel 清空）
-        // 或狀態已經變了，就放棄，不要憑空觸發一次擷取。
-        if(pfPhotoTapCandidatePointerId !== pfLongPressPointerId) return;
-        if(photoFallState !== 'active') return;
-        pfLongPressFired = true;
-        pfPhotoTapCandidatePointerId = null; // 避免等一下真的放開時，又被下面的單擊/雙擊邏輯多算一次
-        capturePhotoFallWallpaper();
-      }, PF_LONGPRESS_MS);
+      pfLongPressStartTime = Date.now();
     }
   });
   window.addEventListener('pointerup', (e) => {
-    if(e.pointerId === pfLongPressPointerId) clearPfLongPressTimer();
-    if(pfLongPressFired && e.pointerId === pfLongPressPointerId){
-      pfLongPressFired = false;
-      return; // 長按已經處理過擷取，這次放開不要再被當成一次點擊
+    // 長按候選優先判斷：命中就直接處理完畢，不落到下面單擊/雙擊那組邏輯，
+    // 避免這次放開同時被算成一次點擊。
+    if(pfLongPressCandidatePointerId !== null && e.pointerId === pfLongPressCandidatePointerId){
+      pfLongPressCandidatePointerId = null;
+      const ldx = e.clientX - pfLongPressStartX, ldy = e.clientY - pfLongPressStartY;
+      const heldMs = Date.now() - pfLongPressStartTime;
+      const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE; // 明顯位移＝拖曳/甩動，不算長按
+      const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
+      if(isStillish && heldMs >= PF_LONGPRESS_MS && noOverlay){
+        pfPhotoTapCandidatePointerId = null; // 避免下面單擊/雙擊邏輯又把這次放開重複處理一次
+        if(photoFallState === 'active') capturePhotoFallWallpaper();
+        return;
+      }
     }
     if(pfPhotoTapCandidatePointerId === null || e.pointerId !== pfPhotoTapCandidatePointerId) return;
     pfPhotoTapCandidatePointerId = null;
@@ -10873,7 +10934,7 @@
   });
   window.addEventListener('pointercancel', (e) => {
     if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; }
-    if(e.pointerId === pfLongPressPointerId){ clearPfLongPressTimer(); pfLongPressFired = false; }
+    if(pfLongPressCandidatePointerId === e.pointerId){ pfLongPressCandidatePointerId = null; }
   });
 
   // ---------- 長按擷取：把堆疊畫面目前的構圖畫成「桌布」 ----------
@@ -10944,11 +11005,15 @@
 
       // 手機／平板／桌機三組固定輸出解析度，跟全站既有的裝置寬度斷點
       // （DESKTOP_BREAKPOINT=1100、640）保持一致，不另外發明新的判斷。
+      // 這裡故意用比裝置螢幕更高一階的解析度（大致是常見手機/平板/桌機
+      // 螢幕實際像素密度的 2 倍），畫質可以撐得住當作桌布放大檢視、甚至
+      // 印出來也不會糊，跟 JPEG 品質（見下面 canvas.toBlob 那行）一起
+      // 兩邊都調高。
       const vw = window.innerWidth;
       let canvasW, canvasH;
-      if(vw <= 640){ canvasW = 1080; canvasH = 2340; } // 9:19.5，手機直式
-      else if(vw <= DESKTOP_BREAKPOINT){ canvasW = 1536; canvasH = 2048; } // 3:4，平板
-      else { canvasW = 1920; canvasH = 1080; } // 16:9，桌機橫式
+      if(vw <= 640){ canvasW = 2160; canvasH = 4680; } // 9:19.5，手機直式
+      else if(vw <= DESKTOP_BREAKPOINT){ canvasW = 3072; canvasH = 4096; } // 3:4，平板
+      else { canvasW = 3840; canvasH = 2160; } // 16:9，桌機橫式（4K）
 
       const canvas = document.createElement('canvas');
       canvas.width = canvasW;
@@ -10957,11 +11022,29 @@
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvasW, canvasH);
 
-      // 取「寬度縮放比」跟「高度縮放比」兩者較小的那個，保證整批構圖
-      // 完整落在畫布範圍內（短邊那側會剛好貼齊，長邊那側置中留白）。
-      const scale = Math.min(canvasW / contentW, canvasH / contentH);
-      const offsetX = (canvasW - contentW * scale) / 2 - minX * scale;
-      const offsetY = (canvasH - contentH * scale) / 2 - minY * scale;
+      // ---------- 對齊方式：左、右、下三邊都精準貼齊，只有上方可能留白 ----------
+      // 原本這裡是「整批置中＋兩軸都留白」（跟 CSS object-fit:contain 一樣
+      // 的置中手法）。改成優先用「寬度」決定縮放比例：整批構圖的寬度直接
+      // 撐滿畫布寬度，左右兩側因此一定精準貼齊；縮放後的高度如果小於等於
+      // 畫布高度（絕大多數情況——手機直式輸出通常比實際視窗畫面更高、更窄，
+      // 構圖高度本來就撐不滿），就把整批構圖貼齊畫布下緣（照片本來就是
+      // 從上面掉下來、堆在下半部，貼齊下緣最符合視覺直覺），只有上方留白，
+      // 完全符合「左、右、下三邊都精準對齊」的需求。
+      // 極端情況（構圖高度按這個縮放比例算出來反而超過畫布高度，貼滿寬度
+      // 會讓上緣被裁掉一截）才退回改用高度為準縮放、水平置中——這種退回
+      // 完全是為了信守「絕不裁切任何物件」這個更高優先的原則，一般使用
+      // 情境幾乎不會踩到。
+      const scaleByWidth = canvasW / contentW;
+      let scale, offsetX, offsetY;
+      if(contentH * scaleByWidth <= canvasH){
+        scale = scaleByWidth;
+        offsetX = -minX * scale;           // 左緣精準貼齊 x=0
+        offsetY = canvasH - maxY * scale;  // 下緣精準貼齊 y=canvasH，上方留白
+      } else {
+        scale = canvasH / contentH;
+        offsetX = (canvasW - contentW * scale) / 2 - minX * scale; // 貼滿高度時改成水平置中，避免裁切
+        offsetY = canvasH - maxY * scale;
+      }
 
       entries.forEach(entry => {
         ctx.save();
@@ -10977,13 +11060,14 @@
 
       // 輸出成 JPEG：因為畫布本身一開始就已經鋪滿白色底色（見上面
       // ctx.fillRect），JPEG 不支援透明度也完全不受影響，畫面上看到的
-      // 白底不會變成黑底或其他顏色。0.92 的品質在檔案大小與畫質之間
-      // 是常見的折衷值，PNG 去背圖邊緣經過這個流程重新合成到白底之後，
-      // 也不再需要保留 alpha 通道，用 JPEG 檔案可以小上不少。
+      // 白底不會變成黑底或其他顏色。品質從 0.92 調到 0.97——檔案會大一點，
+      // 但堆疊照片本身邊緣線條、細節較多，0.92 在放大檢視時偶爾看得出
+      // 壓縮的色塊感，0.97 幾乎跟原圖無異，換來的檔案大小增加在現在的
+      // 解析度下仍在合理範圍。
       canvas.toBlob((blob) => {
         if(!blob) return;
         showWallpaperPreview(URL.createObjectURL(blob));
-      }, 'image/jpeg', 0.92);
+      }, 'image/jpeg', 0.97);
     } catch(err){
       // 擷取失敗（例如圖片解碼中途被瀏覽器某些安全限制擋下）就靜靜放棄，
       // 不影響堆疊模式本身任何既有功能，使用者大不了再長按一次。
@@ -10996,22 +11080,36 @@
   const wallpaperDownloadBtn = document.getElementById('wallpaperDownloadBtn');
   const wallpaperCloseBtn = document.getElementById('wallpaperCloseBtn');
   let wallpaperPreviewObjectUrl = null; // 目前這張預覽圖的 blob URL，關閉時要釋放，避免累積記憶體
+  const WALLPAPER_FADE_MS = 180; // 跟上面 CSS .wallpaper-preview-overlay 的 transition 時間保持一致
+  let wallpaperHideCleanupTimer = null; // 淡出動畫播完之後才真正清掉 src／釋放 blob URL 的計時器
 
   function showWallpaperPreview(objectUrl){
     if(!wallpaperPreviewOverlay || !wallpaperPreviewImg) { URL.revokeObjectURL(objectUrl); return; }
+    // 如果上一張的淡出動畫還沒播完使用者就又長按了一次，先取消那個排定中的
+    // 清理，直接沿用下面「換成新圖」的流程，不要讓舊的計時器之後跑出來把
+    // 這張新圖的 src 也清掉。
+    if(wallpaperHideCleanupTimer){ clearTimeout(wallpaperHideCleanupTimer); wallpaperHideCleanupTimer = null; }
     if(wallpaperPreviewObjectUrl) URL.revokeObjectURL(wallpaperPreviewObjectUrl); // 上一張還沒被使用者關掉就長按了下一次，先把上一張釋放掉
     wallpaperPreviewObjectUrl = objectUrl;
     wallpaperPreviewImg.src = objectUrl;
     if(wallpaperDownloadBtn) wallpaperDownloadBtn.href = objectUrl;
-    wallpaperPreviewOverlay.classList.add('active');
+    wallpaperPreviewOverlay.classList.add('active'); // CSS transition 負責淡入
     wallpaperPreviewOverlay.setAttribute('aria-hidden', 'false');
   }
   function hideWallpaperPreview(){
     if(!wallpaperPreviewOverlay) return;
-    wallpaperPreviewOverlay.classList.remove('active');
+    wallpaperPreviewOverlay.classList.remove('active'); // CSS transition 負責淡出
     wallpaperPreviewOverlay.setAttribute('aria-hidden', 'true');
-    if(wallpaperPreviewObjectUrl){ URL.revokeObjectURL(wallpaperPreviewObjectUrl); wallpaperPreviewObjectUrl = null; }
-    if(wallpaperPreviewImg) wallpaperPreviewImg.src = '';
+    // 立刻清 src／釋放 blob URL 的話，圖片會在淡出動畫「播到一半」的時候
+    // 就整個消失，等於看不到淡出效果。改成等 CSS transition 的時間過完
+    // （WALLPAPER_FADE_MS，跟上面 CSS 的 180ms 對齊）才真的清理，畫面上
+    // 看到的就是完整的淡出，動畫結束後才悄悄回收資源，使用者不會察覺。
+    if(wallpaperHideCleanupTimer) clearTimeout(wallpaperHideCleanupTimer);
+    wallpaperHideCleanupTimer = setTimeout(() => {
+      wallpaperHideCleanupTimer = null;
+      if(wallpaperPreviewObjectUrl){ URL.revokeObjectURL(wallpaperPreviewObjectUrl); wallpaperPreviewObjectUrl = null; }
+      if(wallpaperPreviewImg) wallpaperPreviewImg.src = '';
+    }, WALLPAPER_FADE_MS);
   }
   if(wallpaperCloseBtn) wallpaperCloseBtn.addEventListener('click', hideWallpaperPreview);
   // 點背景（不是點在圖片或按鈕上）也能直接關閉，跟其他全站彈窗手感一致。
