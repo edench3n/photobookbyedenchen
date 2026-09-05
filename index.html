@@ -6881,6 +6881,20 @@
     const maskH = Math.max(2, Math.round(fullH * scale));
     const mask = new Uint8Array(maskW * maskH);
 
+    // ---------- 額外記錄「像素級」的可見範圍（供桌布擷取用） ----------
+    // 下面 processRows() 本來就會把 fullData 每一顆像素都讀過一次（算
+    // 每一格 solidCount/totalCount 用），這裡完全不需要另外多跑一次迴圈，
+    // 只要在同一個內層迴圈裡「順便」多記幾個變數：只要某顆像素 alpha
+    // 超過門檻，就把它的原始座標（sx/sy，還沒被縮成 maskW×maskH 那個
+    // 較粗的格子）併入一組全域最小/最大值。跟 finishMask() 裡用格子級
+    // boundary 算出來的範圍比，這組像素級的範圍精準得多（maskW/H 最大
+    // 只有 72，一格粗略對應原圖寬度的 1/72；這裡拿的是 fullW/H，最大
+    // 到 560，精細了將近 8 倍）——桌布擷取（capturePhotoFallWallpaper()／
+    // pfMaskVisibleUVBounds()）需要的是「盡量貼齊實際圖案邊緣」，用這組
+    // 更精細的像素級範圍取代原本格子級的 boundary，才能讓最後貼齊畫布
+    // 邊緣時，貼齊的真的是圖案本身、不是還帶著一圈格子誤差的留白。
+    let pxMinX = Infinity, pxMinY = Infinity, pxMaxX = -Infinity, pxMaxY = -Infinity;
+
     let my = 0;
     function processRows(deadline){
       let rowsDoneThisBatch = 0;
@@ -6907,7 +6921,14 @@
             const rowBase = sy * fullW;
             for(let sx = sx0; sx < sx1; sx++){
               totalCount++;
-              if(fullData[(rowBase + sx) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD) solidCount++;
+              if(fullData[(rowBase + sx) * 4 + 3] > PF_ALPHA_MASK_THRESHOLD){
+                solidCount++;
+                // 像素級可見範圍（見上面「額外記錄」那段完整說明），跟
+                // 這一格是否被判定成「多數實心」無關，只要這顆像素本身
+                // 有畫到東西就併入邊界，才能拿到比格子級更精準的結果。
+                if(sx < pxMinX) pxMinX = sx; if(sx > pxMaxX) pxMaxX = sx;
+                if(sy < pxMinY) pxMinY = sy; if(sy > pxMaxY) pxMaxY = sy;
+              }
             }
           }
           mask[my * maskW + mx] = (totalCount > 0 && solidCount / totalCount >= PF_ALPHA_MASK_CELL_MAJORITY) ? 1 : 0;
@@ -6946,7 +6967,18 @@
           boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
         }
       }
-      callback({ mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts) });
+      callback({
+        mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts),
+        // 像素級可見範圍（見上面「額外記錄」那段完整說明），正規化成 0..1：
+        // +1 是因為 pxMaxX/pxMaxY 記的是「最後一顆有畫到東西的像素索引」，
+        // 要算到這顆像素的右／下邊緣才是它真正涵蓋到的範圍，跟一般
+        // 「索引轉座標」要不要 +1 是同一個道理。找不到任何一顆有效像素
+        // （理論上不該發生，保險起見）就給 null，呼叫端會自動退回格子級
+        // boundary、再退回整個外框矩形，一路都有退場機制。
+        fullBBox: (pxMaxX >= pxMinX && pxMaxY >= pxMinY)
+          ? { u0: pxMinX / fullW, u1: (pxMaxX + 1) / fullW, v0: pxMinY / fullH, v1: (pxMaxY + 1) / fullH }
+          : null,
+      });
     }
 
     scheduleIdle(processRows, { timeout: 400, fallbackDelay: DVD_LOW_POWER_DEVICE ? 24 : 0 });
@@ -11025,7 +11057,13 @@
   // 掃過 boundary 這個較小的清單就能算出完整、準確的可見範圍，不需要重新
   // 掃一次整張遮罩網格。
   function pfMaskVisibleUVBounds(maskEntry){
-    if(!maskEntry || !maskEntry.boundary || !maskEntry.boundary.length) return null;
+    if(!maskEntry) return null;
+    // 優先用像素級的 fullBBox（見 buildAlphaMaskFromSourceChunked() 內
+    // 「額外記錄」那段完整說明，精準度比下面格子級 boundary 高將近 8 倍）；
+    // 舊快取（在這次改動之前就已經建好、還沒附上 fullBBox 的遮罩）才退回
+    // 格子級 boundary，兩者都沒有就退回 null（呼叫端會再退回整個外框矩形）。
+    if(maskEntry.fullBBox) return maskEntry.fullBBox;
+    if(!maskEntry.boundary || !maskEntry.boundary.length) return null;
     const b = maskEntry.boundary;
     let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
     for(let i = 0; i < b.length; i += 2){
