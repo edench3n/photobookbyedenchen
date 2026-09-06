@@ -11594,9 +11594,49 @@
   });
   window.addEventListener('pointercancel', (e) => {
     if(pfPhotoTapCandidatePointerId === e.pointerId){ pfPhotoTapCandidatePointerId = null; }
+    // ---------- 修正：「剛進入堆疊頁面、還在第一批 PNG 時，長按背景可以
+    // 觸發截圖，長按 PNG 圖片本身卻完全沒反應，換一批之後就恢復正常」
+    // ----------
+    // 成因：長按的這根手指，除了我們自己這組候選判斷（pfLongPressCandidatePointerId）
+    // 之外，同一次 pointerdown 的世界座標也會被 Matter.Mouse／
+    // MouseConstraint（見 startPhotoFallEngine() 內 `pfMouse =
+    // Mouse.create(photoFallStage)` 那段：命中判斷完全由 Matter 自己用
+    // 世界座標算，不受 DOM pointer-events 影響）同時判定成「抓到了一顆
+    // 物理 body」，立刻用一條 stiffness 0.5 的彈簧把這張照片拉向手指——
+    // 長按空白背景完全不會命中任何 body，不會有這條彈簧介入，運算量
+    // 因此明顯較輕。「第一批照片剛落下、彼此還在劇烈碰撞找位置」的那幾秒
+    // （完整成因見上面 PF_LONGPRESS_MS 宣告處那段關於手機效能的說明），
+    // 正是整段體驗物理運算最吃重的時刻；這時候如果手指剛好按住其中一張
+    // 還在被鄰居擠壓、彈跳的照片，等於在最吃重的碰撞解算之上，又多疊了
+    // 一條要跟其他所有碰撞力互相拉扯的彈簧，這一幀的運算量遠比長按空白
+    // 背景（完全沒有額外彈簧介入）更重。手機瀏覽器在主執行緒被塞爆到
+    // 一定程度、這根手指的觸控序列遲遲得不到正常處理時，可能會主動送出
+    // pointercancel（而不是使用者真正放開手指時該有的 pointerup）把整個
+    // 手勢取消掉——這正是「長按 PNG 沒反應」的成因：不是使用者放開了
+    // 手指，是瀏覽器自己在使用者仍按著不放的情況下，提前取消了這次觸控。
+    // 換一批之後，世界已經穩定、不會再有大量新照片同時落下互相碰撞，不會
+    // 踩到這個「額外彈簧＋碰撞解算雙重負擔」的極端情況，長按因此又恢復
+    // 正常，正是使用者回報的落差成因。
+    // 修法：這裡不再無條件放棄——沿用跟下面 pointerup 一模一樣的「按下到
+    // 這一刻的真實時間差、有沒有明顯位移」判斷（位移改用 pointermove
+    // 持續更新的 pfLongPressCurrentX/Y，不用這裡 pointercancel 事件本身
+    // 未必可靠的 e.clientX/Y），只要早就已經按滿 PF_LONGPRESS_MS 且原地
+    // 沒動，即使瀏覽器提前送出的是 pointercancel 而不是 pointerup，也照樣
+    // 視為長按成立、正常觸發擷取——使用者的手指實際上根本還沒放開，體感
+    // 上這次長按理應成立，不該因為瀏覽器內部這個跟使用者意圖無關的取消
+    // 訊號就悄悄放棄，讓使用者以為「長按 PNG 沒有用」。
     if(pfLongPressCandidatePointerId === e.pointerId){
+      const ldx = pfLongPressCurrentX - pfLongPressStartX, ldy = pfLongPressCurrentY - pfLongPressStartY;
+      const heldMs = Date.now() - pfLongPressStartTime;
+      const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE;
+      const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
+      const shouldCapture = isStillish && heldMs >= PF_LONGPRESS_MS && noOverlay && photoFallState === 'active';
       pfLongPressCandidatePointerId = null;
       if(pfLongPressTimer !== null){ clearTimeout(pfLongPressTimer); pfLongPressTimer = null; }
+      if(shouldCapture){
+        pfPhotoTapCandidatePointerId = null; // 避免這次取消又被下面單擊/雙擊邏輯重複處理一次
+        capturePhotoFallWallpaper();
+      }
     }
   });
 
@@ -11981,7 +12021,9 @@
   // 之前就被攔下來，Matter 完全不會知道這根旋轉手指的存在；主要拖曳手指
   // 的觸控事件完全不攔截，繼續正常流到 Matter 手上，拖曳手感不受任何影響。
   let pfRotateTouchId = null;   // 目前負責旋轉手勢的第二根手指 identifier；null 代表沒有在做旋轉手勢
-  let pfPrimaryTouchId = null;  // 目前負責拖曳位置（已經被 Matter 抓住）的那根手指 identifier
+  let pfPrimaryTouchId = null;  // 這次手勢最早落下的第一根手指 identifier；從它一落地就開始記錄
+                                 // （不等 Matter 真的抓到 body 才記，理由見下面 touchstart 監聽器
+                                 // 的完整說明），單指放開或整組手指都離開畫面時歸零。
   let pfPrimaryTouchX = 0, pfPrimaryTouchY = 0; // 兩指連線的兩個端點座標，算法跟
   let pfRotateTouchX = 0, pfRotateTouchY = 0;   // dvdPrimaryTouchX/dvdRotateTouchX 完全同一套精神（見上方飄動的 e 那組）
   let pfRotateLastAngle = 0;    // 上一次量到的「兩指連線」角度（弧度），逐影格算差值累加，理由同 dvdRotateLastAngle
@@ -12008,9 +12050,24 @@
   // 才不會有轉動軸心跟著拖曳方向跑偏的問題（原理、成因跟
   // applyDvdTwoFingerRotation() 上方的完整說明一致，這裡不重複）。
   function applyPfTwoFingerRotation(){
-    if(pfRotateTouchId === null || !pfRotateBody) return;
+    if(pfRotateTouchId === null) return;
     const Matter = window.Matter;
     if(!Matter) return;
+    // ---------- 配合 touchstart 監聽器的修正：延遲綁定 pfRotateBody ----------
+    // 兩指幾乎同時落下時，開始旋轉手勢那一刻 pfMouseConstraint.body 可能
+    // 還沒生效（見 touchstart 監聽器上方完整說明），pfRotateBody 當下會先
+    // 是 null。這裡每一影格都補檢查一次：只要 Matter 之後真的抓到了物件，
+    // 就在「第一次」偵測到的這一影格補上綁定——角度基準用這一影格當下的
+    // 兩指連線角度重新取值（而不是沿用手指剛落下那一刻算出的舊值），
+    // 避免因為中間跳過的那幾影格角度差被一次性倒進來、造成物件憑空轉一下。
+    if(!pfRotateBody){
+      pfRotateBody = pfMouseConstraint ? pfMouseConstraint.body : null;
+      if(!pfRotateBody) return; // 還是沒抓到任何東西，這一影格先不做事
+      pfRotateLastAngle = Math.atan2(pfRotateTouchY - pfPrimaryTouchY, pfRotateTouchX - pfPrimaryTouchX);
+      pfRotateSamples = [{ t: performance.now(), angle: pfRotateBody.angle }];
+      Matter.Body.setAngularVelocity(pfRotateBody, 0);
+      return; // 這一影格只負責補綁定、取新的角度基準，下一影格才開始真的轉
+    }
     const angle = Math.atan2(pfRotateTouchY - pfPrimaryTouchY, pfRotateTouchX - pfPrimaryTouchX);
     let deltaRad = angle - pfRotateLastAngle;
     // 正規化到 -PI ~ PI：兩指連線角度剛好跨過 180° 那一瞬間，直接相減會
@@ -12069,62 +12126,85 @@
     pfRotateSamples = [];
   }
 
-  // 第二根手指落下、確定要開始兩指旋轉手勢：只要目前確實有物件被抓著
-  // （pfMouseConstraint.body 非 null）、且還沒有另一根手指在做旋轉手勢，
-  // 這一下落下的手指只要不是目前拖曳中的那根，就無條件當成旋轉手勢的
-  // 第二指接手——見下面完整說明，這裡刻意不再判斷它有沒有落在圖片範圍上。
+  // ---------- 修正（新發現的根因）：「兩指幾乎同時落下時，第二指會變成
+  // Matter 完全追不到的『幽靈手指』，之後它自己移動、尤其是它自己放開的
+  // 那一瞬間，圖片會瞬間跳過去、甚至被誤判成整個放開」----------
+  // 舊版這裡用 `!pfMouseConstraint.body` 當作「目前有沒有東西正被拖著」的
+  // 判斷依據，但 Matter.Mouse 的 mousedown 處理（見 Mouse.create() 內
+  // `mouse.mousedown`）只會同步更新 mouse.position／mouse.button，真正
+  // 「抓住」body（把它寫進 mouseConstraint.body）要等到物理引擎下一次
+  // Engine.update() 的 'beforeUpdate' 階段（MouseConstraint.update() 裡的
+  // hitTest）才會發生——不是這個 touchstart 事件同步處理完就立刻生效。
+  // 也就是說，只要兩根手指落下的時間差小於一個物理影格（約 16ms，兩指
+  // 幾乎同時觸碰螢幕時非常容易發生，不需要瀏覽器把它們批次打包進同一個
+  // 原生事件也會中招），第二指落下的那一刻，pfMouseConstraint.body
+  // 仍然還是 null，導致下面這個判斷完全不會攔截第二指——兩根手指的
+  // touchstart 都會不受阻攔地直接流向 Matter，而 Matter 的 mousedown
+  // 只認 event.changedTouches[0]，於是只有先處理到的那一指真正被記錄成
+  // mouse 位置，另一指就變成「我們沒有標記成 pfRotateTouchId、Matter 也
+  // 沒有另外追蹤」的幽靈手指。之後只要這根幽靈手指自己移動（changedTouches
+  // 裡只含它一筆），或者——這正是使用者實際回報的症狀——只要它自己放開
+  // （touchend 的 changedTouches 同樣只含它一筆），因為 pfRotateTouchId
+  // 從頭到尾都是 null，下面 pfHandleRotateTouchEnd() 開頭的判斷會直接放行，
+  // 這個 touchend 會不受阻攔地流向 Matter 的 mouseup 處理：Matter 會先把
+  // mouse.position 覆寫成這根幽靈手指放開當下的座標（可能離正在拖曳的照片
+  // 很遠），而 MouseConstraint 抓取用的彈簧 constraint.pointA 本來就是直接
+  // 指向這個會被原地修改的 mouse.position 物件（同一個物件參照，不是複製
+  // 一份數值）——只要接下來還有一步物理更新在正式解除抓取之前跑到，拖曳中
+  // 的照片就會先被彈簧硬拉過去一下，肉眼看到的就是「放開瞬間，圖片瞬間跳
+  // 到另一指」；緊接著 mouse.button 被設回 -1，整個拖曳也跟著被誤判結束、
+  // 物件被瞬間丟下——即使真正在拖曳的那根手指根本還按著。
+  // 修法：不再用「Matter 有沒有真的抓到 body」這個本來就會延遲一整個物理
+  // 步才生效、靠不住的狀態當判斷依據，改成自己獨立追蹤「這次手勢最早落下
+  // 的第一根手指是誰」（pfPrimaryTouchId）：第一指落下時立刻記住它的
+  // identifier、放行給 Matter 自己判斷要不要抓取；只要 pfPrimaryTouchId
+  // 已經確定、且這一下落下的是「另一根」手指，就無條件當場攔截、當成旋轉
+  // 手勢的第二指——不必等 Matter 追上腳步，第二指也就永遠不會有機會變成
+  // 兩邊都追不到的幽靈手指。如果第一指其實根本沒有真的抓到任何照片
+  // （pfMouseConstraint.body 遲遲不會出現），這裡旋轉的目標 pfRotateBody
+  // 就會先留 null、什麼視覺效果都不會有，等第一指真的抓到東西之後，
+  // applyPfTwoFingerRotation() 會自動補上（見該處新增的延遲綁定），不會
+  // 因此讓幽靈手指的舊問題死灰復燃。
   document.addEventListener('touchstart', (e) => {
-    if(!pfMouseConstraint || !pfMouseConstraint.body || pfRotateTouchId !== null) return;
-    const draggedBody = pfMouseConstraint.body;
+    if(!photoFallModeActive) return; // 只在堆疊頁面生效，不影響其他頁面的觸控
     const newTouch = e.changedTouches && e.changedTouches[0];
     if(!newTouch) return;
-    // 這一刻 event.touches 裡，扣掉剛剛新落下的這一根，剩下的就是正在
-    // 拖曳位置的那根手指——不需要另外追蹤「哪根手指是主要拖曳手指」，
-    // 因為能走到這裡代表已經有物件被抓著，e.touches 裡除了這根新手指
-    // 之外的其他手指，必然就是那根正在拖曳的手指。
-    const primaryTouch = Array.prototype.find.call(e.touches, (t) => t.identifier !== newTouch.identifier);
-    if(!primaryTouch) return; // 理論上不會發生（代表根本沒有第二根手指），保底放行
 
-    // ---------- 修正：「先單指拖曳、第二指離圖片實際範圍較遠時，圖片會在
-    // 兩指之間瘋狂瞬間移動」----------
-    // 舊版這裡會先用 dvdHitTest() 判斷第二指是不是「真的落在圖片範圍
-    // （+容錯）內」，沒命中就直接 return、完全不攔截這個 touchstart。問題
-    // 出在 PNG 堆疊整套拖曳是靠 Matter.Mouse 撐著的，而 Matter 自己的
-    // touchstart 處理（內部對應到 mousedown 函式）完全不管這根手指是不是
-    // 「跟目前拖曳無關的新手指」——只要收到 touchstart，就會直接把
-    // mouse.position 整個覆寫成這根新手指當下的座標（見 Matter.Mouse
-    // 原始碼的 _mousedown()：`mouse.position.x/y = position.x/y`，沒有任何
-    // 手指識別的判斷）。一旦沒攔截，這個 touchstart 就會直接流到 Matter
-    // 手上，MouseConstraint 下一個物理步就會把正在拖曳的 body 瞬間拉去
-    // 第二指剛落下的位置；如果第二指之後還持續移動（因為沒命中熱區，
-    // pfRotateTouchId 仍然是 null），連帶後續的 touchmove 也完全不會被下面
-    // 那段攔截邏輯處理（見下面 touchmove 監聽器開頭的
-    // `if(pfRotateTouchId === null) return`），於是兩根手指的座標會交錯
-    // 灌進 Matter 讀到的 changedTouches[0]，肉眼看到的就是「圖片在兩指
-    // 之間瘋狂瞬間移動」。
-    // 這正是飄動的 e 不會有這個毛病、PNG 堆疊卻會的根本差異：e 的手勢完全
-    // 自己管位置（Pointer Events＋setPointerCapture），沒命中熱區時單純
-    // 什麼事都不會發生；PNG 堆疊背後掛著 Matter.Mouse，沒攔截到的第二指
-    // touchstart 會被 Matter 直接拿去頂替拖曳位置，兩者的失敗模式完全不同。
-    // 修法：只要確定目前真的有東西正被拖著（前面已經檢查過
-    // pfMouseConstraint.body），而且這一下確實是「另一根、跟目前拖曳手指
-    // 不同」的新手指落下，就不再判斷它有沒有落在圖片範圍內，一律直接當成
-    // 旋轉手勢的第二指、無條件攔截這個 touchstart，不讓它有機會流到 Matter
-    // 手上——不管兩指距離多遠，都能穩定觸發雙指旋轉，也徹底不會再有「沒
-    // 命中就被 Matter 誤讀，害拖曳中的物件瞬間跳走」這條路。
+    if(pfPrimaryTouchId === null){
+      // 這是這次手勢最早落下的第一根手指：只負責記住是誰，實際會不會抓到
+      // 照片交給 Matter 自己的 hitTest 判斷，這裡完全不攔截、正常放行。
+      if(e.touches.length === 1) pfPrimaryTouchId = newTouch.identifier;
+      return;
+    }
+
+    if(pfRotateTouchId !== null) return; // 已經有另一根手指在做旋轉手勢了
+    if(newTouch.identifier === pfPrimaryTouchId) return; // 理論上不會發生，保底
+
+    const primaryTouch = Array.prototype.find.call(e.touches, (t) => t.identifier === pfPrimaryTouchId);
+    if(!primaryTouch){
+      // 理論上不會發生（代表我們記錄的第一指其實已經不在 e.touches 裡，
+      // 可能是漏接了它的 touchend）：與其讓狀態卡死，不如把這一指直接
+      // 收編成新的第一指，至少後續手勢還能正常運作。
+      pfPrimaryTouchId = newTouch.identifier;
+      return;
+    }
+
     pfRotateTouchId = newTouch.identifier;
-    pfPrimaryTouchId = primaryTouch.identifier;
     pfPrimaryTouchX = primaryTouch.clientX;
     pfPrimaryTouchY = primaryTouch.clientY;
     pfRotateTouchX = newTouch.clientX;
     pfRotateTouchY = newTouch.clientY;
+    // pfMouseConstraint.body 這時候可能還沒生效（見上方完整說明），所以
+    // pfRotateBody 先照實際狀況記，抓不到就先留 null，交給
+    // applyPfTwoFingerRotation() 延遲補上。
+    const draggedBody = pfMouseConstraint ? pfMouseConstraint.body : null;
     pfRotateBody = draggedBody;
     pfRotateLastAngle = Math.atan2(pfRotateTouchY - pfPrimaryTouchY, pfRotateTouchX - pfPrimaryTouchX);
-    pfRotateSamples = [{ t: performance.now(), angle: draggedBody.angle }];
+    pfRotateSamples = draggedBody ? [{ t: performance.now(), angle: draggedBody.angle }] : [];
     // 開始手動旋轉的當下，先把殘留的物理角速度（例如剛撞完鄰居還沒轉完）
     // 歸零，避免手勢控制跟碰撞殘留互相疊加，理由同 startDvdRotateGesture()。
     const Matter = window.Matter;
-    if(Matter) Matter.Body.setAngularVelocity(draggedBody, 0);
+    if(draggedBody && Matter) Matter.Body.setAngularVelocity(draggedBody, 0);
 
     e.stopPropagation(); // 攔下來，不讓 Matter 收到這根手指的 touchstart（見上方完整說明）
     e.preventDefault();
@@ -12210,13 +12290,51 @@
   // pfMouse.mouseup()（Matter.Mouse.setElement() 裡 touchend 本來就是
   // 直接綁這個函式）補一次，讓 Matter 照樣正確收到「這根手指放開了」。
   function pfHandleRotateTouchEnd(e){
-    if(pfRotateTouchId === null) return;
+    // ---------- 修正：「pfPrimaryTouchId 記錄的第一指放開時，如果當下根本
+    // 沒有旋轉手勢在跑，會被下面的早退直接跳過，永遠不會被清掉」----------
+    // 配合 touchstart 監聽器的修正：pfPrimaryTouchId 現在從「手勢最早落下
+    // 的第一根手指」一開始就會被記錄，不是只有真的進入兩指旋轉時才存在，
+    // 所以單指點一下、或單指拖完全程都沒有叫出第二指的最常見情況，也一定
+    // 要在這根手指放開時把 pfPrimaryTouchId 清掉——否則它會一直卡著某個
+    // 已經不存在的 identifier，之後使用者重新開始新的一次觸控，會被誤判
+    // 成「不是這次手勢的第一指」，永遠排不上 pfPrimaryTouchId，後續第二指
+    // 落下時也就永遠比對不到正確的主要手指，整套兩指判斷從此失準。這段
+    // bookkeeping 跟下面「有沒有旋轉手勢在進行」完全分開處理，也不影響
+    // 是否攔截事件，單純只是記帳。
+    // 先保留這一刻「原本」的第一指 identifier 供下面比對用——記帳用的清空
+    // 動作要放到最後才做，不然提早把 pfPrimaryTouchId 設回 null，下面所有
+    // `t.identifier === pfPrimaryTouchId` 的比對就再也比不到任何東西了。
+    const originalPrimaryId = pfPrimaryTouchId;
+    let primaryDidEnd = false;
+    if(originalPrimaryId !== null){
+      for(let i = 0; i < e.changedTouches.length; i++){
+        if(e.changedTouches[i].identifier === originalPrimaryId){
+          primaryDidEnd = true;
+          break;
+        }
+      }
+    }
+    // 保底：這次 touchend／touchcancel 處理完之後，如果畫面上已經沒有任何
+    // 手指了（e.touches 在 touchend 事件裡本來就是「排除掉剛放開那幾根」
+    // 之後的結果），不管前面 identifier 有沒有精準對上，直接整組歸零，
+    // 避免任何邊角案例（例如漏接了某根手指的 touchend）讓狀態卡死、影響
+    // 下一次全新的觸控手勢。
+    if(e.touches && e.touches.length === 0){
+      pfPrimaryTouchId = null;
+      if(pfRotateTouchId !== null) endPfRotateGesture();
+      return;
+    }
+
+    if(pfRotateTouchId === null){
+      if(primaryDidEnd) pfPrimaryTouchId = null;
+      return;
+    }
     let sawRotate = false;
     let primaryTouch = null;
     for(let i = 0; i < e.changedTouches.length; i++){
       const t = e.changedTouches[i];
       if(t.identifier === pfRotateTouchId) sawRotate = true;
-      else if(t.identifier === pfPrimaryTouchId) primaryTouch = t;
+      else if(t.identifier === originalPrimaryId) primaryTouch = t;
     }
 
     if(!sawRotate){
@@ -12771,6 +12889,15 @@
     }
     pfEngine = null; pfRunner = null; pfMouse = null; pfMouseConstraint = null;
     pfGroundBody = null; pfLeftWall = null; pfRightWall = null;
+    // 修正：退出堆疊模式時如果剛好有手指還按著（例如正在拖曳中途被
+    // exitPhotoFallMode() 中斷），pfPrimaryTouchId／pfRotateTouchId 這些
+    // 追蹤用的 identifier 如果沒有一併歸零，下一次重新進入堆疊模式時，
+    // touchstart 監聽器會誤以為「已經有第一指」，導致新的第一根手指永遠
+    // 排不上 pfPrimaryTouchId，整套兩指判斷從進場那一刻就失準。
+    pfRotateTouchId = null;
+    pfPrimaryTouchId = null;
+    pfRotateBody = null;
+    pfRotateSamples = [];
     // 見 startPhotoFallEngine() 內 pfMouseButtonGuard 宣告處的完整說明：
     // 這是額外掛在 document 上的 listener，不是掛在 pfMouseConstraint／
     // pfEngine 這些會被上面 Engine.clear()／Composite.clear() 一併清掉的
