@@ -8127,6 +8127,11 @@
   let dvdDragging = false;
   let dvdPointerId = null;
   let dvdGrabOffsetX = 0, dvdGrabOffsetY = 0; // 抓取當下，指標位置跟元素左上角的距離，維持抓取點不跳動
+  // 抓取點相對「物件自己中心」的本地向量（角度視為 0 時的座標系），拖曳
+  // 全程固定不變——旋轉時用來反推「這一刻的抓取點被轉到哪裡去了」，是修正
+  // 下面「兩指旋轉軸心跑偏」那個 bug 的關鍵，見 recomputeDvdDragXY() 的
+  // 完整說明。
+  let dvdGrabLocalOffsetX = 0, dvdGrabLocalOffsetY = 0;
   let dvdMoveSamples = []; // 最近的 {t, x, y} 取樣，放開時用來算「甩動當下」的瞬時速度
   // 修正「雙擊飄動的 e 時，位置會跟著跳兩下」：按下的當下先只記錄「候選」
   // 資訊，不立刻套用抓取效果／搬動位置，等真的確定是拖曳（位移超過
@@ -8153,11 +8158,28 @@
   // 照常呼叫 stepDvdRotation() 就會自動接手衰減，不需要另外寫一套收尾
   // 動畫。
   let dvdRotatePointerId = null; // 目前負責旋轉手勢的第二根手指 pointerId；null 代表沒有在做旋轉手勢
-  let dvdRotateLastAngle = 0; // 上一次量到的「兩指連線」角度（弧度）。逐影格算跟上一次的差值來累加，
-    // 不是拿目前角度去減一個固定不變的起始角度——手指持續繞圈時，差值
-    // 累加法完全不會受 atan2() 回傳範圍只有 -PI~PI 這件事影響（角度繞過
-    // ±180° 那一刻也不會瞬間跳一大圈），跟位置那邊用「增量」而不是「絕對值」
-    // 累加的精神是一致的。
+  // ---------- 改用業界標準的「雙指中點＋連線角度」手勢模型 ----------
+  // 舊版做法：只認「主要手指」為固定支點，另一指單純負責提供旋轉角度，
+  // 再用「抓取點相對物件中心的本地向量」反推位置——這正是「一指定位、
+  // 另一指旋轉」的架構，不是使用者要的「兩指一起玩弄」。而且這套反推法
+  // 還有一個更根本的問題：只要抓取當下（或兩指手勢開始當下）物件本身還
+  // 帶著殘留角度（例如剛撞完牆還沒轉完），沒有先用那個角度把「本地向量」
+  // 轉回零度基準，之後每次用「目前角度」重新展開這個向量時，就會疊加上
+  // 這段被忽略的初始角度誤差，角度轉得越多，位置就跟著偏移越多——這正是
+  // 「轉一下圖片就飄離手指很遠」的根本成因。
+  // 新做法：完全比照 Google 地圖雙指旋轉地圖、Procreate／Photoshop 畫布
+  // 雙指平移＋旋轉那套成熟手勢——兩指從頭到尾平等，每一影格直接用「兩指
+  // 目前的中點」和「兩指連線角度」跟上一影格比較：
+  //   1) 物件先繞著「上一影格的兩指中點」轉過這一影格的角度差，
+  //   2) 再整體平移「這一影格中點移動的距離」。
+  // 兩指中點本身就會自然貼著兩指之間、跟著兩指一起移動／旋轉，不需要另外
+  // 反推「抓取點」，也就不會有本地向量基準沒歸零的誤差可以累積，這是兩指
+  // 手勢每一影格都直接吃「當下」資料重新算，不依賴任何從手勢一開始就
+  // 固定不變的假設。詳見下面 applyDvdTwoFingerTransform()。
+  let dvdTwoFingerMidX = 0, dvdTwoFingerMidY = 0; // 上一影格量到的「兩指中點」螢幕座標
+  let dvdTwoFingerAngle = 0; // 上一影格量到的「兩指連線」角度（弧度），逐影格算差值累加，
+    // 理由跟舊版 dvdRotateLastAngle 一樣：差值累加法不受 atan2() 只回傳
+    // -PI~PI 影響，手指持續繞圈也不會在跨過 ±180° 那一刻瞬間跳一大圈。
   let dvdRotateSamples = []; // 最近的 {t, deg} 取樣，放開旋轉手指時用來算「甩轉」瞬間的角速度，寫法比照 dvdMoveSamples／DVD_FLING_WINDOW_MS 那一套
   const DVD_ROTATE_FLING_WINDOW_MS = 80; // 跟 DVD_FLING_WINDOW_MS 同一個概念、同一個時長，只是換成角度的版本
   let dvdPrimaryTouchX = 0, dvdPrimaryTouchY = 0; // 目前負責拖曳位置的第一根手指／滑鼠最新的螢幕座標，算「兩指連線角度」要用這個當其中一個端點
@@ -8223,11 +8245,11 @@
 
   // 第二根手指落下、確定要開始兩指旋轉手勢：記錄基準角度（跟第一根手指
   // 目前位置連線的角度），之後 dvdRotatePointerMove() 只需要逐影格算跟
-  // 上一次的差值疊加上去即可（見上面 dvdRotateLastAngle 的完整說明）。
+  // 上一次的差值疊加上去即可（見上面 dvdTwoFingerAngle 的完整說明）。
   let dvdRotateTouchX = 0, dvdRotateTouchY = 0; // 目前負責旋轉手勢的第二根手指最新的螢幕座標，
     // 跟 dvdPrimaryTouchX/dvdPrimaryTouchY 是同一種「兩指連線」端點，只是這根換成旋轉手指。
     // 拆成獨立、隨時更新的變數（而不是只在旋轉手指自己的 pointermove 裡臨時用區域變數算），
-    // 是修正下面「拖曳中軸心跑偏」那個 bug 的關鍵，見 applyDvdTwoFingerRotation() 的說明。
+    // 是讓兩指手勢每一影格都能用「當下」座標重新算的關鍵，見 applyDvdTwoFingerTransform() 的說明。
 
   function startDvdRotateGesture(e){
     dvdRotatePointerId = e.pointerId;
@@ -8238,39 +8260,73 @@
     dvdRotationVel = 0;
     dvdRotateTouchX = e.clientX;
     dvdRotateTouchY = e.clientY;
-    dvdRotateLastAngle = Math.atan2(dvdRotateTouchY - dvdPrimaryTouchY, dvdRotateTouchX - dvdPrimaryTouchX);
+    // 兩指手勢的基準只需要「這一刻兩指的中點／連線角度」，不需要碰
+    // dvdGrabLocalOffsetX/Y 或做任何角度歸零的反推——這正是新架構刻意
+    // 避開舊版誤差來源的地方（見上面 dvdTwoFingerMidX/Y 的完整說明）。
+    dvdTwoFingerMidX = (dvdPrimaryTouchX + dvdRotateTouchX) / 2;
+    dvdTwoFingerMidY = (dvdPrimaryTouchY + dvdRotateTouchY) / 2;
+    dvdTwoFingerAngle = Math.atan2(dvdRotateTouchY - dvdPrimaryTouchY, dvdRotateTouchX - dvdPrimaryTouchX);
     dvdRotateSamples = [{ t: performance.now(), deg: dvdRotationDeg }];
   }
 
-  // 修正「兩指旋轉時軸心跑偏」：不管是負責拖曳位置的主要手指動了、還是負責
-  // 旋轉的手指動了，都要呼叫這支函式，用「兩指目前各自最新的座標」重新算一次
-  // 「兩指連線」的角度、跟上一次記下的角度取差值來累加旋轉角度——這是市面上
-  // 兩指旋轉手勢（例如 Google 地圖雙指扭轉指北針、Photoshop／Procreate 的兩指
-  // 旋轉）共通的標準做法：角度基準永遠跟著「這一影格兩指的即時位置」同步更新，
-  // 不會只綁在其中一根手指的移動事件上。
+  // ---------- 業界標準兩指手勢：以「兩指中點」為支點同時做旋轉＋平移 ----------
+  // 不管是負責拖曳位置的主要手指動了、還是負責旋轉的手指動了，都要呼叫這支
+  // 函式，用「兩指目前各自最新的座標」重新算一次中點與連線角度：
+  //   1) 跟上一影格的角度取差值，把物件繞著「上一影格的兩指中點」轉過這段
+  //      角度差（不是繞物件自己的中心轉、也不是繞單一根手指轉）；
+  //   2) 再把「這一影格中點移動的距離」整個加回去，讓物件跟著兩指一起平移。
+  // 這正是 Google 地圖雙指扭轉地圖、Procreate／Photoshop 畫布雙指旋轉＋平移
+  // 手勢共通的標準做法：兩指從頭到尾地位對等、共同決定物件的位置與角度，
+  // 不是「一指定位、另一指單獨提供角度」。
   //
-  // 原本的 bug：只有旋轉手指的 pointermove（原本的 dvdRotatePointerMove）會
-  // 重新算角度、更新 dvdRotateLastAngle 這個基準值；負責拖曳位置的主要手指
-  // 移動時（dvdPointerMove）只更新了 dvdPrimaryTouchX/Y，卻沒有同步更新
-  // dvdRotateLastAngle。於是「兩指連線」這個向量其實已經因為主要手指被拖著
-  // 移動而悄悄轉了一個角度，但基準值沒跟上；下一次旋轉手指再觸發 pointermove
-  // 時，算出來的 deltaRad 就會把「這段期間單純因為拖曳、主要手指位置改變」
-  // 也一起誤算成使用者主動做的旋轉手勢，看起來就像轉動的軸心跟著拖曳方向跑偏、
-  // 轉起來的角度跟手指實際轉的幅度對不上。
-  // 修法：兩根手指共用同一支函式，任何一根手指移動都立刻重新算一次角度並套用
-  // 差值，角度基準值永遠跟最新一影格同步，就不會再有這種累積誤差。
-  function applyDvdTwoFingerRotation(){
-    if(dvdRotatePointerId === null) return; // 目前沒有兩指旋轉手勢在進行，不用算
+  // 這也順便解掉舊版 applyDvdTwoFingerRotation()＋recomputeDvdDragXY() 那套
+  // 「固定本地向量」設計的根本問題：那套做法要求「抓取當下（或兩指手勢開始
+  // 當下）的角度」必須先歸零校正，才能保證之後用任意角度重新展開這個向量時
+  // 不會有誤差；一旦物件在手勢開始當下還帶著殘留角度（例如剛撞完牆），這段
+  // 誤差就會隨著旋轉幅度變大而放大，變成「轉一下就飄離手指很遠」。這裡完全
+  // 不需要任何固定不變的本地向量——每一影格都直接拿「當下」兩指的即時位置
+  // 重新計算，中點本身就會自然貼著兩指之間跟著轉、跟著移動，沒有基準值可以
+  // 跑掉，也就沒有誤差可以累積。
+  function applyDvdTwoFingerTransform(){
+    if(dvdRotatePointerId === null) return; // 目前沒有兩指手勢在進行，不用算
+    const midX = (dvdPrimaryTouchX + dvdRotateTouchX) / 2;
+    const midY = (dvdPrimaryTouchY + dvdRotateTouchY) / 2;
     const angle = Math.atan2(dvdRotateTouchY - dvdPrimaryTouchY, dvdRotateTouchX - dvdPrimaryTouchX);
-    let deltaRad = angle - dvdRotateLastAngle;
+    let deltaRad = angle - dvdTwoFingerAngle;
     // 正規化到 -PI ~ PI：兩指連線角度剛好跨過 180° 那一瞬間，直接相減會
     // 從接近 +PI 瞬間跳到接近 -PI（或反過來），這裡修正回「這一影格實際
     // 轉動的最短角度」，物件才不會在那一刻無故瞬間轉一大圈。
     while(deltaRad > Math.PI) deltaRad -= Math.PI * 2;
     while(deltaRad < -Math.PI) deltaRad += Math.PI * 2;
-    dvdRotateLastAngle = angle;
+
+    // 先繞著「上一影格的兩指中點」把物件目前的中心點轉過 deltaRad——這一步
+    // 才是讓物件感覺起來「真的被兩指轉盤子」的關鍵，而不是繞自己中心空轉。
+    const centerX = dvdX + dvdW / 2;
+    const centerY = dvdY + dvdH / 2;
+    const cosD = Math.cos(deltaRad), sinD = Math.sin(deltaRad);
+    const relX = centerX - dvdTwoFingerMidX;
+    const relY = centerY - dvdTwoFingerMidY;
+    let newCenterX = dvdTwoFingerMidX + (relX * cosD - relY * sinD);
+    let newCenterY = dvdTwoFingerMidY + (relX * sinD + relY * cosD);
+    // 再疊加上「這一影格中點本身移動的距離」，物件才會跟著兩指一起平移，
+    // 不會只轉不動。
+    newCenterX += midX - dvdTwoFingerMidX;
+    newCenterY += midY - dvdTwoFingerMidY;
+
     dvdRotationDeg += deltaRad * 180 / Math.PI;
-    dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
+
+    // 邊界／像素內縮判斷跟單指拖曳共用同一套（見 computeDvdPixelInsets()／
+    // recomputeDvdDragXY() 的完整說明），確保兩指手勢期間物件一樣不會被
+    // 甩出螢幕可視範圍。
+    const insets = computeDvdPixelInsets();
+    const minX = dvdBoundMinX() - insets.left, minY = dvdBoundMinY() - insets.top;
+    const maxX = dvdBoundMaxX() + insets.right, maxY = dvdBoundMaxY() + insets.bottom;
+    dvdX = clampDvd(newCenterX - dvdW / 2, Math.min(minX, maxX), Math.max(minX, maxX));
+    dvdY = clampDvd(newCenterY - dvdH / 2, Math.min(minY, maxY), Math.max(minY, maxY));
+
+    dvdTwoFingerMidX = midX;
+    dvdTwoFingerMidY = midY;
+    dvdTwoFingerAngle = angle;
 
     const now = performance.now();
     dvdRotateSamples.push({ t: now, deg: dvdRotationDeg });
@@ -8279,12 +8335,46 @@
     }
   }
 
+  // ---------- 用「目前旋轉角度」反推抓取點該補償的位移，確保抓取點永遠
+  // 貼在主要（拖曳）手指下面 ----------
+  // dvdGrabLocalOffsetX/Y 是抓取當下量到的、「抓取點相對物件中心」的本地
+  // 向量，角度視為 0 時的座標，全程固定不變（見 commitDvdDrag() 的完整
+  // 說明）。這裡把它用「這一刻的 dvdRotationDeg」重新轉一次，就能推算出
+  // 抓取點此刻實際被轉到物件中心的哪個方向、哪個距離，再用主要手指目前
+  // 的螢幕座標減去這段偏移，反推出物件中心該在的位置——這樣不管旋轉到
+  // 幾度，抓取點在螢幕上永遠精確貼齊在手指下面，不會再像原本那樣，角度
+  // 一變就跟拖曳位置的假設對不上、圖案跟著飄走。
+  // 兩指旋轉手勢進行中，這支函式需要在「主要手指移動」跟「旋轉手指移動」
+  // 兩種情況下都被呼叫（分別見 dvdPointerMove()／dvdRotatePointerMove()），
+  // 只要其中一個輸入（手指位置／旋轉角度）改變了，物件的位置就要跟著
+  // 重新算一次，兩者缺一都會讓抓取點跟手指對不齊。
+  function recomputeDvdDragXY(){
+    if(!dvdDragging) return;
+    const theta = dvdRotationDeg * Math.PI / 180;
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    const rotOffX = dvdGrabLocalOffsetX * cosT - dvdGrabLocalOffsetY * sinT;
+    const rotOffY = dvdGrabLocalOffsetX * sinT + dvdGrabLocalOffsetY * cosT;
+    const rawX = dvdPrimaryTouchX - rotOffX - dvdW / 2;
+    const rawY = dvdPrimaryTouchY - rotOffY - dvdH / 2;
+    // 邊界／像素內縮判斷跟 dvdPointerMove() 原本那段完全同一套（見該處
+    // 的完整說明），這裡抽成同一支函式共用，拖曳跟旋轉手勢都用同一組
+    // 邊界，行為保持一致。
+    const dvdDragPixelInsets = computeDvdPixelInsets();
+    const minX = dvdBoundMinX() - dvdDragPixelInsets.left, minY = dvdBoundMinY() - dvdDragPixelInsets.top;
+    const maxX = dvdBoundMaxX() + dvdDragPixelInsets.right, maxY = dvdBoundMaxY() + dvdDragPixelInsets.bottom;
+    dvdX = clampDvd(rawX, Math.min(minX, maxX), Math.max(minX, maxX));
+    dvdY = clampDvd(rawY, Math.min(minY, maxY), Math.max(minY, maxY));
+  }
+
   function dvdRotatePointerMove(e){
     if(e.pointerId !== dvdRotatePointerId) return;
     e.preventDefault();
     dvdRotateTouchX = e.clientX;
     dvdRotateTouchY = e.clientY;
-    applyDvdTwoFingerRotation();
+    // 新架構下，位置＋角度是同一支函式一次算完（見 applyDvdTwoFingerTransform()
+    // 的完整說明），不用再分兩步驟。
+    applyDvdTwoFingerTransform();
+    dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
   }
 
   // 結束旋轉手勢（放開手指、手勢被系統取消、或主要拖曳手指先放開）共用
@@ -8295,6 +8385,26 @@
     try{ dvdBounce.releasePointerCapture(dvdRotatePointerId); }catch(err){}
     dvdRotatePointerId = null;
     finalizeDvdRotateVelocity();
+    // 如果拖曳位置的主要手指還按著（只是旋轉的第二指放開），要回到單指
+    // 拖曳（recomputeDvdDragXY()，見該函式說明）。兩指手勢期間物件的
+    // 位置／角度全程都是用「兩指中點＋連線角度」直接算出來的（見
+    // applyDvdTwoFingerTransform()），完全沒有維護 dvdGrabLocalOffsetX/Y
+    // 這組單指專用的抓取偏移量——這裡用「此刻」主要手指的螢幕座標、物件
+    // 當下的中心位置與旋轉角度，重新算一次抓取偏移量，才能讓單指拖曳
+    // 無縫接上，不會因為偏移量還停留在兩指手勢開始之前的舊值而跳動。
+    if(dvdDragging){
+      const centerX = dvdX + dvdW / 2;
+      const centerY = dvdY + dvdH / 2;
+      const worldOffX = dvdPrimaryTouchX - centerX;
+      const worldOffY = dvdPrimaryTouchY - centerY;
+      // 反推回「角度視為 0」時的本地向量：用 -theta 把目前這個世界座標系
+      // 下的偏移轉回去，跟 recomputeDvdDragXY() 裡「本地向量 → 目前角度
+      // 下的世界偏移」是同一組旋轉公式的反方向操作。
+      const theta = dvdRotationDeg * Math.PI / 180;
+      const cosT = Math.cos(theta), sinT = Math.sin(theta);
+      dvdGrabLocalOffsetX = worldOffX * cosT + worldOffY * sinT;
+      dvdGrabLocalOffsetY = -worldOffX * sinT + worldOffY * cosT;
+    }
     startDvdDragRotationDecay();
   }
 
@@ -9243,6 +9353,27 @@
     dvdY = centerY - dvdH / 2;
     dvdGrabOffsetX = e.clientX - dvdX;
     dvdGrabOffsetY = e.clientY - dvdY;
+    // ---------- 抓取點換算成「角度視為 0 時」的本地向量，供單指拖曳中途
+    // 若補上第二指再放開、回到單指時（見 endDvdRotateGesture()）沿用 ----------
+    // CSS 的 rotate() 是繞著元素「自己的中心」轉：dvdGrabOffsetX/Y 是在
+    // 「目前這個角度」下量到的世界座標偏移，如果抓取當下 dvdRotationDeg
+    // 剛好不是 0（例如剛撞完牆、旋轉衰減還沒轉完），不能直接拿這個偏移
+    // 當成「角度 0」的本地向量——一定要先用「抓取當下的角度」把它反向轉
+    // 回去，才是真正跟角度無關、全程固定不變的本地向量。這裡如果直接跳過
+    // 這段反轉，效果等同單指抓取的當下就已經預埋了角度誤差，之後只要角度
+    // 再變化（不管是撞牆殘留的旋轉、還是後續補上第二指做兩指旋轉），這股
+    // 誤差都會被放大，看起來就像「轉一下圖案就飄離手指很遠」。
+    {
+      const grabTheta = dvdRotationDeg * Math.PI / 180;
+      const cosG = Math.cos(grabTheta), sinG = Math.sin(grabTheta);
+      const worldOffX = dvdGrabOffsetX - dvdW / 2;
+      const worldOffY = dvdGrabOffsetY - dvdH / 2;
+      // 反轉（inverse rotate，等同乘上 R(-grabTheta)）換回角度視為 0 時的
+      // 座標系，跟 recomputeDvdDragXY() 裡「本地向量 → 目前角度下的世界
+      // 偏移」用的是同一組旋轉公式的反方向操作。
+      dvdGrabLocalOffsetX = worldOffX * cosG + worldOffY * sinG;
+      dvdGrabLocalOffsetY = -worldOffX * sinG + worldOffY * cosG;
+    }
     dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
     // 記下這根手指目前的座標，供之後補第二根手指做兩指旋轉時，拿來當
     // 「兩指連線」的其中一個端點（見上面 startDvdRotateGesture() 的說明）。
@@ -9268,36 +9399,26 @@
     e.preventDefault();
     // ---------- 修正：「用滑鼠／觸控拖曳時，卡在一個空白區域邊界，而不是
     // 實際去背後邊界」----------
-    // 這裡原本只拿 dvdBoundMinX()/dvdBoundMaxX() 這組「未去背裁切、單純
-    // 矩形外框」的邊界去 clamp 拖曳座標——跟 stepDvdBounce() 那套飄動／
-    // 撞牆物理迴圈不是同一組邊界：後者早就有 computeDvdPixelInsets() 算出
-    // 的像素級 inset（見該函式的完整說明），拖曳這裡卻完全沒有套用，等於
-    // 放開手指飄走時用的是「圖案實際邊緣」，用手指／滑鼠拖曳時卻仍然被
-    // 矩形外框卡住——這正是使用者回報「拖曳到網頁邊界時，被一個空白的
-    // 區域邊界卡住，而不是實際去背後邊界」的成因：矩形外框比圖案實際可視
-    // 範圍多留了一圈透明空白，拖曳時手還沒真的把圖案本身的像素拖到螢幕
-    // 邊緣，就已經被這圈空白卡住、拖不動了。
-    // 修法：拖曳時也套用同一套 computeDvdPixelInsets()，跟飄動物理迴圈用
-    // 完全相同的一組邊界，讓拖曳能一路拖到圖案本身的像素貼齊螢幕邊緣為止，
-    // 不會再被外框的透明留白提前卡住。旋轉角度在拖曳全程本來就是抓取當下
-    // 的固定值（見 commitDvdDrag() 裡把 dvdRotationVel 歸零的說明），這裡
-    // 不需要額外處理旋轉變化，直接呼叫即可。
-    const dvdDragPixelInsets = computeDvdPixelInsets();
-    const minX = dvdBoundMinX() - dvdDragPixelInsets.left, minY = dvdBoundMinY() - dvdDragPixelInsets.top;
-    const maxX = dvdBoundMaxX() + dvdDragPixelInsets.right, maxY = dvdBoundMaxY() + dvdDragPixelInsets.bottom;
-    dvdX = clampDvd(e.clientX - dvdGrabOffsetX, Math.min(minX, maxX), Math.max(minX, maxX));
-    dvdY = clampDvd(e.clientY - dvdGrabOffsetY, Math.min(minY, maxY), Math.max(minY, maxY));
+    // 邊界／像素內縮的判斷已經統一搬進 recomputeDvdDragXY()（見該函式的
+    // 完整說明：跟 stepDvdBounce() 那套飄動／撞牆物理迴圈共用同一組
+    // computeDvdPixelInsets() 算出的像素級邊界，不會再被矩形外框的透明
+    // 留白提前卡住）。
+    //
     // 隨時更新這根手指目前的座標，讓正在進行中的兩指旋轉手勢（如果有）
     // 拿到的「連線角度」永遠是相對這根手指最新位置算出來的，位置拖曳跟
     // 兩指旋轉可以同時進行，不會互相干擾。
     dvdPrimaryTouchX = e.clientX;
     dvdPrimaryTouchY = e.clientY;
-    // 主要手指的位置一改變，「兩指連線」的角度其實也跟著變了——如果兩指
-    // 旋轉手勢正在進行中，這裡要立刻重新算一次角度並套用差值（跟旋轉手指
-    // 自己移動時是同一套邏輯，見 applyDvdTwoFingerRotation() 的完整說明），
-    // 角度基準值才不會因為只有拖曳手指動、旋轉手指沒動而漏掉這段變化，
-    // 累積到下一次旋轉手指移動時才一次爆發出來，造成軸心跑偏。
-    applyDvdTwoFingerRotation();
+    // 主要手指的位置一改變，如果兩指手勢正在進行中，位置＋角度要一起用
+    // 「這一刻兩指的即時座標」重新算一次（見 applyDvdTwoFingerTransform()
+    // 的完整說明，兩指共用同一支函式，任何一根手指動都會觸發）；還沒補上
+    // 第二根手指、只有單指拖曳時，才走原本的 recomputeDvdDragXY() 位移公式
+    // ——兩者互斥，不會有任何一格漏算或算兩次的情況。
+    if(dvdRotatePointerId !== null){
+      applyDvdTwoFingerTransform();
+    } else {
+      recomputeDvdDragXY();
+    }
     dvdBounce.style.transform = dvdTransformString(dvdX, dvdY);
 
     const now = performance.now();
