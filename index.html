@@ -11988,8 +11988,10 @@
   let pfRotateBody = null;      // 目前正在被兩指旋轉的物理 body（堆疊照片或飄動的 e 共用同一套）
   let pfRotateSamples = [];     // 最近的 {t, angle} 取樣，放開時用來算甩轉的瞬時角速度，寫法比照 dvdRotateSamples
   const PF_ROTATE_FLING_WINDOW_MS = 80; // 跟 DVD_ROTATE_FLING_WINDOW_MS 同一個概念、同一個時長
-  const PF_ROTATE_HIT_PADDING = 30; // px，第二指落下時的命中容錯。堆疊照片通常比飄動的 e
-    // 小一圈，兩指要同時準確落在同一張小照片上更難操作，容錯比 DVD_GRAB_PADDING_TOUCH 再留寬一點。
+  // （原本這裡還有一個 PF_ROTATE_HIT_PADDING，是「第二指必須落在圖片熱區
+  // 內才觸發旋轉」用的容錯值；這個限制已經在下面 touchstart 監聽器裡拿掉
+  // 了，見該處「不管兩指距離多遠，都能穩定觸發雙指旋轉」的完整說明，所以
+  // 這個常數也一併移除，避免之後有人誤以為它還在起作用。）
   const PF_ROTATE_MAX_ANGULAR_VEL = 0.6; // rad/影格，甩轉放開時角速度的保底夾限，避免觸控座標量測雜訊在極端情況下轉出離譜的轉速
 
   // 找出目前這顆 body 對應的 DOM 元素：堆疊照片（pfItems）或飄動的 e
@@ -12067,14 +12069,13 @@
     pfRotateSamples = [];
   }
 
-  // 第二根手指落下、確定要開始兩指旋轉手勢：只有目前確實有物件被抓著
-  // （pfMouseConstraint.body 非 null）、且還沒有另一根手指在做旋轉手勢時，
-  // 才需要判斷這一下是不是命中了那個正被抓著的物件（含它的觸控容錯範圍）。
+  // 第二根手指落下、確定要開始兩指旋轉手勢：只要目前確實有物件被抓著
+  // （pfMouseConstraint.body 非 null）、且還沒有另一根手指在做旋轉手勢，
+  // 這一下落下的手指只要不是目前拖曳中的那根，就無條件當成旋轉手勢的
+  // 第二指接手——見下面完整說明，這裡刻意不再判斷它有沒有落在圖片範圍上。
   document.addEventListener('touchstart', (e) => {
     if(!pfMouseConstraint || !pfMouseConstraint.body || pfRotateTouchId !== null) return;
     const draggedBody = pfMouseConstraint.body;
-    const el = pfFindItemEl(draggedBody);
-    if(!el) return;
     const newTouch = e.changedTouches && e.changedTouches[0];
     if(!newTouch) return;
     // 這一刻 event.touches 裡，扣掉剛剛新落下的這一根，剩下的就是正在
@@ -12083,9 +12084,34 @@
     // 之外的其他手指，必然就是那根正在拖曳的手指。
     const primaryTouch = Array.prototype.find.call(e.touches, (t) => t.identifier !== newTouch.identifier);
     if(!primaryTouch) return; // 理論上不會發生（代表根本沒有第二根手指），保底放行
-    const rect = el.getBoundingClientRect();
-    if(!dvdHitTest(rect, newTouch.clientX, newTouch.clientY, PF_ROTATE_HIT_PADDING)) return;
 
+    // ---------- 修正：「先單指拖曳、第二指離圖片實際範圍較遠時，圖片會在
+    // 兩指之間瘋狂瞬間移動」----------
+    // 舊版這裡會先用 dvdHitTest() 判斷第二指是不是「真的落在圖片範圍
+    // （+容錯）內」，沒命中就直接 return、完全不攔截這個 touchstart。問題
+    // 出在 PNG 堆疊整套拖曳是靠 Matter.Mouse 撐著的，而 Matter 自己的
+    // touchstart 處理（內部對應到 mousedown 函式）完全不管這根手指是不是
+    // 「跟目前拖曳無關的新手指」——只要收到 touchstart，就會直接把
+    // mouse.position 整個覆寫成這根新手指當下的座標（見 Matter.Mouse
+    // 原始碼的 _mousedown()：`mouse.position.x/y = position.x/y`，沒有任何
+    // 手指識別的判斷）。一旦沒攔截，這個 touchstart 就會直接流到 Matter
+    // 手上，MouseConstraint 下一個物理步就會把正在拖曳的 body 瞬間拉去
+    // 第二指剛落下的位置；如果第二指之後還持續移動（因為沒命中熱區，
+    // pfRotateTouchId 仍然是 null），連帶後續的 touchmove 也完全不會被下面
+    // 那段攔截邏輯處理（見下面 touchmove 監聽器開頭的
+    // `if(pfRotateTouchId === null) return`），於是兩根手指的座標會交錯
+    // 灌進 Matter 讀到的 changedTouches[0]，肉眼看到的就是「圖片在兩指
+    // 之間瘋狂瞬間移動」。
+    // 這正是飄動的 e 不會有這個毛病、PNG 堆疊卻會的根本差異：e 的手勢完全
+    // 自己管位置（Pointer Events＋setPointerCapture），沒命中熱區時單純
+    // 什麼事都不會發生；PNG 堆疊背後掛著 Matter.Mouse，沒攔截到的第二指
+    // touchstart 會被 Matter 直接拿去頂替拖曳位置，兩者的失敗模式完全不同。
+    // 修法：只要確定目前真的有東西正被拖著（前面已經檢查過
+    // pfMouseConstraint.body），而且這一下確實是「另一根、跟目前拖曳手指
+    // 不同」的新手指落下，就不再判斷它有沒有落在圖片範圍內，一律直接當成
+    // 旋轉手勢的第二指、無條件攔截這個 touchstart，不讓它有機會流到 Matter
+    // 手上——不管兩指距離多遠，都能穩定觸發雙指旋轉，也徹底不會再有「沒
+    // 命中就被 Matter 誤讀，害拖曳中的物件瞬間跳走」這條路。
     pfRotateTouchId = newTouch.identifier;
     pfPrimaryTouchId = primaryTouch.identifier;
     pfPrimaryTouchX = primaryTouch.clientX;
