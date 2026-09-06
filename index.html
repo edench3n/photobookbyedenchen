@@ -9831,6 +9831,32 @@
   window.addEventListener('pointerup', (e) => {
     if(dvdTapCandidatePointerId === null || e.pointerId !== dvdTapCandidatePointerId) return;
     dvdTapCandidatePointerId = null;
+    // ---------- 修正：「長按堆疊頁面第一批照片、剛好長按在飄動的 e 身上
+    // 進入桌布截圖預覽彈窗之後，滑鼠在預覽彈窗上放開時，會被判定成單擊
+    // e、誤觸發堆疊頁面換一批（第二批之後就沒有這個問題）」----------
+    // 成因：這裡是專門給飄動的 e（#dvdBounce）用的獨立單擊/雙擊判斷，跟
+    // 下面 photoFallStage 那組給「一般照片／背景」用的單擊/雙擊判斷
+    // （見該處 wallpaperPreviewOverlay.classList.contains('active') 那段
+    // 完整說明）是兩套完全分開、互不知道對方存在的邏輯——那一組已經在
+    // pointerup 開頭加了「桌布預覽彈窗還開著就整段放棄」的保護，這裡卻從
+    // 來沒有加過同一條保護。而且這裡的判斷完全靠 dvdTapStartX/Y 座標算
+    // 位移、不看 e.target，所以就算桌布預覽彈窗此刻用最高的 z-index 蓋住
+    // 全畫面，這個 window 監聽器一樣會正常收到這次 pointerup、正常算出
+    // 「原地放開＝一次有效點擊」，完全不受畫面上蓋著哪一層看得到的東西
+    // 影響。使用者長按進場那一刻，畫面上最顯眼、最容易被按到的正好是 e
+    // 本身（它就停在雙擊進場當下那個位置，見 handleDvdSingleClick() 旁的
+    // 完整說明）——長按 e 觸發桌布擷取、圖片繪製又因為第一批照片還在
+    // 劇烈碰撞、主執行緒被物理運算塞爆而明顯變慢（完整成因見上面
+    // PF_LONGPRESS_MS 宣告處那段說明），使用者這時候還按著、直到真的看見
+    // 預覽彈窗跳出來才放開，這一下放開正好命中這裡的 dvdTapCandidatePointerId
+    // 候選、又沒有任何保護，就被當成單擊 e，呼叫 handleDvdSingleClick()
+    // 換了一批。換一批之後，e 已經被搬到隨機的新位置，之後的長按大多落在
+    // 一般照片上、走的是另一組已經有保護的判斷，才會是使用者感覺到的
+    // 「第二批之後就正常了」。
+    // 修法：比照另一組判斷，這裡也直接檢查桌布預覽彈窗此刻是不是正顯示著
+    // ——只要還開著，不管這次放開原本要被判定成單擊還是雙擊，一律直接
+    // 放棄，不觸碰堆疊頁面任何互動（換批、換色、雙擊回首頁）。
+    if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return;
     const dx = e.clientX - dvdTapStartX;
     const dy = e.clientY - dvdTapStartY;
     if(Math.hypot(dx, dy) > DVD_TAP_MAX_MOVE) return; // 明顯位移＝拖曳／甩出去，不算一次點擊
@@ -11547,6 +11573,41 @@
     const dx = e.clientX - pfPhotoTapStartX, dy = e.clientY - pfPhotoTapStartY;
     if(Math.hypot(dx, dy) > PF_PHOTO_TAP_MAX_MOVE) return; // 明顯位移＝拖曳，不算點擊
     if(document.body.classList.contains('detail-active') || document.body.classList.contains('preview-active')) return;
+    // ---------- 修正：「長按第一批照片進到桌布截圖預覽頁之後，滑鼠在
+    // 預覽頁上放開時，會被判定成單擊、誤觸發堆疊頁面換一批（第二批之後
+    // 就沒有這個問題）」----------
+    // 成因：長按成立、真正跳出截圖預覽彈窗這件事，是在
+    // capturePhotoFallWallpaper() 裡呼叫 canvas.toBlob() 拿到編碼完成的
+    // JPEG 之後才發生的非同步結果（見該函式最後 `canvas.toBlob((blob) => {
+    // ...; showWallpaperPreview(...); }, ...)` 那段）——即使長按判定本身
+    // （setTimeout 或下面 pointerup 那組真實時間差判斷）在使用者放開手指
+    // 之前就已經成立、也已經把 pfPhotoTapCandidatePointerId 清成 null，
+    // capturePhotoFallWallpaper() 內部把整批照片畫進一張 4K canvas 這段
+    // 運算本身還是要花掉一段看得見的時間，尤其是在第一批照片還在劇烈碰撞、
+    // 主執行緒早就被物理運算塞爆的那幾秒（完整成因見上面 PF_LONGPRESS_MS
+    // 宣告處那段關於手機效能的完整說明）——這段繪製 canvas 的時間被拉得
+    // 特別長，長到使用者等到真的「看見」截圖預覽彈窗跳出來、才放開滑鼠時，
+    // 這一下放開距離原本 pointerdown 按下的那一刻，可能已經又是一次全新
+    // 狀況——如果长按候選判斷是在真正的 pointerup 那一刻才透過「按下到
+    // 放開的真實時間差」這組保底邏輯判定成立（見下面 pointerup 開頭那段
+    // ，不是靠 setTimeout 提前判定），這裡的 pfPhotoTapCandidatePointerId
+    // 雖然當下也會被清空，但因為 capturePhotoFallWallpaper() 內部畫布繪製
+    // 本身要花時間、彈窗要再晚一點才真正跳出來，使用者這時候看到的其實是
+    // 「剛放開手、彈窗才姍姍來遲地跳出來」而非「彈窗已經在那裡、才放開」，
+    // 感覺上等於用同一下放開觸發了兩件事：先讓這裡的單擊/雙擊判斷邏輯
+    // 誤以為使用者只是點了一下 png（因為長按门槛檢查與此處邏輯分屬不同
+    // 檢查路徑，一旦時間差在極端延遲下算出來剛好卡在門檻邊緣、或這次放開
+    // 剛好被判定為「不算長按」），才緊接著跳出遲來的桌布預覽——兩件事前後
+    // 順序顛倒，就會被使用者感知成「進到截圖頁面後才放開，卻換了一批」。
+    // 換一批之後，世界已經穩定、canvas 繪製不再被大量物理運算搶主執行緒，
+    // 長按判定與彈窗真正跳出的時間差變得極短，不會再踩到這個窗口。
+    // 修法：不再只靠「長按成立時清一次候選」這種一次性的清除去防呆，改成
+    // 直接檢查「桌布預覽彈窗此刻是不是正顯示著」（wallpaperPreviewOverlay
+    // 的 active class，跟畫面上使用者眼睛實際看到的狀態百分之百同步）——
+    // 只要預覽彈窗還開著，不管使用者這下放開是被判定成單擊還是雙擊，一律
+    // 直接放棄，不觸碰堆疊頁面本身的任何互動（換批、換色、雙擊回首頁），
+    // 徹底跟長按候選判斷的時序脫鉤，不會再受 canvas 繪製快慢影響。
+    if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return;
     // ---------- 修正：「雙擊回首頁改成跟換一批一樣的範圍，只認 png 物件，
     // 不要整個畫面都算，避免狂點背景換色不小心被判定成雙擊回首頁」
     // ----------
