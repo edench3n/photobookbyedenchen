@@ -1501,12 +1501,13 @@
   }
 
   /* ---------- 堆疊畫面背景變成黑色時，上排文字（fixed-header）同步變白 ----------
-     只在背景色剛好切到黑色（PHOTO_FALL_BG_COLORS 陣列第一個 '#000000'）時，
-     JS（見 advancePhotoFallBackgroundColor() / resetPhotoFallBackgroundColor()）
-     才會幫 body 加上這個 class；其餘顏色（含白色）都不會加，維持文字原本
-     的黑色，所以只要背景不是黑色，這條規則完全不生效。跟上面
-     preview-header-white 用同一種寫法（!important 蓋過 .fixed-header 內部
-     各元素各自的顏色設定），確保上排每一段文字都會一起變白。 */
+     只在背景色剛好切到黑色（PHOTO_FALL_BG_COLORS 陣列第二個 '#000000'，
+     第一個是白色本身）時，JS（見 advancePhotoFallBackgroundColor() /
+     resetPhotoFallBackgroundColor()）才會幫 body 加上這個 class；其餘顏色
+     （含白色）都不會加，維持文字原本的黑色，所以只要背景不是黑色，這條
+     規則完全不生效。跟上面 preview-header-white 用同一種寫法（!important
+     蓋過 .fixed-header 內部各元素各自的顏色設定），確保上排每一段文字都
+     會一起變白。 */
   body.pf-bg-black .fixed-header,
   body.pf-bg-black .fixed-header *{
     color:#ffffff !important;
@@ -9736,9 +9737,22 @@
   // 陣列——它是「還沒點擊過」的預設起始狀態，也是收起堆疊、回到首頁時
   // 要淡回去的目標色，不屬於循環本身的一部分，見下面 advance／reset 兩個
   // 函式的分工。
-  const PHOTO_FALL_BG_COLORS = ['#000000', '#b6f1ff', '#f93d3d', '#f7f746', '#c1c1c1', '#3640ff', '#12ff5a', '#efe6c7'];
-  const PHOTO_FALL_BG_WHITE = '#ffffff';
-  let pfBgColorIndex = -1; // -1 代表目前是白色；點一次背景，index 往後推進一格，超過陣列長度就從頭循環（見 advancePhotoFallBackgroundColor()）
+  // ---------- 修正：「白色也要排進循環本身，且剛進站第一下要直接跳黑色」----------
+  // 使用者需求：白色不再是陣列外的「特例起始狀態」，而是循環序列裡真正的
+  // 第一個顏色，順序排在黑色前面；同時因為「剛進堆疊頁面」這個當下視覺上
+  // 就已經是白色，第一次點擊必須直接跳到黑色（陣列第二個），不能因為白色
+  // 現在也在陣列裡，就把「這一下點擊」誤判成「切到陣列第一個（也是白色）」
+  // 導致連續出現兩次白色。
+  // 修法：起始索引改成 0（直接指向陣列裡的白色，語意上等同「目前已經在
+  // 白色這一格」），不再用 -1 這個「陣列外的特例」；advance 時一樣是
+  // (index+1) % length 往後推進一格，從 0 開始的第一次點擊自然就是
+  // index 1（黑色），不會重複選回白色。繞完整個陣列（含最後一色）之後，
+  // 下一次點擊會照 % 運算自動繞回 index 0，也就是自然回到白色，之後
+  // 再點才會是黑色——完整符合「白色排在黑色前面、循環到底會繞回白色」
+  // 這個新順序。
+  const PHOTO_FALL_BG_COLORS = ['#ffffff', '#000000', '#b6f1ff', '#f93d3d', '#f7f746', '#c1c1c1', '#3640ff', '#12ff5a', '#efe6c7'];
+  const PHOTO_FALL_BG_WHITE = PHOTO_FALL_BG_COLORS[0]; // 白色現在就是陣列本身的第一個顏色，這裡直接引用同一份，不用維護兩份重複的色碼
+  let pfBgColorIndex = 0; // 0 代表目前正停在陣列第一個顏色（白色）；點一次背景，index 往後推進一格，超過陣列長度就從頭循環（見 advancePhotoFallBackgroundColor()）
   // 單擊畫面（不管點中的是空白背景還是某張漂浮物件，見下面 photoFallStage
   // 的 pointerup／飄動的 e 的 handleDvdSingleClick() 兩處呼叫點）就往後
   // 推進一格顏色，用 (index+1) % length 保證永遠落在陣列範圍內、繞完一輪
@@ -9754,10 +9768,11 @@
     document.body.classList.toggle('pf-bg-black', nextColor === '#000000');
   }
   // 收起堆疊、回到首頁時呼叫（見 exitPhotoFallMode() 開頭）：把顏色淡回
-  // 白色、同時把索引重設回 -1，確保下一次重新雙擊進場時，背景一定是從
-  // 白色重新開始，不會沿用上一輪堆疊模式結束前停留的顏色。
+  // 白色、同時把索引重設回 0（陣列裡的白色），確保下一次重新雙擊進場時，
+  // 背景一定是從白色重新開始，且下一次點擊會正確跳到黑色，不會沿用上一輪
+  // 堆疊模式結束前停留的顏色或索引。
   function resetPhotoFallBackgroundColor(){
-    pfBgColorIndex = -1;
+    pfBgColorIndex = 0;
     if(photoFallStage) photoFallStage.style.backgroundColor = PHOTO_FALL_BG_WHITE;
     // 回到首頁時背景一定變回白色，上排文字也要跟著恢復黑色，不能讓
     // pf-bg-black 殘留在 body 上。
@@ -10199,9 +10214,26 @@
   // entering/exiting/reshuffling 這些動畫正在播放的過渡狀態）單擊一律
   // 不做任何事，維持原本「單擊沒有特別功能、只用來判斷是不是雙擊」的
   // 行為不變。
+  // ---------- 偵錯修正：「剛進堆疊頁面，第一下單擊物件換批時會同步跳色，
+  // 第二下開始才正常」----------
+  // 成因：e 進入堆疊模式之後，視覺上就是畫面上眾多 PNG 物件之一，但它是
+  // 靠獨立的一組判斷（window 上專屬 e 的 pointerdown/pointerup，見上面
+  // dvdTapCandidatePointerId 那組）觸發到這支函式，這裡原本沿用比較舊的
+  // 邏輯：單擊 e 會同時呼叫 advancePhotoFallBackgroundColor() 跟
+  // reshufflePhotoFallBatch()，沒有跟上後來另外訂出來、給「一般掉落照片」
+  // 用的新規則（見 photoFallStage 的 pointerup 監聽器內「換一批只認 png
+  // 物件、換背景色只認空白背景」那段）——一般照片點下去只會換批、不會
+  // 跟著換色，只有點到 e 才會多跳一次顏色，兩者對不上。
+  // 剛進堆疊頁面那一下，畫面上最顯眼、最容易被點到的正好是 e 本身（它就
+  // 停在雙擊進場當下那個位置），所以「第一下」特別容易踩到這個不一致；
+  // 之後畫面上換成大多是 spawnFallingPhotos() 掉下來的一般照片，點到的
+  // 走新規則那組判斷，只換批不換色，才會是使用者感覺到的「第二批之後
+  // 就正常了」。
+  // 修法：讓單擊 e 也套用跟一般 PNG 物件完全一致的規則——只換批，不再
+  // 跟著推進背景顏色；要換色一律得點在物件跟物件之間的空白背景上，不管
+  // 點到的是不是 e，行為都統一。
   function handleDvdSingleClick(){
     if(photoFallState !== 'active') return;
-    advancePhotoFallBackgroundColor(); // 點擊畫面（這次點中的是飄動的 e）也算一次有效點擊，背景顏色跟著推進一格
     reshufflePhotoFallBatch();
   }
 
@@ -11271,7 +11303,26 @@
       // 用 pointerdown 當下的 e.target 而不是等 pointerup 再判斷，是因為
       // 位移量已經另外用 PF_PHOTO_TAP_MAX_MOVE 限制在 10px 內算「點一下」，
       // 按下與放開這麼小的範圍內幾乎不會跨到别的元素，用哪一刻判斷結果一致。
-      pfPhotoTapStartIsPng = !!(e.target && e.target.closest && e.target.closest('.photo-fall-item'));
+      // ---------- 偵錯修正：「單擊物件要換一批時，有時候會同步觸發換背景色」
+      // ----------
+      // 成因：飄動的 e（#dvdBounce）進入堆疊模式後，視覺上跟其他 png 物件
+      // 混在一起、一起參與物理堆疊，但它是獨立的 DOM 元素，並不屬於
+      // `.photo-fall-item` 這個 class——這裡原本只認 `.photo-fall-item`，
+      // 點在 e 身上時這裡會判定成「不是 png 物件」（當作點到背景）。
+      // 同一次點擊，window 上另一組專屬 e 的 pointerdown/pointerup 監聽器
+      // （見上面 dvdTapCandidatePointerId 那組）也會獨立命中、呼叫
+      // handleDvdSingleClick() 換一批——這兩組監聽器互不知道對方存在，
+      // 於是同一下點擊變成「這裡當背景換色，那邊當物件換批」同時發生，
+      // 就是使用者感受到的「换一批時有時候會同步跳色」，只有點在 e 身上
+      // 才會踩到（點在一般照片上，`.photo-fall-item` 判斷本來就正確，
+      // 不會有這個落差）。
+      // 修法：判斷式多認一個 `#dvdBounce`，讓點到 e 也算「點 png 物件」，
+      // 跟點到一般照片走同一條路——這裡會因此也呼叫一次
+      // reshufflePhotoFallBatch()，但該函式本來就有「photoFallState 不是
+      // 'active' 才會真的執行」的保護，e 那邊的 handleDvdSingleClick() 已經
+      // 先把狀態切成 'reshuffling'，這裡重複呼叫是安全的 no-op，不會換兩次
+      // 批，也不會再誤觸換色。
+      pfPhotoTapStartIsPng = !!(e.target && e.target.closest && e.target.closest('.photo-fall-item, #dvdBounce'));
     }
 
     // 長按候選獨立追蹤，用比單擊/雙擊更寬鬆的門檻：只要不是 'idle'
@@ -11333,48 +11384,49 @@
     const dx = e.clientX - pfPhotoTapStartX, dy = e.clientY - pfPhotoTapStartY;
     if(Math.hypot(dx, dy) > PF_PHOTO_TAP_MAX_MOVE) return; // 明顯位移＝拖曳，不算點擊
     if(document.body.classList.contains('detail-active') || document.body.classList.contains('preview-active')) return;
-    // ---------- 修正：「堆疊頁面單擊照片掉下去，感覺慢了一拍才反應」 ----------
-    // 跟上面飄動的 e 那組（見 pointerup 監聽器內的完整說明）是同一個成因、
-    // 同一套修法：原本第一下點擊永遠先不做事，只當「雙擊候選」，開一個
-    // PF_PHOTO_DOUBLE_CLICK_MS（320ms）計時器空等，確定沒有等到第二下
-    // 才真的呼叫 reshufflePhotoFallBatch()——單擊反應永遠被這段觀察期
-    // 拖慢。改成點下去當下立即呼叫 reshufflePhotoFallBatch()（該函式內部
-    // 本來就有 photoFallState!=='active' 時直接 no-op 的保護，其餘狀態
-    // 呼叫不會有副作用）；如果緊接著真的等到第二下判定成雙擊，這時
-    // photoFallState 已經因為上面提前觸發變成 'reshuffling'，一樣會走
-    // 下面已經寫好、專門處理「換批途中被雙擊打斷」的 interruptReshuffleForExit()
-    // 分支，無縫接上收場流程，行為不受影響。
-    const nowClick = Date.now();
-    // 雙擊：時間夠近「而且」這一下的落點跟上一次有效點擊的落點也夠近，
-    // 兩個條件都成立才算數（原因見上面 PF_PHOTO_DOUBLE_CLICK_MAX_DIST
-    // 宣告處的完整說明——避免連續點擊畫面不同位置換色被誤判成雙擊）。
-    const dblDx = e.clientX - pfPhotoLastRealClickX, dblDy = e.clientY - pfPhotoLastRealClickY;
-    const isNearLastClick = Math.hypot(dblDx, dblDy) <= PF_PHOTO_DOUBLE_CLICK_MAX_DIST;
-    if(nowClick - pfPhotoLastRealClickTime <= PF_PHOTO_DOUBLE_CLICK_MS && isNearLastClick){
-      // 判定成雙擊：直接收起整組堆疊——跟 handleDvdDoubleClick() 的邏輯
-      // 完全一致，含「換批動畫進行中又被雙擊打斷」的處理
-      // （interruptReshuffleForExit()）。雙擊回首頁不分點在 png 物件還是
-      // 空白背景上，維持「畫面任何地方雙擊都回首頁」。
-      pfPhotoLastRealClickTime = 0;
-      if(photoFallState === 'active'){
-        exitPhotoFallMode();
-      } else if(photoFallState === 'reshuffling'){
-        interruptReshuffleForExit();
-      }
-    } else {
-      pfPhotoLastRealClickTime = nowClick;
-      pfPhotoLastRealClickX = e.clientX;
-      pfPhotoLastRealClickY = e.clientY;
-      if(photoFallState === 'active'){
-        // ---------- 換一批只認 png 物件、換背景色只認空白背景 ----------
-        // 點在飄落的 png 物件上：換一批新的漂浮物件，不改變背景顏色；
-        // 點在物件跟物件間的空白背景上：只推進背景顏色，不觸發換批。
-        if(pfPhotoTapStartIsPng){
+    // ---------- 修正：「雙擊回首頁改成跟換一批一樣的範圍，只認 png 物件，
+    // 不要整個畫面都算，避免狂點背景換色不小心被判定成雙擊回首頁」
+    // ----------
+    // 原本雙擊回首頁不分點在 png 物件還是空白背景上，畫面任何地方連點
+    // 兩下都會收起整組堆疊——這跟「換一批只認 png 物件、換背景色只認
+    // 空白背景」這條單擊規則的範圍不一致：使用者想快速連點背景多換幾次
+    // 顏色時，只要手速夠快、兩下落點也夠近，就會被誤判成雙擊而意外跳回
+    // 首頁，體感上像是「換色換到一半忽然被收掉」。
+    // 修法：把雙擊判斷整段搬進 `pfPhotoTapStartIsPng` 為真（點在 png
+    // 物件／飄動的 e 上）的分支裡，範圍跟換一批完全一致；`pfPhotoLastRealClickTime`
+    // /`X`/`Y` 這組「上一次有效點擊」紀錄也只在點到物件時才更新，背景
+    // 點擊完全不會寫進去、也不會拿背景點擊去跟前一次紀錄比對時間差——
+    // 也就是背景點擊永遠只換色，不會被算進雙擊、也不會打斷「連續兩次點
+    // 物件」原本的雙擊判斷。
+    if(pfPhotoTapStartIsPng){
+      const nowClick = Date.now();
+      // 雙擊：時間夠近「而且」這一下的落點跟上一次點物件的落點也夠近，
+      // 兩個條件都成立才算數（原因見上面 PF_PHOTO_DOUBLE_CLICK_MAX_DIST
+      // 宣告處的完整說明——避免連續點擊畫面不同物件被誤判成雙擊）。
+      const dblDx = e.clientX - pfPhotoLastRealClickX, dblDy = e.clientY - pfPhotoLastRealClickY;
+      const isNearLastClick = Math.hypot(dblDx, dblDy) <= PF_PHOTO_DOUBLE_CLICK_MAX_DIST;
+      if(nowClick - pfPhotoLastRealClickTime <= PF_PHOTO_DOUBLE_CLICK_MS && isNearLastClick){
+        // 判定成雙擊：直接收起整組堆疊——跟 handleDvdDoubleClick() 的邏輯
+        // 完全一致，含「換批動畫進行中又被雙擊打斷」的處理
+        // （interruptReshuffleForExit()）。
+        pfPhotoLastRealClickTime = 0;
+        if(photoFallState === 'active'){
+          exitPhotoFallMode();
+        } else if(photoFallState === 'reshuffling'){
+          interruptReshuffleForExit();
+        }
+      } else {
+        pfPhotoLastRealClickTime = nowClick;
+        pfPhotoLastRealClickX = e.clientX;
+        pfPhotoLastRealClickY = e.clientY;
+        if(photoFallState === 'active'){
           reshufflePhotoFallBatch();
-        } else {
-          advancePhotoFallBackgroundColor();
         }
       }
+    } else if(photoFallState === 'active'){
+      // 點在物件跟物件間的空白背景上：一律只推進背景顏色，不觸發換批、
+      // 也不參與上面的雙擊判斷（見這段開頭的完整說明）。
+      advancePhotoFallBackgroundColor();
     }
   });
   window.addEventListener('pointercancel', (e) => {
@@ -11626,10 +11678,11 @@
       // ---------- 底色改成跟擷取當下的堆疊背景顏色一致 ----------
       // 原本這裡固定寫死 '#ffffff'，不管使用者當時把背景換成哪個顏色，
       // 截出來的桌布底色永遠是白色，跟畫面上看到的不一致。改成直接讀
-      // pfBgColorIndex 目前指到哪一個顏色：-1 代表還沒點過、維持白色
-      // （PHOTO_FALL_BG_WHITE），其餘就是 PHOTO_FALL_BG_COLORS 陣列裡
-      // 目前生效的那個顏色，跟畫面上 photoFallStage 當下的背景色保持同步。
-      const pfCaptureBgColor = pfBgColorIndex === -1 ? PHOTO_FALL_BG_WHITE : PHOTO_FALL_BG_COLORS[pfBgColorIndex];
+      // pfBgColorIndex 目前指到哪一個顏色——白色現在也是 PHOTO_FALL_BG_COLORS
+      // 陣列本身的第一個顏色，pfBgColorIndex 永遠是合法的陣列索引，不再需要
+      // 額外判斷「-1 代表白色」這個特例，直接查陣列即可，跟畫面上
+      // photoFallStage 當下的背景色保持同步。
+      const pfCaptureBgColor = PHOTO_FALL_BG_COLORS[pfBgColorIndex];
       ctx.fillStyle = pfCaptureBgColor;
       ctx.fillRect(0, 0, canvasW, canvasH);
 
