@@ -9446,13 +9446,55 @@
     }
     if(e.pointerId !== dvdPointerId) return;
 
-    // 主要拖曳手指放開時，如果另一根手指還按著在做兩指旋轉，這根旋轉手指
-    // 也一併視為結束：用它「這一刻」的角速度當最終甩轉速度（見
-    // endDvdRotateGesture／finalizeDvdRotateVelocity 的說明），跟下面算
-    // 位置末速度是同一套「放開當下的瞬時狀態決定甩出去的力道」的精神。
-    // 結束後主迴圈 stepDvdBounce()（下面 dvdRAF 重新排入）會自然接手繼續
-    // 讓這股角速度衰減，不需要另外處理。
-    if(dvdRotatePointerId !== null) endDvdRotateGesture(dvdRotatePointerId);
+    // ---------- 需求：兩指操控中，不管放開的是原本的主要手指還是旋轉
+    // 手指，只要「還有一指按著」，就該無縫接續成單指拖曳（不再旋轉），
+    // 不能直接整個放開、被甩出去；一定要等最後一根手指也真的放開，才是
+    // 這次抓取真正的結束。----------
+    // 旋轉手指放開那個方向（見 endDvdRotateGesture()：只清掉
+    // dvdRotatePointerId、繼續用原本的 dvdPointerId 走 recomputeDvdDragXY()）
+    // 本來就已經符合這個需求；這裡補的是另一個方向——原本的主要（拖曳）
+    // 手指先放開、旋轉手指卻還按著的情況。原本的做法是不管旋轉手指還在
+    // 不在，一律直接整個結束拖曳、甩出去，等於「兩指沒有真的都放開，卻
+    // 提早重置」，跟這裡要的行為相反。
+    // 修法：這種情況下不當作「放開」，而是把還按著的旋轉手指原地「扶正」
+    // 成新的主要拖曳手指——角色互換，但物理上這根手指從頭到尾沒有離開
+    // 畫面，物件的位置、角度全程原封不動，之後單指拖曳（recomputeDvdDragXY()）
+    // 接手繼續跟著它移動；旋轉不再有第二指驅動，直接停在目前角度、角速度
+    // 歸零（不是「放開手指甩轉」那種有意圖的動作，只是降級成單指，沒有
+    // 甩轉的道理）。真正的「甩出去」收尾，留給這根被扶正的手指之後自己
+    // 放開時，走下面完全相同的一般流程處理。
+    if(dvdRotatePointerId !== null){
+      const promotedId = dvdRotatePointerId;
+      const promotedX = dvdRotateTouchX;
+      const promotedY = dvdRotateTouchY;
+      dvdRotatePointerId = null;
+      dvdRotationVel = 0;
+
+      dvdPointerId = promotedId;
+      dvdDragCandidatePointerId = promotedId; // 這根手指之後真的放開時，
+                                                // 本函式開頭的比對才會成立
+      dvdPrimaryTouchX = promotedX;
+      dvdPrimaryTouchY = promotedY;
+
+      // 重新換算抓取偏移量，讓「扶正」這一刻物件的位置／角度完全不變，
+      // 跟 commitDvdDrag()／endDvdRotateGesture() 換算偏移量是同一套精神，
+      // 之後才不會有任何一影格突然跳位置。
+      const centerX = dvdX + dvdW / 2;
+      const centerY = dvdY + dvdH / 2;
+      const worldOffX = promotedX - centerX;
+      const worldOffY = promotedY - centerY;
+      const theta = dvdRotationDeg * Math.PI / 180;
+      const cosT = Math.cos(theta), sinT = Math.sin(theta);
+      dvdGrabLocalOffsetX = worldOffX * cosT + worldOffY * sinT;
+      dvdGrabLocalOffsetY = -worldOffX * sinT + worldOffY * cosT;
+
+      // 末速度取樣重新起算：舊的取樣是原本那根（已經放開的）手指的移動
+      // 紀錄，沿用會讓這根被扶正的手指之後真正放開時，算出離譜的末速度。
+      dvdMoveSamples = [{ t: performance.now(), x: dvdX, y: dvdY }];
+
+      try{ dvdBounce.releasePointerCapture(e.pointerId); }catch(err){}
+      return; // 還有一指按著，不執行下面「整個放開」的收尾流程
+    }
 
     dvdDragging = false;
     dvdBounce.classList.remove('dvd-grabbing'); // 放開，觸發同一段 transition 平滑放大回原尺寸
