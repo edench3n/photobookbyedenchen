@@ -12104,54 +12104,125 @@
     e.preventDefault();
   }, { capture: true, passive: false });
 
+  // ---------- 修正：「邊旋轉邊移動，PNG 會定在原地，放開後才忽然瞬間移動」 ----------
+  // 成因：手機瀏覽器常常會把「同一影格內，兩根手指都移動了」打包進同一個
+  // 原生 touchmove 事件——這個事件的 e.changedTouches 陣列會同時含有旋轉
+  // 手指跟主要拖曳手指兩筆資料。Matter 自己的 touchmove 處理（綁在
+  // photoFallStage 上）完全不分辨是哪根手指，永遠只認 changedTouches[0]。
+  // 原本這裡的寫法是「一偵測到旋轉手指就立刻 stopPropagation()+return」——
+  // 兩指同時移動的這幾個影格，原生事件整個被攔下來，主要拖曳手指這一刻
+  // 真正的位移完全沒有機會傳到 Matter 手上（就算它其實也夾帶在同一個
+  // 事件裡，也一樣被一起攔掉，for 迴圈根本沒機會走到那個 index）；肉眼
+  // 看到的就是「邊轉邊拖，PNG 卻定在原地不動」。等到某一次原生事件終於
+  // 只含主要手指、沒有再跟旋轉手指打包在一起（例如旋轉手指剛好那一影格
+  // 沒有移動），Matter 才會第一次收到通知，直接跳去讀當下最新的
+  // changedTouches[0]（也就是主要手指這一刻的最新位置）——這段被吃掉的
+  // 移動軌跡從來沒有一步步餵給 Matter，看起來就是「忽然瞬間移動」到那個
+  // 位置，正是使用者回報的兩段式症狀（先卡住、再瞬移）的完整成因。
+  // 飄動的 e（dvdBounce）之所以沒有這個問題，是因為它整組手勢改用
+  // Pointer Events（dvdPointerMove／dvdRotatePointerMove）——瀏覽器對每個
+  // pointer 各自派送獨立事件，不會有「兩指共用同一個事件物件」這種批次
+  // 合併的情況，PNG 堆疊這裡因為要跟 Matter.Mouse（只認原生
+  // mousedown/touchstart 等事件）搭配，才留在原生 TouchEvent 這條路上，
+  // 因此才會踩到這個瀏覽器批次合併的陷阱。
+  // 修法：只要這個事件裡含有旋轉手指的資料，一律整個攔下來（避免 Matter
+  // 讀到 index 0 剛好是旋轉手指、把 PNG 誤拉到旋轉手指的座標）；但如果
+  // 這個被攔下來的事件「同時」也夾帶了主要手指的最新資料，改成直接呼叫
+  // pfMouse.mousemove()——這正是 Matter.Mouse.setElement() 原始碼裡，
+  // touchmove 事件本來就綁定用來處理的同一個函式（跟 mousemove 共用同一套
+  // 邏輯，會自己讀 changedTouches[0] 換算成世界座標）——手動塞一個「只包含
+  // 主要手指這一筆、不含旋轉手指」的乾淨假事件進去，讓 Matter 照樣、即時
+  // 收到正確的拖曳位置，不會漏掉這一影格，也不會被旋轉手指的座標污染。
+  // 傳進去的 t 是瀏覽器原生的 Touch 物件本身（不是重新組出來的替代品），
+  // pageX/pageY 等 Matter 內部換算座標實際需要用到的欄位全部原封不動，
+  // 換算結果會跟 Matter 自己收到「乾淨」原生事件時完全一致。
   document.addEventListener('touchmove', (e) => {
     if(pfRotateTouchId === null) return;
+    let sawRotate = false;
+    let primaryTouch = null;
     for(let i = 0; i < e.changedTouches.length; i++){
       const t = e.changedTouches[i];
       if(t.identifier === pfRotateTouchId){
         pfRotateTouchX = t.clientX;
         pfRotateTouchY = t.clientY;
-        applyPfTwoFingerRotation();
-        e.stopPropagation(); // 旋轉手指的移動絕對不能讓 Matter 收到，見上方完整說明
-        e.preventDefault();
-        return;
-      }
-      if(t.identifier === pfPrimaryTouchId){
-        // 主要拖曳手指移動：不攔截、正常放行給 Matter 處理拖曳，這裡只是
-        // 順便同步一份座標，讓旋轉的角度基準跟著這一影格的最新位置更新
+        sawRotate = true;
+      } else if(t.identifier === pfPrimaryTouchId){
+        // 先同步一份座標，讓旋轉的角度基準跟著這一影格的最新位置更新
         // （跟 applyDvdTwoFingerRotation() 為什麼要吃兩種手指移動的理由
-        // 完全一樣，見該處完整說明），避免轉動軸心跟著拖曳方向跑偏。
+        // 完全一樣，見該處完整說明），避免轉動軸心跟著拖曳方向跑偏。要不要
+        // 攔截、要不要手動轉發給 Matter，要等掃完整個事件、確定這個事件裡
+        // 有沒有「同時」夾帶旋轉手指的資料才能決定，見下面。
         pfPrimaryTouchX = t.clientX;
         pfPrimaryTouchY = t.clientY;
-        applyPfTwoFingerRotation();
+        primaryTouch = t;
       }
     }
+    if(!sawRotate){
+      // 這個事件裡沒有旋轉手指的資料：不管有沒有主要拖曳手指的資料，都是
+      // 「乾淨」的事件（Matter 讀 changedTouches[0] 不會拿錯手指），正常
+      // 放行給 Matter 自己的 touchmove 處理，不用攔截、也不用手動轉發。
+      if(primaryTouch) applyPfTwoFingerRotation();
+      return;
+    }
+    applyPfTwoFingerRotation();
+    if(primaryTouch && pfMouse && pfMouse.mousemove){
+      pfMouse.mousemove({ changedTouches: [primaryTouch], preventDefault(){} });
+    }
+    e.stopPropagation(); // 旋轉手指的移動絕對不能讓 Matter 收到，見上方完整說明
+    e.preventDefault();
   }, { capture: true, passive: false });
 
+  // ---------- 修正：「兩指幾乎同時放開時，Matter 可能永遠收不到放開通知」 ----------
+  // 理由跟上面 touchmove 那段「邊旋轉邊移動會定在原地」完全同一個成因：
+  // 瀏覽器有可能把「兩根手指幾乎同時放開」打包進同一個原生 touchend 事件，
+  // e.changedTouches 同時含有旋轉手指跟主要手指兩筆資料。原本這裡一偵測到
+  // 旋轉手指就整個攔下來（stopPropagation），如果這個事件剛好也夾帶了
+  // 主要手指放開的資料，Matter 從此再也不會收到任何 touchend 通知——拖曳
+  // 狀態會卡住，MouseConstraint 誤以為使用者還按著，PNG 會像被黏住一樣
+  // 停在最後位置，不會恢復自由落下。改成先掃完整個事件、確定有沒有夾帶
+  // 主要手指的資料，再決定除了攔截之外，要不要順手手動呼叫
+  // pfMouse.mouseup()（Matter.Mouse.setElement() 裡 touchend 本來就是
+  // 直接綁這個函式）補一次，讓 Matter 照樣正確收到「這根手指放開了」。
   function pfHandleRotateTouchEnd(e){
     if(pfRotateTouchId === null) return;
+    let sawRotate = false;
+    let primaryTouch = null;
     for(let i = 0; i < e.changedTouches.length; i++){
       const t = e.changedTouches[i];
-      if(t.identifier === pfRotateTouchId){
-        endPfRotateGesture();
-        // 放開旋轉手指這個訊號也不能讓 Matter 收到——Matter 的 touchend
-        // 處理完全不分辨是哪根手指，一律直接把 mouse.button 設回 -1、
-        // 等同「使用者放開了」，會讓主要拖曳手指還按著卻被誤判成整個放開，
-        // 正在拖的物件突然被丟下——攔截掉才能確保只有主要手指真的放開時，
-        // 拖曳才會跟著結束。
-        e.stopPropagation();
-        e.preventDefault();
-        return;
-      }
-      if(t.identifier === pfPrimaryTouchId){
-        // 主要拖曳手指放開：整個拖曳即將由 Matter 自己收尾（這裡不攔截，
-        // 放行讓它正常收到 touchend），旋轉手勢沒有理由繼續留著，一併
-        // 結束、把最後一小段角速度寫回物理引擎，不然 pfRotateTouchId 會
-        // 一直卡在非 null，之後這根手指的殘影 identifier 也不會再對應到
-        // 任何實際存在的觸控。
+      if(t.identifier === pfRotateTouchId) sawRotate = true;
+      else if(t.identifier === pfPrimaryTouchId) primaryTouch = t;
+    }
+
+    if(!sawRotate){
+      if(primaryTouch){
+        // 主要拖曳手指放開、旋轉手指沒有一起放開：整個拖曳即將由 Matter
+        // 自己收尾（這裡不攔截，放行讓它正常收到 touchend），旋轉手勢沒有
+        // 理由繼續留著，一併結束、把最後一小段角速度寫回物理引擎，不然
+        // pfRotateTouchId 會一直卡在非 null，之後這根手指的殘影 identifier
+        // 也不會再對應到任何實際存在的觸控。
         endPfRotateGesture();
         pfPrimaryTouchId = null;
       }
+      return;
+    }
+
+    // 放開旋轉手指這個訊號不能讓 Matter 收到——Matter 的 touchend 處理
+    // 完全不分辨是哪根手指，一律直接把 mouse.button 設回 -1、等同「使用者
+    // 放開了」，會讓主要拖曳手指還按著卻被誤判成整個放開，正在拖的物件
+    // 突然被丟下——攔截掉才能確保只有主要手指真的放開時，拖曳才會跟著
+    // 結束。
+    endPfRotateGesture();
+    e.stopPropagation();
+    e.preventDefault();
+
+    if(primaryTouch){
+      // 這個被攔下來的事件「同時」也夾帶了主要拖曳手指放開的資料，見上方
+      // 完整說明：手動補呼叫一次 pfMouse.mouseup()，讓 Matter 不會因為
+      // 整個原生事件被攔截，而永遠不知道主要手指其實也放開了。
+      if(pfMouse && pfMouse.mouseup){
+        pfMouse.mouseup({ changedTouches: [primaryTouch], preventDefault(){} });
+      }
+      pfPrimaryTouchId = null;
     }
   }
   document.addEventListener('touchend', pfHandleRotateTouchEnd, { capture: true, passive: false });
