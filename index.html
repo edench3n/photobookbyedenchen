@@ -1974,31 +1974,10 @@
   // 跟下面 photosPromise 的道理完全一樣：請求越早發出去越好，不要等整份
   // script 執行到 init() 才姍姍來遲——這裡先把 Promise 存起來，真正用到
   // 結果是在 init() 內 await 它。
-  // ⚠️⚠️⚠️ 這個檔案是「僅供在 Claude 預覽環境測試飄動物件動畫/物理效果」的
-  // 展示版本，跟真正要部署上線的 index.html 是分開的兩份檔案——因為 Claude
-  // 的檔案預覽環境本身連不到外部網路（googleapis.com 這類外部 API 在這個
-  // 沙盒預覽裡一律連不通，不是網站或 API 金鑰本身有問題），所以在這裡預覽
-  // 時，真正的 Google Drive 圖片庫永遠抓不到，飄動物件因此會照設計「完全
-  // 不顯示」（這是你要求的正確行為：寧可不顯示，也不要顯示黃色 e 預設圖）。
-  // 這個開關只在這份「demo 預覽版」檔案裡生效，強制先用一個簡單的替代
-  // 圖形頂著，讓你可以在這裡看到飄動、撞牆、旋轉、抓取縮放等效果——
-  // 正式部署用的 index.html 完全沒有這段，行為維持「只會出現 Google API
-  // 的圖，抓不到就一律隱藏」不受影響。
-  const PREVIEW_DEMO_PLACEHOLDER = 'data:image/svg+xml,' + encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240">' +
-    '<circle cx="120" cy="120" r="96" fill="%23ff7a59"/>' +
-    '<text x="120" y="152" font-family="sans-serif" font-size="120" font-weight="700" text-anchor="middle" fill="%23ffffff">e</text>' +
-    '</svg>'
-  );
-
-  const dvdEImagesPromise = fetchDvdEImages().then(urls => {
-    // 真的抓到 Google API 圖片庫時，優先使用真實圖片（在真的有網路的環境
-    // 下打開這份 demo 檔案，一樣會抓到真圖，不受這個開關影響）。
-    if(urls && urls.length) return urls;
-    // 抓不到（這個預覽沙盒環境的正常情況）：回傳替代圖形陣列，只在這份
-    // demo 檔案生效，讓你能在 Claude 預覽裡實際看到飄動效果。
-    return [PREVIEW_DEMO_PLACEHOLDER];
-  });
+  // 正式部署用檔案：Drive 圖片庫抓得到就用真圖，抓不到（資料夾沒設定、
+  // 是空的、或請求失敗）一律回傳空陣列，呼叫端（cycleDvdEImage）看到
+  // 空陣列就直接放棄換圖、維持原本內建那張圖，不會顯示任何替代圖形。
+  const dvdEImagesPromise = fetchDvdEImages();
 
   // ---------- 進站最先做的第一件事：立刻打出 Google Drive 的照片清單請求 ----------
   // 原本這個請求（fetchDriveImages()）是在整份 8000 多行的 <script> 全部
@@ -7117,11 +7096,13 @@
     // 才會直接採用；查不到（新照片還沒重跑腳本、masks.json 還沒抓回來、
     // 或這次頁面載入剛好命中 sessionStorage 快取沒有 id 對照表可查）一律
     // 靜靜放行，往下走原本「即時算」的路徑，行為完全不受影響。
-    // 這裡補上的 mask 資料沒有包含 boundary／fullBBox（build-masks.js
-    // 目前只算最核心的碰撞用網格，這兩個欄位供邊界內縮／桌布擷取等
-    // 少數功能使用），統一給 null／空陣列，呼叫端本來就有針對這兩個
-    // 欄位「查不到就退回粗略版本」的容錯機制（見 finishMask() 的完整
-    // 說明），不會壞掉，只是那幾個功能在這幾張圖上會用比較粗略的版本。
+    // build-masks.js 現在也用跟 finishMask() 完全同一套算法補算了 boundary
+    // （格子級輪廓點）跟 fullBBox（像素級可視範圍，供邊界內縮／桌布擷取
+    // 用），這裡直接原樣採用。舊版 masks.json（在補這兩個欄位之前就已經
+    // 產生、還沒重新跑過 build-masks.js 重新產生）不會有這兩個欄位，這裡
+    // 退回 null／空陣列——呼叫端本來就有「查不到就退回粗略版本」的容錯
+    // 機制（見 finishMask() 的完整說明），不會壞掉，只是那幾張還沒重新
+    // 產生過的圖片，這兩個附加功能會比較粗略。
     const precomputedId = dvdETrimmedSrcToId.get(src);
     if(precomputedId && precomputedEMasks && precomputedEMasks.has(precomputedId)){
       const pre = precomputedEMasks.get(precomputedId);
@@ -7130,8 +7111,8 @@
           mask: Uint8Array.from(pre.mask),
           w: pre.w,
           h: pre.h,
-          boundary: new Float32Array(0),
-          fullBBox: null,
+          boundary: (pre.boundary && pre.boundary.length) ? Float32Array.from(pre.boundary) : new Float32Array(0),
+          fullBBox: pre.fullBBox || null,
         });
         return;
       }
