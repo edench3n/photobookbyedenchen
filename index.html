@@ -1916,6 +1916,56 @@
   // 共用同一把 GOOGLE_API_KEY 即可（Google Drive API 的公開檔案清單查詢，
   // key 本身不綁定資料夾，同一把 key 可以查詢任何一個公開分享的資料夾）。
   const EDEN_E_FOLDER_ID = '1QXgbx5t6KC5q07gyhGL6tXqo_YUKzpKH';
+
+  // ---------- 預算好的碰撞遮罩（離線用 Puppeteer 算好，放在同一個 Drive 資料夾） ----------
+  // dvdEImageUrlToId：這次頁面載入真的打了 Drive API 查詢時，記錄「這張圖片
+  // 的網址 → Drive file id」，供下面 recordDvdEMaskMapping() 用來把「裁切完
+  // 之後的網址」(trimTransparentImage()/trimLoadedImage() 的回傳值) 對應回
+  // 原始的 file id，這樣 requestAlphaMask() 才能用 file id 查表拿現成遮罩。
+  // 讀到 sessionStorage 快取（EDEN_E_CACHE_KEY）時這份 Map 會是空的——這是
+  // 已知、無害的降級：那次頁面載入單純會少了「跳過即時算遮罩」這個優化，
+  // 行為（畫面效果）完全不受影響，只是那幾張圖照舊即時算。
+  const dvdEImageUrlToId = new Map();
+  const dvdETrimmedSrcToId = new Map();
+  function recordDvdEMaskMapping(originalUrl, trimmedSrc){
+    if(!originalUrl || !trimmedSrc) return;
+    const id = dvdEImageUrlToId.get(originalUrl);
+    if(id) dvdETrimmedSrcToId.set(trimmedSrc, id);
+  }
+
+  // precomputedEMasksPromise：非同步去 Drive 資料夾裡找一個叫 masks.json 的
+  // 檔案（用 build-masks.js 那支工具離線算好、手動上傳進去的），抓到內容
+  // 之後轉成 Map（file id -> {mask,w,h}）存進 precomputedEMasks。跟下面
+  // dvdEImagesPromise 一樣「越早發出去越好」，這裡直接在宣告完就呼叫，
+  // 不等 init()。找不到檔案、解析失敗、或任何一步出錯，都直接回傳 null，
+  // 下面 requestAlphaMask() 查不到就會照舊退回即時算，不影響網站運作。
+  let precomputedEMasks = null;
+  const precomputedEMasksPromise = (async () => {
+    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
+       !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
+      return null;
+    }
+    try{
+      const q = encodeURIComponent(`'${EDEN_E_FOLDER_ID}' in parents and name = 'masks.json' and trashed = false`);
+      const fields = encodeURIComponent('files(id)');
+      const listUrl = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&key=${GOOGLE_API_KEY}`;
+      const listRes = await fetch(listUrl, { priority: 'low' });
+      if(!listRes.ok) return null;
+      const listData = await listRes.json();
+      const fileId = listData.files && listData.files[0] && listData.files[0].id;
+      if(!fileId) return null;
+      const contentUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}`;
+      const contentRes = await fetch(contentUrl, { priority: 'low' });
+      if(!contentRes.ok) return null;
+      const json = await contentRes.json();
+      const map = new Map();
+      Object.keys(json).forEach(id => map.set(id, json[id]));
+      precomputedEMasks = map;
+      return map;
+    }catch(err){
+      return null;
+    }
+  })();
   const EDEN_E_CACHE_KEY = 'photobook-e-cache-v3:' + EDEN_E_FOLDER_ID; // v1→v2：來源縮圖尺寸從 =s240 改成 =s1600；
     // v2→v3：再從 =s1600 微調成 =s1400，理由同上一次升版——版本號跟著换，
     // 才不會讓還留著舊版 sessionStorage 快取的使用者，繼續沿用裡面存的舊 =s1600 網址，完全吃不到這次調整的效果。
@@ -2939,7 +2989,9 @@
       const urls = data.files.map(file => {
         const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
         const size = '=s1000';
-        return thumbBase ? (thumbBase + size) : `https://drive.google.com/uc?export=view&id=${file.id}`;
+        const url = thumbBase ? (thumbBase + size) : `https://drive.google.com/uc?export=view&id=${file.id}`;
+        dvdEImageUrlToId.set(url, file.id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
+        return url;
       });
 
       writeDvdECache(urls);
@@ -7057,6 +7109,34 @@
       }
     };
 
+    // ---------- 優先使用離線預算好的遮罩（build-masks.js 算好、放在
+    // Drive 資料夾裡的 masks.json），查得到就直接用、完全跳過下面整段
+    // 即時運算 ---------- 用 recordDvdEMaskMapping() 記錄下來的「這張圖
+    // 裁切後的網址 → Drive file id」反查對照表，找出這張圖對應的 file
+    // id，再去 precomputedEMasks 這份 Map 查有沒有現成資料。兩者都查得到
+    // 才會直接採用；查不到（新照片還沒重跑腳本、masks.json 還沒抓回來、
+    // 或這次頁面載入剛好命中 sessionStorage 快取沒有 id 對照表可查）一律
+    // 靜靜放行，往下走原本「即時算」的路徑，行為完全不受影響。
+    // 這裡補上的 mask 資料沒有包含 boundary／fullBBox（build-masks.js
+    // 目前只算最核心的碰撞用網格，這兩個欄位供邊界內縮／桌布擷取等
+    // 少數功能使用），統一給 null／空陣列，呼叫端本來就有針對這兩個
+    // 欄位「查不到就退回粗略版本」的容錯機制（見 finishMask() 的完整
+    // 說明），不會壞掉，只是那幾個功能在這幾張圖上會用比較粗略的版本。
+    const precomputedId = dvdETrimmedSrcToId.get(src);
+    if(precomputedId && precomputedEMasks && precomputedEMasks.has(precomputedId)){
+      const pre = precomputedEMasks.get(precomputedId);
+      if(pre && pre.mask && pre.w && pre.h){
+        finish({
+          mask: Uint8Array.from(pre.mask),
+          w: pre.w,
+          h: pre.h,
+          boundary: new Float32Array(0),
+          fullBBox: null,
+        });
+        return;
+      }
+    }
+
     // ---------- 修正：「頭幾秒還是會lag」----------
     // buildAlphaMaskFromSource() 內部要畫一張最大到 800px 見方的 canvas、
     // 完整讀出所有像素（getImageData），再手動跑一次二階段縮小成 72px 見方
@@ -7519,7 +7599,13 @@
     // 這張內建預設圖從頭到尾不會真的顯示給使用者看（見上面完整說明），
     // 不需要算面積縮放倍率，這裡只取 .src、不傳 areaScale 給
     // setDvdBounceImageSrc()，維持固定高度。
-    trimTransparentImage(dvdBounceImgEl.src).then(result => setDvdBounceImageSrc(result.src));
+    (() => {
+      const srcAtCallTime = dvdBounceImgEl.src;
+      trimTransparentImage(srcAtCallTime).then(result => {
+        recordDvdEMaskMapping(srcAtCallTime, result.src);
+        setDvdBounceImageSrc(result.src);
+      });
+    })();
   }
 
   // ---------- 飄動的「e」撞牆換圖（來自 EDEN_E_FOLDER_ID 那個圖片庫） ----------
@@ -7762,7 +7848,10 @@
           if(!entry){
             // 預抓失敗，或這張圖片還沒被提前排進視窗（理論上不會發生，
             // 保底而已）：退回原本整套容錯路徑重新讀取。
-            trimTransparentImage(url).then(afterTrim);
+            trimTransparentImage(url).then(trimmed => {
+              recordDvdEMaskMapping(url, trimmed.src);
+              afterTrim(trimmed);
+            });
             return;
           }
           // 下載＋解碼多半這時候已經在背景完成了，這裡才真正花 CPU 做
@@ -7773,8 +7862,12 @@
               // 理論上不太會發生（blob: URL 屬於同源，不該有跨網域限制
               // 讀取像素失敗的問題）：保底跟原本 trimTransparentImage() 一樣，
               // 改走完整的容錯路徑重新讀取。
-              trimTransparentImage(url).then(afterTrim);
+              trimTransparentImage(url).then(trimmed2 => {
+                recordDvdEMaskMapping(url, trimmed2.src);
+                afterTrim(trimmed2);
+              });
             } else {
+              recordDvdEMaskMapping(url, trimmed.src);
               afterTrim(trimmed);
             }
           });
