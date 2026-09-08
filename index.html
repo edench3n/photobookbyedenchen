@@ -6723,6 +6723,10 @@
       // 純色留白），直接用原圖即可，不用多包一層 canvas；coverage/aspect
       // 這裡算好的數值依然照樣回傳給呼叫端，不受這條「不用裁切」的捷徑影響。
       if(fullMinX === 0 && fullMinY === 0 && fullMaxX === w - 1 && fullMaxY === h - 1){
+        // 沒有裁切動作，img 本身就是最終顯示會用到的來源，且這裡已經確定
+        // 解碼完成——直接拿它順手把遮罩算好（見 tryPrecomputeAlphaMaskFromTrim()
+        // 的完整說明），省掉之後 requestAlphaMask() 還要再重新解碼一次的部分。
+        tryPrecomputeAlphaMaskFromTrim(fallbackSrc, img, w, h, fallbackSrc);
         return Promise.resolve({ src: fallbackSrc, coverage, aspect });
       }
       const outCanvas = document.createElement('canvas');
@@ -6752,7 +6756,12 @@
       return new Promise(resolve => {
         outCanvas.toBlob(blob => {
           if(!blob){ resolve({ src: fallbackSrc, coverage, aspect }); return; }
-          resolve({ src: URL.createObjectURL(blob), coverage, aspect });
+          const outSrc = URL.createObjectURL(blob);
+          resolve({ src: outSrc, coverage, aspect });
+          // outCanvas 已經畫好裁切後的完整像素資料，不用等這張圖之後被拿去
+          // 顯示、重新解碼一次才算遮罩——見 tryPrecomputeAlphaMaskFromTrim()
+          // 的完整說明。這裡不 await，不會拖慢上面 resolve() 讓圖片盡快顯示。
+          tryPrecomputeAlphaMaskFromTrim(fallbackSrc, outCanvas, trimW, trimH, outSrc);
         }, 'image/png');
       });
     }catch(err){
@@ -7072,6 +7081,51 @@
     const list = pfAlphaMaskWaiters.get(src);
     if(list) list.push(callback);
     else pfAlphaMaskWaiters.set(src, [callback]);
+  }
+
+  // ---------- 修正「裁切完再重新編碼、重新解碼一次，才能算碰撞遮罩」這圈浪費 ----------
+  // trimLoadedImage() 裁切完成的那一刻，手上其實已經有一張畫好、隨時可以讀取
+  // 像素的 canvas（outCanvas，或沒有裁切必要時就是原本已解碼好的 img）——跟
+  // 之後 requestAlphaMask() 要讀的像素資料根本是同一份內容。原本的流程是：
+  // 裁切完 → 編碼成 PNG blob → 顯示時才重新解碼那個 blob → 再畫一次 canvas →
+  // 再整張掃描一次算遮罩，等於「解碼＋整張掃描」在同一張圖片上被迫做了兩次。
+  // 這支函式讓裁切完成的當下就「順手」直接拿 outCanvas／img 當作遮罩運算的
+  // 來源，提早把遮罩算好、存進 pfAlphaMaskCache；等真正顯示這張圖、呼叫到
+  // requestAlphaMask() 時（見該函式最上面 pfAlphaMaskCache.has(src) 的
+  // early-return），會直接命中快取，不會再觸發第二次全圖掃描、也不用再多
+  // 繞一次「編碼→解碼」。
+  //
+  // 只有「這張圖不在離線預算好的 masks.json 裡」時才會真的動手算——已經有
+  // 現成資料的圖，requestAlphaMask() 本來就會直接查表用（見該函式內
+  // precomputedEMasks 那段），完全不需要即時算，這裡搶著算反而是浪費運算；
+  // 查得到 id、也查得到對應資料時直接跳過即可。查不到 id、precomputedEMasks
+  // 這次還沒抓完、或這張圖是新照片還沒被收錄進 masks.json，都當作「查不到」
+  // 一律照舊即時算，不改變原本「查不到就退回即時運算」的容錯行為，只是把
+  // 這次即時運算提前、省掉重複解碼的部分。
+  function tryPrecomputeAlphaMaskFromTrim(originalUrl, source, w, h, finalSrc){
+    if(!finalSrc || !source || !w || !h) return;
+    if(pfAlphaMaskCache.has(finalSrc) || pfAlphaMaskPending.has(finalSrc)) return;
+    const id = originalUrl ? dvdEImageUrlToId.get(originalUrl) : null;
+    if(id && precomputedEMasks && precomputedEMasks.has(id)){
+      const pre = precomputedEMasks.get(id);
+      if(pre && pre.mask && pre.w && pre.h) return; // 離線資料已經有了，交給 requestAlphaMask() 查表用，這裡不用重算
+    }
+    pfAlphaMaskPending.add(finalSrc);
+    scheduleIdle(() => {
+      try{
+        buildAlphaMaskFromSourceChunked(source, w, h, (result) => {
+          pfAlphaMaskCache.set(finalSrc, result);
+          pfAlphaMaskPending.delete(finalSrc);
+          const waiters = pfAlphaMaskWaiters.get(finalSrc);
+          if(waiters){
+            pfAlphaMaskWaiters.delete(finalSrc);
+            waiters.forEach(cb => cb(result));
+          }
+        });
+      }catch(err){
+        pfAlphaMaskPending.delete(finalSrc); // 讀取失敗（理論上不會，來源是自己畫的 canvas／已解碼的 img）：放棄，等真正顯示時 requestAlphaMask() 會自然重試
+      }
+    }, { timeout: 500, fallbackDelay: 0 });
   }
   function requestAlphaMask(src, imgEl){
     if(!src || !imgEl || pfAlphaMaskCache.has(src) || pfAlphaMaskPending.has(src)) return;
