@@ -1904,6 +1904,29 @@
   const DVD_LOW_POWER_DEVICE = !DVD_HAS_REAL_IDLE_CALLBACK ||
     (typeof navigator.hardwareConcurrency === 'number' && navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4);
 
+  // ---------- 修正：「手機版剛進站前十秒左右，飄動物件移動還是有一點卡」----------
+  // 沒有真正 requestIdleCallback 的裝置（DVD_LOW_POWER_DEVICE），底下所有
+  // 「背景才做」的工作，退場路徑都是靠 scheduleIdle() 的 rAF+setTimeout
+  // 近似——這個近似沒辦法像真正的 idle callback 一樣「只在瀏覽器真的閒下來
+  // 才執行」，每一小段背景工作實際執行的當下，還是會插進飄動物件 RAF 迴圈
+  // 的兩次畫面更新之間，稍微延後那一影格真正畫出來的時間點，這是沒有原生
+  // API 之下無法完全避免的，只能靠「背景工作排得多鬆」來換取影響大小。
+  // 下面 trimDvdEImagesStaggered() 的 scheduleNext() 原本在這類裝置上刻意
+  // 排得很緊（timeout:80、fallbackDelay:0），優先順序放在「盡快把整個
+  // e 圖片庫都裁切好、使用者連續撞牆能盡快看到不同照片」——這是有意的
+  // 取捨，見該函式上方的完整說明。
+  // 使用者這裡明確要求反過來：剛進站這一小段時間，使用者看得到、也在意的
+  // 只有飄動物件本身動得順不順，首頁網格、堆疊模式要用的圖庫多快填滿，
+  // 使用者不會這麼快就點過去，可以晚一點才追上。DVD_E_PRIORITY_WINDOW_MS
+  // 這段時間內，把 scheduleNext() 排程間隔放鬆（給飄動物件的 RAF 迴圈更多
+  // 完整、不被切碎的畫面更新機會），這段時間一過，才切回原本那組積極數值，
+  // 讓圖庫盡快填滿，兩種優先順序在各自的時間窗內都保留，只是排了先後。
+  const DVD_SCRIPT_START_TS = performance.now();
+  const DVD_E_PRIORITY_WINDOW_MS = 10000;
+  function dvdEWithinPriorityWindow(){
+    return (performance.now() - DVD_SCRIPT_START_TS) < DVD_E_PRIORITY_WINDOW_MS;
+  }
+
   const GOOGLE_DRIVE_FOLDER_ID = '1wQI2MMoORB78XoC8E5GnxKkLLUEZsxPn';
   const GOOGLE_API_KEY = 'AIzaSyDoTpWEZ-UGEhOm3HScpL2mTlwc7tYiiNg';
 
@@ -7945,8 +7968,17 @@
         // 等更優先的事，不會變成真正的同步阻塞迴圈；只是不再額外多等那
         // 20ms，讓池子長大的速度更接近「網路下載＋裁切本身需要的時間」，
         // 盡量壓縮「池子太小、防重複規則形同虛設」這段窗口期的長度。
+        //
+        // ---------- 再修正：「頭十秒還是有點卡」，見上面 DVD_E_PRIORITY_WINDOW_MS
+        // 的完整說明 ----------
+        // 剛進站的頭 DVD_E_PRIORITY_WINDOW_MS 毫秒內，改用比原本更寬鬆的
+        // 排程間隔，優先讓飄動物件的畫面更新盡量不被切碎；過了這段時間，
+        // 才切回原本這組「盡快填滿圖庫」的積極數值。桌機／平板（有真正
+        // requestIdleCallback）完全不受影響，維持原本行為。
         scheduleIdle(step, DVD_LOW_POWER_DEVICE
-          ? { timeout: 80, fallbackDelay: 0 }
+          ? (dvdEWithinPriorityWindow()
+              ? { timeout: 400, fallbackDelay: 120 }
+              : { timeout: 80, fallbackDelay: 0 })
           : { timeout: 600, fallbackDelay: 60 });
       }
       scheduleNext();
