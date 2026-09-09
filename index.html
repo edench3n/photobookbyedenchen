@@ -11526,7 +11526,25 @@
           // clone 出來的這份一樣是幾乎零延遲顯示，不會重新真的走一次
           // 網路下載。
           img = warmedImg.cloneNode();
-          img.classList.add('loaded'); // 在真正插入畫面之前就先加上，瀏覽器第一次繪製就是 opacity:1，不會有任何淡入過程
+          // 修正「使用者回報：物件掉下來時出現得太快，像是瞬間跳出來，
+          // 不是淡入」——原本這裡在插入畫面之前就先加上 .loaded，瀏覽器
+          // 第一次繪製直接是 opacity:1，等於完全跳過 CSS 那段 0.22s 的
+          // 淡入 transition，只有極少數「沒趕上暖機」的照片（見下面
+          // markLoadedAndDrop() 分支）才會經歷真正的淡入，兩種情況視覺
+          // 語言不一致，而暖機成功是最常見的情況，使用者感受到的自然是
+          // 「大多數物件都瞬間跳出來」。
+          // 改成跟 .pf-rules-overlay 同一套「先讓瀏覽器真的畫出 opacity:0
+          // 的那一影格，隔兩個 frame 才加 class 觸發 transition」的手法
+          // （見 showPfRulesOverlay() 的說明）：如果在 appendChild 之前
+          // 同步加 class，跟「插入」是同一個 tick，瀏覽器仍然有機會把
+          // opacity:0→1 這兩個狀態合併成一次繪製、直接跳過動畫；隔兩個
+          // frame 才加，才能保證第一影格先畫出透明狀態，接下來才是真正
+          // 播出來的淡入，跟下面掉落動作幾乎同一刻發生（dropItem() 在
+          // onAlphaMaskReady() 命中「早就好了」的同步路徑時，幾乎是緊接
+          // 在這裡之後就呼叫），視覺上就是「淡入的同時開始掉落」。
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => { img.classList.add('loaded'); });
+          });
           // 極端保險：cache 裡存的雖然已經確定是真正成功載入過的圖片（見
           // warmFallBatch() 內的修正說明），但複製出來的這份元素理論上還是
           // 有極小機率在真正插入畫面、瀏覽器要重新繪製時失敗（例如瀏覽器
