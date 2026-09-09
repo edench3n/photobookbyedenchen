@@ -10714,6 +10714,25 @@
     mobile: '/pf-rules-mobile.png'
   };
 
+  // 手機版新增之後，實際測試發現手機版的淡入看起來沒有跟桌機版一樣拉長：
+  // 原因是 showPfRulesOverlay() 每次才臨時把 <img src> 換成這張圖，若瀏覽器
+  // 這之前完全沒下載過（手機這張是這次才新增的檔案，不像桌機那張可能
+  // 早就在瀏覽器快取裡），下載加解碼會花上一小段時間，畫面等於是「opacity
+  // 已經淡到 1、但圖片本體還沒下載完」，圖片真正跳出來的那一刻反而在
+  // fade transition 播完之後，看起來就像完全沒有照 PF_RULES_FADE_IN_MS
+  // 那個時長淡入、甚至像是突然彈出來。
+  // 解法：頁面一載入就先用 new Image() 把桌機／手機兩張圖都預先下載一次
+  // （只是丟進瀏覽器快取，不會插入畫面、使用者也看不到任何變化），等到
+  // 真正呼叫 showPfRulesOverlay() 時圖片多半已經在快取裡，把 <img src>
+  // 換過去幾乎是瞬間顯示，opacity 的淡入 transition 才會是使用者實際
+  // 感覺到的唯一時間軸，兩種裝置的淡入時長才會一致。
+  (function preloadPfRulesImages(){
+    [PF_RULES_IMG_SRC.desktop, PF_RULES_IMG_SRC.mobile].forEach((src) => {
+      const preloadImg = new Image();
+      preloadImg.src = src;
+    });
+  })();
+
   // 淡入時長：原本跟淡出共用 CSS 的 .15s，使用者要求淡入再拉長一點，
   // 改成用這顆常數搭配行內 style 覆蓋（見 showPfRulesOverlay()），跟
   // 淡出的 .15s 分開，之後要再調快／調慢淡入速度，改這個數字就好。
