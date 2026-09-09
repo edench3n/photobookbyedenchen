@@ -10704,6 +10704,7 @@
   function showPfRulesOverlay(){
     if(!pfRulesOverlay) return;
     if(isDetailMobile()) return; // 使用者明確要求只在電腦版顯示，手機版整段跳過
+    markPfRulesShownThisTab(); // 這個分頁這次顯示過了，記下來，同一分頁之後不用再顯示（見上面 PF_RULES_SESSION_KEY 的完整說明）
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
     pfRulesOverlay.classList.add('active');
@@ -10736,64 +10737,64 @@
     });
   }
 
-  // ---------- 規則說明圖：等 png 物件掉得差不多了才蓋上，不是一進場就蓋 ----------
+  // ---------- 規則說明圖：大概掉到一半時蓋上，不是一進場就蓋，也不用等全部掉完 ----------
   // 原本 showPfRulesOverlay() 是在 enterPhotoFallMode() 一開始（照片都還沒
   // 開始掉）就直接呼叫，使用者連第一張 png 從畫面外掉進來的瀑布動畫都還
   // 沒看到，整張說明圖已經蓋在正中間——「出來太快了」，節奏上完全搶在
   // 使用者最想先看的那段掉落動畫前面。
-  // 改成不在進場那一刻直接呼叫，而是掛一個 Matter.js 的 afterUpdate 監聽
-  // 器，每一影格檢查「這一批物件（15 張照片 + 飄動的 e）裡，已經進入
-  // Matter.js 內建睡眠狀態（enableSleeping，見 startPhotoFallEngine() 內
-  // 的完整說明）的比例」——一顆物體進入睡眠，正好代表它已經完全靜止不再
-  // 移動，拿這個當「掉得差不多了」的判斷依據最準確，不用自己另外土法煉鋼
-  // 去算重力加速度、掉落距離來猜落地的時間點（那樣還得考慮每張照片起始
-  // 高度不同、彼此碰撞堆疊互相卡住等變數，準確度反而不如直接問物理引擎
-  // 本身「這顆還在動嗎」）。
-  // 門檻抓 80%（不是等到 100%）：多顆疊在一起时，總有一兩顆卡在別張照片
-  // 邊緣、要多抖幾下才真正睡著，堅持等到全部都睡著，使用者感受不到明顯
-  // 差異，但那一兩顆「卡住醒著」的邊緣情況反而會讓說明圖遲遲不出現；抓
-  // 八成當門檻，兩邊都顧到。
-  // 保底：不管有沒有達到門檻，最多等 PHOTO_FALL_RULES_MAX_WAIT_MS 這麼久
-  // 一定顯示，避免極端情況（例如使用者進場後立刻自己動手拖曳照片，讓
-  // 大部分物體被拖曳彈簧持續喚醒、遲遲不進入睡眠）卡住說明圖永遠不出現。
-  const PHOTO_FALL_RULES_SETTLE_RATIO = 0.8;
-  const PHOTO_FALL_RULES_MAX_WAIT_MS = 2600;
-  let pfRulesSettleCheckHandler = null;
-  let pfRulesSettleMaxWaitTimer = null;
-  let pfRulesSettleShown = false;
+  // 中間版本改成掛 Matter.js 的 afterUpdate 監聽器，等「大部分物件都進入
+  // 睡眠狀態（幾乎完全靜止）」才蓋上，結果又變成「太晚出來了」——等到
+  // 八成物件都落地不動，畫面上的掉落動畫其實早就看完了，說明圖反而變成
+  // 姍姍來遲。
+  // 改成直接用固定延遲：從 spawnFallingPhotos() 真正把這批 15 張照片＋
+  // 飄動的 e 一起丟進物理世界那一刻開始算（呼叫端見 enterPhotoFallMode()
+  // 內 setTimeout 的完整說明），等 PHOTO_FALL_RULES_SHOW_DELAY_MS 這麼久
+  // 就直接蓋上，不再看物理引擎的睡眠狀態——這個時間點抓在整批物件「大概
+  // 掉到一半」，落下動畫還在使用者眼前進行中，說明圖疊上去也不會搶戲、
+  // 又不會晚到讓人等到不耐煩。這個數字是憑掉落動畫節奏抓的經驗值，如果
+  // 之後畫面調快／調慢了，這個常數要跟著一起微調。
+  const PHOTO_FALL_RULES_SHOW_DELAY_MS = 1100;
+  let pfRulesShowTimer = null;
+
+  // ---------- 規則說明圖：只在「這個分頁」第一次進堆疊頁面時顯示 ----------
+  // 使用者要求：說明圖只需要在使用者「這次打開網站分頁」後第一次進堆疊
+  // 頁面時出現一次；之後不管在堆疊頁面跟首頁之間來回切換幾次，都不用
+  // 再顯示，一路顯示到使用者自己把整個網站的分頁關掉為止——重新開一個
+  // 分頁進站，才要再顯示一次。
+  // 用 sessionStorage（不是 localStorage）正好對應這個需求：sessionStorage
+  // 的生命週期跟「分頁」綁在一起，同一分頁不管重新整理、在站內來回導覽
+  // 幾次都還在，一旦分頁被關掉就會自動清空，下次重新開分頁進站等於一張
+  // 白紙，完全不用自己額外判斷「有沒有關掉分頁」。try/catch 包起來是因為
+  // 極少數環境（例如某些瀏覽器的隱私／無痕模式）存取 sessionStorage 可能
+  // 直接丟例外，這種情況直接當作「還沒顯示過」處理，不影響堆疊頁面本身
+  // 其他功能運作。
+  const PF_RULES_SESSION_KEY = 'pfRulesShownThisTab';
+
+  function pfRulesAlreadyShownThisTab(){
+    try{ return sessionStorage.getItem(PF_RULES_SESSION_KEY) === '1'; }
+    catch(e){ return false; }
+  }
+
+  function markPfRulesShownThisTab(){
+    try{ sessionStorage.setItem(PF_RULES_SESSION_KEY, '1'); }
+    catch(e){}
+  }
 
   function cancelFallSettledRulesOverlay(){
-    // 使用者在門檻達成／保底時間到之前，就已經雙擊提早收掉整組堆疊時呼叫：
-    // 停掉還沒觸發的監聽器跟計時器，避免使用者早就退出堆疊模式之後，這裡
-    // 遲來一步又把說明圖重新蓋出來（那時堆疊畫面本身可能都已經不在了）。
-    if(pfRulesSettleCheckHandler && pfEngine){
-      window.Matter.Events.off(pfEngine, 'afterUpdate', pfRulesSettleCheckHandler);
-    }
-    pfRulesSettleCheckHandler = null;
-    if(pfRulesSettleMaxWaitTimer){ clearTimeout(pfRulesSettleMaxWaitTimer); pfRulesSettleMaxWaitTimer = null; }
-    pfRulesSettleShown = false;
+    // 使用者在延遲時間到之前，就已經雙擊提早收掉整組堆疊時呼叫：停掉還
+    // 沒觸發的計時器，避免使用者早就退出堆疊模式之後，這裡遲來一步又把
+    // 說明圖重新蓋出來（那時堆疊畫面本身可能都已經不在了）。
+    if(pfRulesShowTimer){ clearTimeout(pfRulesShowTimer); pfRulesShowTimer = null; }
   }
 
   function scheduleFallSettledRulesOverlay(){
-    if(isDetailMobile()) return; // 手機版本來就不顯示這張說明圖（見 showPfRulesOverlay() 內的判斷），提早跳過，不用多掛一個永遠用不到的監聽器
-    cancelFallSettledRulesOverlay(); // 保險：理論上每次 enterPhotoFallMode() 只會呼叫一次，但先清乾淨上一輪殘留的監聽器/計時器，避免重疊
-    const Matter = window.Matter;
-    const { Events } = Matter;
-    const tryShow = () => {
-      if(pfRulesSettleShown) return;
-      pfRulesSettleShown = true;
-      cancelFallSettledRulesOverlay();
+    if(isDetailMobile()) return; // 手機版本來就不顯示這張說明圖（見 showPfRulesOverlay() 內的判斷），提早跳過，不用多掛一個永遠用不到的計時器
+    if(pfRulesAlreadyShownThisTab()) return; // 這個分頁已經顯示過一次了，這次進堆疊頁面不用再排程
+    cancelFallSettledRulesOverlay(); // 保險：理論上每次 enterPhotoFallMode() 只會呼叫一次，但先清乾淨上一輪殘留的計時器，避免重疊
+    pfRulesShowTimer = setTimeout(() => {
+      pfRulesShowTimer = null;
       showPfRulesOverlay();
-    };
-    pfRulesSettleMaxWaitTimer = setTimeout(tryShow, PHOTO_FALL_RULES_MAX_WAIT_MS);
-    pfRulesSettleCheckHandler = () => {
-      if(!pfEngine) return;
-      const bodies = pfItems.map(item => item.body).concat(pfDvdItem ? [pfDvdItem.body] : []);
-      if(!bodies.length) return; // 照片還沒開始 spawn，先不用檢查，等下一影格再看
-      const asleepCount = bodies.reduce((n, b) => n + (b.isSleeping ? 1 : 0), 0);
-      if(asleepCount / bodies.length >= PHOTO_FALL_RULES_SETTLE_RATIO) tryShow();
-    };
-    Events.on(pfEngine, 'afterUpdate', pfRulesSettleCheckHandler);
+    }, PHOTO_FALL_RULES_SHOW_DELAY_MS);
   }
 
   // ---------- 進場：首頁縮圖／編號縮小至消失，時鐘快速淡出 ----------
@@ -10909,14 +10910,17 @@
     // 淡入安全網，兩者互不拖累，整批出場的節奏完全不受影響。
     loadMatterJS().then(() => {
       startPhotoFallEngine();
-      // 引擎剛跑起來、e 也剛落進物理世界這一刻，開始監看「掉得差不多了沒」
-      // （見 scheduleFallSettledRulesOverlay() 的完整說明），而不是進場那
-      // 一瞬間就蓋上——這樣說明圖出現的時機才會跟在真正的落下／堆疊動畫
-      // 後面，不會搶在使用者還沒看到任何東西掉下來之前就先擋住畫面。
-      scheduleFallSettledRulesOverlay();
       const elapsed = performance.now() - enterAt;
       const remaining = Math.max(0, PHOTO_FALL_SHRINK_MS - elapsed);
-      setTimeout(() => spawnFallingPhotos(fallBatch, fallWarm.cache), remaining);
+      setTimeout(() => {
+        spawnFallingPhotos(fallBatch, fallWarm.cache);
+        // 15 張照片＋e 這一刻才真正一起落進物理世界開始掉落，說明圖的
+        // 固定延遲（見 scheduleFallSettledRulesOverlay() 的完整說明）要從
+        // 這裡起算才準——如果從更早的 startPhotoFallEngine() 那一刻起算，
+        // 會把「引擎準備、e 提早入場」那段時間也算進去，蓋上的時機就會
+        // 比實際掉落動畫的「大概一半」還要早，跟使用者想要的時機兜不上。
+        scheduleFallSettledRulesOverlay();
+      }, remaining);
     }).catch(() => {
       // Matter.js 載入失敗（例如離線）：直接復原，不留在半成品狀態
       photoFallState = 'idle';
