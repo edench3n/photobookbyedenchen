@@ -1789,25 +1789,23 @@
     gap:38px;
   }
   .wallpaper-preview-btn{
-    font-family:inherit;
-    font-size:17px;
-    font-weight:400;
-    letter-spacing:0.01em;
-    padding:0 0 4px;
+    display:inline-flex;
+    align-items:center;
+    padding:0;
     border:none;
-    border-bottom:1px solid #111; /* 用 border-bottom 取代 text-decoration:underline，
-       是因為 underline 貼字太近、descender（例如 download 的 d/l）
-       穿過線段時視覺上會被切斷、看起來像整條線不見了，改用獨立的
-       border-bottom + padding-bottom 拉出間距，才會是一條乾淨完整的橫槓 */
     background:none;
     color:#111;
     cursor:pointer;
-    text-decoration:none;
-    line-height:1.2;
+    line-height:1;
   }
-  .wallpaper-preview-btn.secondary{
-    border-bottom-color:transparent;
+  .wallpaper-preview-btn img{
+    display:block;
+    height:32px;
+    width:auto;
+    -webkit-user-drag:none;
+    user-select:none;
   }
+
 
   ::selection{ background:#000; color:#fff; }
 </style>
@@ -1882,8 +1880,8 @@
   <div class="wallpaper-preview-overlay" id="wallpaperPreviewOverlay" aria-hidden="true">
     <img class="wallpaper-preview-img" id="wallpaperPreviewImg" alt="">
     <div class="wallpaper-preview-actions">
-      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg">download</a>
-      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn">back</button>
+      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg"><img src="/download.png" alt="download" draggable="false"></a>
+      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn"><img src="/back.png" alt="back" draggable="false"></button>
     </div>
   </div>
 
