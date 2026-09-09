@@ -11997,7 +11997,29 @@
     }
   }, { passive: true });
 
-  photoFallStage.addEventListener('pointerdown', (e) => {
+  // ---------- 修正：「堆疊頁面第一批長按完全沒反應（只有第一批，之後都正常）」----------
+  // 真正成因：跟上面幾段時間差／效能相關的修正都無關，是 DOM 疊圖的問題。
+  // 規則說明圖（.pf-rules-overlay，裡面寫著「hold to save」教使用者長按
+  // 可以存桌布）只在「這次頁面載入、第一次進堆疊頁面」時才會出現（見
+  // pfRulesAlreadyShownThisTab() 的說明），時機剛好精準對應「第一批」；
+  // 它是跟 photoFallStage 平行、各自獨立掛在 <body> 底下的另一個
+  // <div>，不是 photoFallStage 的子節點。它顯示時 pointer-events:auto、
+  // z-index 蓋在最上層——使用者這時候如果照著說明「長按」，手指/滑鼠
+  // 按下的那一下，瀏覽器判定到的 e.target 其實是這張說明圖本身，事件
+  // 根本不會傳到（也不會冒泡到）下面 photoFallStage 的 pointerdown
+  // 監聽器，長按候選狀態（pfLongPressCandidatePointerId）從頭到尾都沒被
+  // 設進去，整段長按判斷形同沒發生過——這正是「照著教學長按卻完全沒
+  // 反應」的成因。等使用者放開手指，pf-rules-overlay 自己另一個 click
+  // 監聽器才把說明圖收掉；之後同一頁不會再顯示這張圖，長按才會恢復
+  // 正常，符合使用者回報「只有第一批不行」的落差。
+  // 修法：把原本只掛在 photoFallStage 上的 pointerdown 處理抽成一個
+  // 具名函式，額外也掛在 pfRulesOverlay 身上，兩邊共用同一套邏輯——
+  // 長按判斷本身只看 Matter 世界目前的物理狀態、不依賴事件目標是哪個
+  // DOM 節點，所以按在說明圖上跟按在照片上效果完全一致；擷取真的成立時
+  // 另外呼叫 hidePfRulesOverlay()，讓說明圖跟著收掉，不會卡在桌布預覽
+  // 彈窗後面。
+  function pfHandleStagePointerDown(e, opts){
+    const skipTapTracking = !!(opts && opts.skipTapTracking); // 見下方 pfRulesOverlay 監聽器註冊處的說明：按在說明圖上只追蹤長按，不要連帶把單擊/雙擊的候選也記進去
     // ---------- 修正：「雙擊回首頁，點畫面空白處沒反應，只有點在飄動物件
     // 的圖片上才有效」----------
     // 成因：這裡原本是 `if(photoFallState !== 'active') return;`，把
@@ -12018,7 +12040,7 @@
     // interruptReshuffleForExit() 的分支，只是這個候選記錄一直沒機會
     // 走到那裡），只有真正的 entering/exiting 這兩個動畫過渡狀態才繼續
     // 忽略，避免點到即將被清掉的舊物件。
-    if(photoFallState === 'active' || photoFallState === 'reshuffling'){
+    if(!skipTapTracking && (photoFallState === 'active' || photoFallState === 'reshuffling')){
       pfPhotoTapCandidatePointerId = e.pointerId;
       pfPhotoTapStartX = e.clientX;
       pfPhotoTapStartY = e.clientY;
@@ -12082,11 +12104,18 @@
         if(isStillish && noOverlay && photoFallState === 'active'){
           pfLongPressCandidatePointerId = null; // 標記已處理，放開時 pointerup 那組判斷不再重複觸發一次
           pfPhotoTapCandidatePointerId = null; // 避免放開時又被算成一次單擊
+          if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) hidePfRulesOverlay(); // 按在說明圖上長按成立時，順便把說明圖收掉，不要卡在桌布預覽彈窗後面
           capturePhotoFallWallpaper();
         }
       }, PF_LONGPRESS_MS);
     }
-  });
+  }
+  photoFallStage.addEventListener('pointerdown', pfHandleStagePointerDown);
+  // 只追蹤長按（skipTapTracking:true），不追蹤單擊/雙擊候選——說明圖本身
+  // 已經有自己的 click 監聽器負責「點一下收掉說明圖」，如果這裡連單擊
+  // 候選也一起記，使用者單純點一下想收掉說明圖時，會被下面 window 的
+  // pointerup 誤判成「點了一下 png／背景」，多餘觸發一次換批或換色。
+  if(pfRulesOverlay) pfRulesOverlay.addEventListener('pointerdown', (e) => pfHandleStagePointerDown(e, { skipTapTracking: true }));
   window.addEventListener('pointerup', (e) => {
     // 長按候選優先判斷：命中就直接處理完畢，不落到下面單擊/雙擊那組邏輯，
     // 避免這次放開同時被算成一次點擊。
@@ -12099,7 +12128,10 @@
       const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
       if(isStillish && heldMs >= PF_LONGPRESS_MS && noOverlay){
         pfPhotoTapCandidatePointerId = null; // 避免下面單擊/雙擊邏輯又把這次放開重複處理一次
-        if(photoFallState === 'active') capturePhotoFallWallpaper();
+        if(photoFallState === 'active'){
+          if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) hidePfRulesOverlay(); // 同上：按在說明圖上長按成立時，順便收掉說明圖
+          capturePhotoFallWallpaper();
+        }
         return;
       }
     }
@@ -12231,6 +12263,7 @@
       if(pfLongPressTimer !== null){ clearTimeout(pfLongPressTimer); pfLongPressTimer = null; }
       if(shouldCapture){
         pfPhotoTapCandidatePointerId = null; // 避免這次取消又被下面單擊/雙擊邏輯重複處理一次
+        if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) hidePfRulesOverlay(); // 同上：按在說明圖上長按成立時，順便收掉說明圖
         capturePhotoFallWallpaper();
       }
     }
