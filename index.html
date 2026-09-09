@@ -1579,10 +1579,13 @@
      文字的最左（header-left 左邊緣）跟最右（header-right 右邊緣，兩者
      都是用同一顆 var(--edge) 當 padding，見上面 .fixed-header 的說明）；
      高度則是整個視窗置中，不特別對齊任何一排文字。
-     淡入淡出都刻意用很短的時間（.15s），符合「快速」的需求；display:none
-     ↔ flex 的切換由 JS 加/拿掉 .active 控制（先切換 display 讓元素真的
-     佔上 layout，隔一個 frame 才加 .show 觸發 opacity 的 transition，
-     避免兩個切換疊在同一個 tick 被瀏覽器直接跳過動畫）。 */
+     淡入淡出原本都用很短的時間（.15s），現在改成淡出維持 .15s、淡入拉長
+     （由 JS 用行內 style 覆蓋這裡的 transition-duration，見
+     PF_RULES_FADE_IN_MS／showPfRulesOverlay() 的說明），這裡的 .15s
+     只當作淡出／預設值；display:none↔flex 的切換由 JS 加/拿掉 .active
+     控制（先切換 display 讓元素真的佔上 layout，隔一個 frame 才加 .show
+     觸發 opacity 的 transition，避免兩個切換疊在同一個 tick 被瀏覽器
+     直接跳過動畫）。 */
   .pf-rules-overlay{
     position:fixed;
     inset:0;
@@ -10701,16 +10704,25 @@
   const pfRulesOverlay = document.getElementById('pfRulesOverlay');
   let pfRulesHideTimer = null;
 
+  // 淡入時長：原本跟淡出共用 CSS 的 .15s，使用者要求淡入再拉長一點，
+  // 改成用這顆常數搭配行內 style 覆蓋（見 showPfRulesOverlay()），跟
+  // 淡出的 .15s 分開，之後要再調快／調慢淡入速度，改這個數字就好。
+  const PF_RULES_FADE_IN_MS = 500;
+
   function showPfRulesOverlay(){
     if(!pfRulesOverlay) return;
     if(isDetailMobile()) return; // 使用者明確要求只在電腦版顯示，手機版整段跳過
     markPfRulesShownThisTab(); // 這次頁面載入顯示過了，記下來，同一次載入之後不用再顯示（重新整理會重跑 JS、旗標歸零，見上面完整說明）
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
+    // 淡入／淡出用不同時長：淡出維持原本很快的 .15s（見 hidePfRulesOverlay），
+    // 淡入則改久一點，用行內 style 覆蓋 CSS 預設的 transition-duration
+    // （PF_RULES_FADE_IN_MS），這樣兩個方向可以各自獨立調整，不用互相牽動。
+    pfRulesOverlay.style.transitionDuration = (PF_RULES_FADE_IN_MS / 1000) + 's';
     pfRulesOverlay.classList.add('active');
     // 先讓 display 真的切成 flex，隔兩個 frame 才加 .show 觸發 opacity
     // 的 transition，避免「display:none→flex」跟「opacity:0→1」疊在
-    // 同一個 tick 裡被瀏覽器直接跳過淡入動畫，快速淡入才會確實播出來。
+    // 同一個 tick 裡被瀏覽器直接跳過淡入動畫，淡入才會確實播出來。
     requestAnimationFrame(() => {
       requestAnimationFrame(() => { pfRulesOverlay.classList.add('show'); });
     });
@@ -10719,9 +10731,12 @@
   function hidePfRulesOverlay(){
     if(!pfRulesOverlay) return;
     if(!pfRulesOverlay.classList.contains('active')) return;
+    // 切回淡出用的短時長，再拿掉 .show 觸發淡出，不會被淡入時設的較長
+    // transition-duration 拖慢。
+    pfRulesOverlay.style.transitionDuration = '0.15s';
     pfRulesOverlay.classList.remove('show');
     clearTimeout(pfRulesHideTimer);
-    // 等 opacity 的淡出 transition（CSS .15s）真的播完，才把 display 收回
+    // 等 opacity 的淡出 transition（.15s）真的播完，才把 display 收回
     // none、pointer-events 收回 none，這一刻之後底下的堆疊舞台才真正開始
     // 接收點擊／拖曳，符合「消失之後才能操控堆疊頁面」的需求。
     pfRulesHideTimer = setTimeout(() => {
@@ -10751,8 +10766,9 @@
   // 內 setTimeout 的完整說明），等 PHOTO_FALL_RULES_SHOW_DELAY_MS 這麼久
   // 就直接蓋上，不再看物理引擎的睡眠狀態。這個數字是憑掉落動畫節奏抓的
   // 經驗值，如果之後畫面調快／調慢了，這個常數要跟著一起微調。
-  // 使用者回饋原本 1100ms 還是偏晚，再調快成 650ms。
-  const PHOTO_FALL_RULES_SHOW_DELAY_MS = 650;
+  // 使用者回饋原本 1100ms 還是偏晚，先調快成 650ms，之後又再要求更早，
+  // 這次調到 350ms——大概是照片剛開始掉沒多久就蓋上，不再等「掉到一半」。
+  const PHOTO_FALL_RULES_SHOW_DELAY_MS = 350;
   let pfRulesShowTimer = null;
 
   // ---------- 規則說明圖：只在「這次頁面載入」第一次進堆疊頁面時顯示 ----------
