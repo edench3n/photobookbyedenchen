@@ -10704,7 +10704,7 @@
   function showPfRulesOverlay(){
     if(!pfRulesOverlay) return;
     if(isDetailMobile()) return; // 使用者明確要求只在電腦版顯示，手機版整段跳過
-    markPfRulesShownThisTab(); // 這個分頁這次顯示過了，記下來，同一分頁之後不用再顯示（見上面 PF_RULES_SESSION_KEY 的完整說明）
+    markPfRulesShownThisTab(); // 這次頁面載入顯示過了，記下來，同一次載入之後不用再顯示（重新整理會重跑 JS、旗標歸零，見上面完整說明）
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
     pfRulesOverlay.classList.add('active');
@@ -10749,35 +10749,31 @@
   // 改成直接用固定延遲：從 spawnFallingPhotos() 真正把這批 15 張照片＋
   // 飄動的 e 一起丟進物理世界那一刻開始算（呼叫端見 enterPhotoFallMode()
   // 內 setTimeout 的完整說明），等 PHOTO_FALL_RULES_SHOW_DELAY_MS 這麼久
-  // 就直接蓋上，不再看物理引擎的睡眠狀態——這個時間點抓在整批物件「大概
-  // 掉到一半」，落下動畫還在使用者眼前進行中，說明圖疊上去也不會搶戲、
-  // 又不會晚到讓人等到不耐煩。這個數字是憑掉落動畫節奏抓的經驗值，如果
-  // 之後畫面調快／調慢了，這個常數要跟著一起微調。
-  const PHOTO_FALL_RULES_SHOW_DELAY_MS = 1100;
+  // 就直接蓋上，不再看物理引擎的睡眠狀態。這個數字是憑掉落動畫節奏抓的
+  // 經驗值，如果之後畫面調快／調慢了，這個常數要跟著一起微調。
+  // 使用者回饋原本 1100ms 還是偏晚，再調快成 650ms。
+  const PHOTO_FALL_RULES_SHOW_DELAY_MS = 650;
   let pfRulesShowTimer = null;
 
-  // ---------- 規則說明圖：只在「這個分頁」第一次進堆疊頁面時顯示 ----------
-  // 使用者要求：說明圖只需要在使用者「這次打開網站分頁」後第一次進堆疊
-  // 頁面時出現一次；之後不管在堆疊頁面跟首頁之間來回切換幾次，都不用
-  // 再顯示，一路顯示到使用者自己把整個網站的分頁關掉為止——重新開一個
-  // 分頁進站，才要再顯示一次。
-  // 用 sessionStorage（不是 localStorage）正好對應這個需求：sessionStorage
-  // 的生命週期跟「分頁」綁在一起，同一分頁不管重新整理、在站內來回導覽
-  // 幾次都還在，一旦分頁被關掉就會自動清空，下次重新開分頁進站等於一張
-  // 白紙，完全不用自己額外判斷「有沒有關掉分頁」。try/catch 包起來是因為
-  // 極少數環境（例如某些瀏覽器的隱私／無痕模式）存取 sessionStorage 可能
-  // 直接丟例外，這種情況直接當作「還沒顯示過」處理，不影響堆疊頁面本身
-  // 其他功能運作。
-  const PF_RULES_SESSION_KEY = 'pfRulesShownThisTab';
+  // ---------- 規則說明圖：只在「這次頁面載入」第一次進堆疊頁面時顯示 ----------
+  // 使用者要求（第二版）：原本用 sessionStorage 記錄「這個分頁顯示過了」，
+  // 但 sessionStorage 會撐過「重新整理」——同一分頁重新整理後 sessionStorage
+  // 還在，說明圖就不會再出現。使用者現在要的是：只要重新整理，就要當成
+  // 全新狀態，說明圖要再出現一次；只有在「同一次頁面載入」內、不重新整理、
+  // 純粹在首頁跟堆疊頁面之間來回切換時，才不用重複顯示。
+  // 因此改成單純的記憶體內旗標（一般的模組層級變數），不再寫進任何
+  // persistent storage：這個旗標的生命週期正好綁在「這次 JS 執行環境」，
+  // 也就是這次頁面載入——重新整理等於整份 JS 重新跑一遍，旗標自動回到
+  // false，完全符合「重新整理＝全新狀態」的需求，也不用再處理
+  // sessionStorage 可能丟例外（無痕模式等）的邊界情況。
+  let pfRulesShownThisPageLoad = false;
 
   function pfRulesAlreadyShownThisTab(){
-    try{ return sessionStorage.getItem(PF_RULES_SESSION_KEY) === '1'; }
-    catch(e){ return false; }
+    return pfRulesShownThisPageLoad;
   }
 
   function markPfRulesShownThisTab(){
-    try{ sessionStorage.setItem(PF_RULES_SESSION_KEY, '1'); }
-    catch(e){}
+    pfRulesShownThisPageLoad = true;
   }
 
   function cancelFallSettledRulesOverlay(){
