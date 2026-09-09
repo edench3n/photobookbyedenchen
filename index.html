@@ -10736,6 +10736,66 @@
     });
   }
 
+  // ---------- 規則說明圖：等 png 物件掉得差不多了才蓋上，不是一進場就蓋 ----------
+  // 原本 showPfRulesOverlay() 是在 enterPhotoFallMode() 一開始（照片都還沒
+  // 開始掉）就直接呼叫，使用者連第一張 png 從畫面外掉進來的瀑布動畫都還
+  // 沒看到，整張說明圖已經蓋在正中間——「出來太快了」，節奏上完全搶在
+  // 使用者最想先看的那段掉落動畫前面。
+  // 改成不在進場那一刻直接呼叫，而是掛一個 Matter.js 的 afterUpdate 監聽
+  // 器，每一影格檢查「這一批物件（15 張照片 + 飄動的 e）裡，已經進入
+  // Matter.js 內建睡眠狀態（enableSleeping，見 startPhotoFallEngine() 內
+  // 的完整說明）的比例」——一顆物體進入睡眠，正好代表它已經完全靜止不再
+  // 移動，拿這個當「掉得差不多了」的判斷依據最準確，不用自己另外土法煉鋼
+  // 去算重力加速度、掉落距離來猜落地的時間點（那樣還得考慮每張照片起始
+  // 高度不同、彼此碰撞堆疊互相卡住等變數，準確度反而不如直接問物理引擎
+  // 本身「這顆還在動嗎」）。
+  // 門檻抓 80%（不是等到 100%）：多顆疊在一起时，總有一兩顆卡在別張照片
+  // 邊緣、要多抖幾下才真正睡著，堅持等到全部都睡著，使用者感受不到明顯
+  // 差異，但那一兩顆「卡住醒著」的邊緣情況反而會讓說明圖遲遲不出現；抓
+  // 八成當門檻，兩邊都顧到。
+  // 保底：不管有沒有達到門檻，最多等 PHOTO_FALL_RULES_MAX_WAIT_MS 這麼久
+  // 一定顯示，避免極端情況（例如使用者進場後立刻自己動手拖曳照片，讓
+  // 大部分物體被拖曳彈簧持續喚醒、遲遲不進入睡眠）卡住說明圖永遠不出現。
+  const PHOTO_FALL_RULES_SETTLE_RATIO = 0.8;
+  const PHOTO_FALL_RULES_MAX_WAIT_MS = 2600;
+  let pfRulesSettleCheckHandler = null;
+  let pfRulesSettleMaxWaitTimer = null;
+  let pfRulesSettleShown = false;
+
+  function cancelFallSettledRulesOverlay(){
+    // 使用者在門檻達成／保底時間到之前，就已經雙擊提早收掉整組堆疊時呼叫：
+    // 停掉還沒觸發的監聽器跟計時器，避免使用者早就退出堆疊模式之後，這裡
+    // 遲來一步又把說明圖重新蓋出來（那時堆疊畫面本身可能都已經不在了）。
+    if(pfRulesSettleCheckHandler && pfEngine){
+      window.Matter.Events.off(pfEngine, 'afterUpdate', pfRulesSettleCheckHandler);
+    }
+    pfRulesSettleCheckHandler = null;
+    if(pfRulesSettleMaxWaitTimer){ clearTimeout(pfRulesSettleMaxWaitTimer); pfRulesSettleMaxWaitTimer = null; }
+    pfRulesSettleShown = false;
+  }
+
+  function scheduleFallSettledRulesOverlay(){
+    if(isDetailMobile()) return; // 手機版本來就不顯示這張說明圖（見 showPfRulesOverlay() 內的判斷），提早跳過，不用多掛一個永遠用不到的監聽器
+    cancelFallSettledRulesOverlay(); // 保險：理論上每次 enterPhotoFallMode() 只會呼叫一次，但先清乾淨上一輪殘留的監聽器/計時器，避免重疊
+    const Matter = window.Matter;
+    const { Events } = Matter;
+    const tryShow = () => {
+      if(pfRulesSettleShown) return;
+      pfRulesSettleShown = true;
+      cancelFallSettledRulesOverlay();
+      showPfRulesOverlay();
+    };
+    pfRulesSettleMaxWaitTimer = setTimeout(tryShow, PHOTO_FALL_RULES_MAX_WAIT_MS);
+    pfRulesSettleCheckHandler = () => {
+      if(!pfEngine) return;
+      const bodies = pfItems.map(item => item.body).concat(pfDvdItem ? [pfDvdItem.body] : []);
+      if(!bodies.length) return; // 照片還沒開始 spawn，先不用檢查，等下一影格再看
+      const asleepCount = bodies.reduce((n, b) => n + (b.isSleeping ? 1 : 0), 0);
+      if(asleepCount / bodies.length >= PHOTO_FALL_RULES_SETTLE_RATIO) tryShow();
+    };
+    Events.on(pfEngine, 'afterUpdate', pfRulesSettleCheckHandler);
+  }
+
   // ---------- 進場：首頁縮圖／編號縮小至消失，時鐘快速淡出 ----------
   function shrinkHomeForPhotoFall(){
     gridRevealInFlight = true; // 借用既有的「首頁縮圖尺寸暫時不可靠」旗標，
@@ -10798,10 +10858,10 @@
     // 判斷用（見上面 pfEnterGeneration 宣告處的完整說明）。
     pfEnterGeneration++;
     document.body.classList.add('photo-fall-active');
-    // 剛進堆疊頁面那一刻先蓋上規則說明圖（僅桌機／平板，見
-    // showPfRulesOverlay() 完整說明），使用者點一下才會消失、才能開始
-    // 操控堆疊頁面；跟底下堆疊照片的掉落動畫互不影響，兩邊同時進行。
-    showPfRulesOverlay();
+    // 規則說明圖不在這裡蓋上——原本「進場當下立刻顯示」的行為改成等
+    // png 物件掉得差不多了才出現，完整原因跟時機判斷邏輯見
+    // scheduleFallSettledRulesOverlay()／showPfRulesOverlay() 的說明；
+    // 實際觸發呼叫搬到下面 startPhotoFallEngine() 真正跑起來之後。
     shrinkHomeForPhotoFall();
 
     // 飄動字的迴圈立刻停下來（不再繼續彈跳），但完全不搬動它的位置、也不
@@ -10849,6 +10909,11 @@
     // 淡入安全網，兩者互不拖累，整批出場的節奏完全不受影響。
     loadMatterJS().then(() => {
       startPhotoFallEngine();
+      // 引擎剛跑起來、e 也剛落進物理世界這一刻，開始監看「掉得差不多了沒」
+      // （見 scheduleFallSettledRulesOverlay() 的完整說明），而不是進場那
+      // 一瞬間就蓋上——這樣說明圖出現的時機才會跟在真正的落下／堆疊動畫
+      // 後面，不會搶在使用者還沒看到任何東西掉下來之前就先擋住畫面。
+      scheduleFallSettledRulesOverlay();
       const elapsed = performance.now() - enterAt;
       const remaining = Math.max(0, PHOTO_FALL_SHRINK_MS - elapsed);
       setTimeout(() => spawnFallingPhotos(fallBatch, fallWarm.cache), remaining);
@@ -13224,6 +13289,11 @@
     // 擋掉底下堆疊舞台的所有點擊），這裡直接強制收掉，避免下一次雙擊
     // 重新進場時，殘留的計時器把新一輪的顯示又提前關掉。
     hidePfRulesOverlay();
+    // 使用者可能在「掉得差不多了」這個門檻還沒達成（或保底時間還沒到）
+    // 之前就已經雙擊提早退出——把還沒觸發的監聽器/計時器一併清掉，避免
+    // 退出之後這裡遲來一步又把說明圖重新蓋出來（見
+    // cancelFallSettledRulesOverlay() 的完整說明）。
+    cancelFallSettledRulesOverlay();
     // 收起堆疊、準備回首頁的這一刻，就讓背景開始淡回白色（見
     // resetPhotoFallBackgroundColor() 的完整說明）：這時 .photo-fall-stage
     // 還是 display:block、CSS transition 正常生效，淡色動畫會跟接下來
