@@ -1608,9 +1608,25 @@
      跟其他堆疊照片一起「原地」被蓋住、等待；等 preview 的照片真的蓋滿整個
      畫面、動畫播完，JS 會拿掉這個 class 並讓 e 脫離物理世界恢復飄動狀態，
      z-index 立刻回到預設的 99999，跟一般 preview 頁的手感一樣重新浮到最
-     上層。 */
+     上層。
+     ---------- 修正：「堆疊頁面按 Preview、照片降下來時，飄動的 e 會先
+     消失」----------
+     成因：這裡原本跟 body.photo-fall-active.preview-active .photo-fall-stage
+     （見上面該規則）用了完全相同的 890，兩者 z-index 打平手；CSS 規定
+     z-index 平手時改比 DOM 順序，後面的元素蓋在前面的元素上面——而
+     #dvdBounce 在 HTML 裡的位置本來就排在 #photoFallStage 前面（見這兩個
+     元素各自的宣告處），平手的結果就是「裝 15 張堆疊照片的 .photo-fall-
+     stage 整層蓋過飄動的 e」。使用者按下 Preview 的那一瞬間，這條規則
+     立刻生效，飄動的 e 因此馬上被身後那疊照片蓋住、直接消失——比 preview
+     真正滑下來蓋住它還早了一大截，跟「照片降下來、無縫接過去」的預期
+     完全不符。
+     修法：把這裡調高到 895，維持在「比 15 張堆疊照片高、比 preview-page
+     本身（900）低」的正確位置——飄動的 e 繼續蓋在堆疊照片之上（跟它平常
+     『全站最高』的定位一致，只是暫時被壓低），只有真正從畫面正上方滑下來
+     的 preview 照片才蓋得住它，視覺上才會是「原地待著，直到 preview 滑過
+     去才無縫接手」，而不是被自己腳下的堆疊搶先蓋掉。 */
   body.pf-dvd-covering .dvd-bounce{
-    z-index: 890;
+    z-index: 895;
   }
   .photo-fall-item{
     position:absolute;
@@ -11049,6 +11065,52 @@
         if(pair.collision.depth < PF_STUCK_OVERLAP_DEPTH) continue; // 只是貼著的正常靜止接觸，不是真的卡住，不要叫醒
         if(a.isSleeping) Matter.Sleeping.set(a, false);
         if(b.isSleeping) Matter.Sleeping.set(b, false);
+      }
+    });
+
+    // ---------- 修正：「從堆疊頁面按 Preview 進來後，飄動的 e 撞擊邊界
+    // 不會換照片」----------
+    // 成因：平常「飄動的 e 撞到螢幕邊界，就切換 preview 側邊照片」這個
+    // 效果（見 handleDvdPreviewEdgeHit() 旁的完整說明），判斷式是寫在
+    // stepDvdBounce() 這個 RAF 迴圈裡——但飄動的 e 只要還在堆疊模式底下
+    // （pfDvdItem 還沒被 resumeDvdFloatAfterPhotoFallCover() 拿掉，見該處
+    // 說明），它的位置全部交給這裡的 Matter 物理引擎接管，stepDvdBounce()
+    // 這段 RAF 迴圈本身早就被 enterPhotoFallMode() 取消、根本沒有在跑（見
+    // 該函式內 cancelAnimationFrame(dvdRAF) 那一行）。也就是說，使用者在
+    // 堆疊模式期間按 Preview、preview 照片正在往下蓋的這整段期間，飄動的
+    // e 不管在物理世界裡撞了左牆／右牆／地板幾次，都完全沒有任何一段程式
+    // 碼會去呼叫 handleDvdPreviewEdgeHit()——跟「直接從首頁／詳情頁按
+    // Preview、e 撞邊界就正常換照片」的手感完全不一致。
+    // 修法：額外掛一個 collisionStart 監聽器（只在每一次新碰撞開始時觸發
+    // 一次，不是整段接觸期間每影格都觸發，行為上等同 stepDvdBounce() 那邊
+    // 「邊緣觸發、貼著不算」的設計），只在「這次 preview 確實是從堆疊
+    // 模式底下打開的」（previewFromPhotoFall）且飄動的 e 這一刻還在物理
+    // 世界裡（pfDvdItem 還沒被拿掉）這段期間生效：只要這次碰撞的其中一方
+    // 是飄動的 e、另一方是左牆／右牆／地板（pfLeftWall／pfRightWall／
+    // pfGround，見上面 Bodies.rectangle() 建牆時給的 label），就直接呼叫
+    // 跟平常同一支 handleDvdPreviewEdgeHit()——沿用同一套「快速連續撞擊
+    // 只算一次」的節流（DVD_PREVIEW_RAPID_MS），不需要另外重寫一份判斷式。
+    // side（左側/右側照片）的判斷邏輯跟 stepDvdBounce() 裡那段完全一致：
+    // 手機版 preview 是上下堆疊，用 e 目前的垂直位置落在螢幕上半/下半來
+    // 判斷；桌機版是左右並排，改用水平位置。等 preview 照片真的蓋滿畫面、
+    // resumeDvdFloatAfterPhotoFallCover() 把 e 拿出物理世界之後，pfDvdItem
+    // 變成 null，這個監聽器自然不再生效，會無縫接回 stepDvdBounce() 那一
+    // 套撞牆判斷，兩套系統交接期間不會重複觸發、也不會漏接任何一次撞擊。
+    Events.on(pfEngine, 'collisionStart', (event) => {
+      if(!previewFromPhotoFall || !pfDvdItem) return;
+      const dvdBody = pfDvdItem.body;
+      const pairs = event.pairs;
+      for(let i = 0; i < pairs.length; i++){
+        const pair = pairs[i];
+        const other = pair.bodyA === dvdBody ? pair.bodyB : (pair.bodyB === dvdBody ? pair.bodyA : null);
+        if(!other) continue;
+        if(other.label !== 'pfLeftWall' && other.label !== 'pfRightWall' && other.label !== 'pfGround') continue;
+        const isStackedPreviewLayout = window.innerWidth <= 640; // 對齊 CSS 手機版 preview-col 改成上下堆疊的 breakpoint
+        const center = pfBoxCenter(dvdBody);
+        const side = isStackedPreviewLayout
+          ? (center.y < window.innerHeight / 2 ? 'left' : 'right')
+          : (center.x < window.innerWidth / 2 ? 'left' : 'right');
+        handleDvdPreviewEdgeHit(side);
       }
     });
 
