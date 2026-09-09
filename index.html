@@ -1777,8 +1777,8 @@
     transition: opacity 180ms ease, visibility 0s linear 0s;
   }
   .wallpaper-preview-img{
-    max-width:min(90vw, 640px);
-    max-height:74vh;
+    max-width:min(92vw, 820px);
+    max-height:80vh;
     object-fit:contain;
     background:#fff;
   }
@@ -1786,24 +1786,27 @@
     display:flex;
     flex-direction:column;
     align-items:center;
-    gap:20px;
+    gap:38px;
   }
   .wallpaper-preview-btn{
     font-family:inherit;
     font-size:17px;
     font-weight:400;
     letter-spacing:0.01em;
-    padding:0;
+    padding:0 0 4px;
     border:none;
+    border-bottom:1px solid #111; /* 用 border-bottom 取代 text-decoration:underline，
+       是因為 underline 貼字太近、descender（例如 download 的 d/l）
+       穿過線段時視覺上會被切斷、看起來像整條線不見了，改用獨立的
+       border-bottom + padding-bottom 拉出間距，才會是一條乾淨完整的橫槓 */
     background:none;
     color:#111;
     cursor:pointer;
-    text-decoration:underline;
-    text-underline-offset:6px;
+    text-decoration:none;
     line-height:1.2;
   }
   .wallpaper-preview-btn.secondary{
-    text-decoration:none;
+    border-bottom-color:transparent;
   }
 
   ::selection{ background:#000; color:#fff; }
