@@ -1566,7 +1566,7 @@
   .photo-fall-stage.active{ display:block; pointer-events:auto; }
   .photo-fall-stage.grabbing{ cursor:grabbing; }
 
-  /* ---------- 堆疊頁面初次進場的規則說明圖（僅桌機／平板；見 JS
+  /* ---------- 堆疊頁面初次進場的規則說明圖（桌機／平板／手機都會顯示；見 JS
      showPfRulesOverlay()/hidePfRulesOverlay() 完整說明） ----------
      容器本身用 position:fixed + inset:0 蓋滿整個視窗，純粹拿來當「畫面上
      點一下才會消失」的滿版點擊承接層——不管使用者點在圖片本身還是圖片
@@ -1607,11 +1607,6 @@
     pointer-events:none; /* 點擊事件交給外層 .pf-rules-overlay 處理，圖片本身不用接收 */
     -webkit-user-drag:none;
     user-select:none;
-  }
-  @media (max-width:640px){
-    /* 使用者明確要求只在電腦版顯示，手機版整段不出現（JS 端 showPfRulesOverlay()
-       也有同一道 isDetailMobile() 判斷，這裡是雙重保險，避免萬一漏呼叫仍然露出）。 */
-    .pf-rules-overlay{ display:none !important; }
   }
 
   /* ---------- 堆疊模式期間按下 Preview：整組堆疊（含飄動的 e）暫時蓋在 preview 之下 ----------
@@ -1870,12 +1865,14 @@
        見上面 CSS .photo-fall-stage 的完整說明。 -->
   <div class="photo-fall-stage" id="photoFallStage" aria-hidden="true"></div>
 
-  <!-- 堆疊頁面初次進場的規則說明圖（僅桌機／平板），平常是空的、display:none，
-       見上面 CSS .pf-rules-overlay 跟 JS showPfRulesOverlay()/hidePfRulesOverlay()
-       的完整說明。圖片本身請放在跟 favicon 同一層（網站根目錄），檔名
-       pf-rules.png。 -->
+  <!-- 堆疊頁面初次進場的規則說明圖（桌機／平板／手機都會顯示，圖片依裝置
+       切換不同檔案），平常是空的、display:none，見上面 CSS .pf-rules-overlay
+       跟 JS showPfRulesOverlay()/hidePfRulesOverlay() 的完整說明。兩張圖都
+       放在跟 favicon 同一層（網站根目錄）：桌機／平板用原本的 pf-rules.png，
+       手機用另外準備的 pf-rules-mobile.png（字級／版面針對手機螢幕重新
+       設計過，見 JS 內 PF_RULES_IMG_SRC 的說明）。 -->
   <div class="pf-rules-overlay" id="pfRulesOverlay" aria-hidden="true">
-    <img src="/pf-rules.png" alt="one tap object to switch / double tap object to exit / one tap background to change color / hold to save" draggable="false">
+    <img id="pfRulesOverlayImg" src="/pf-rules.png" alt="one tap object to switch / double tap object to exit / one tap background to change color / hold to save" draggable="false">
   </div>
 
   <!-- 堆疊頁面長按擷取畫面之後才會出現的桌布預覽彈窗，平常是空的、
@@ -10694,7 +10691,7 @@
     reshufflePhotoFallBatch();
   }
 
-  // ---------- 堆疊頁面初次進場的規則說明圖（僅桌機／平板）----------
+  // ---------- 堆疊頁面初次進場的規則說明圖（桌機／平板／手機都會顯示）----------
   // 對應 CSS .pf-rules-overlay 的完整說明。showPfRulesOverlay() 在
   // enterPhotoFallMode() 一開始就呼叫；hidePfRulesOverlay() 則掛在這個
   // 元素自己的 click 監聽器上，使用者在畫面上點一下（不管點在圖片本身
@@ -10702,7 +10699,20 @@
   // stopPropagation 確保這一下不會再被其他監聽器（例如掛在 window 上
   // 判斷雙擊的那組）誤判成一次額外的互動。
   const pfRulesOverlay = document.getElementById('pfRulesOverlay');
+  const pfRulesOverlayImg = document.getElementById('pfRulesOverlayImg');
   let pfRulesHideTimer = null;
+
+  // 原本這張說明圖只在桌機／平板顯示，手機版整段跳過；使用者現在要求
+  // 手機版也要有同一套功能（一樣的出現時機、淡入淡出、點一下收掉），
+  // 只是手機螢幕窄，桌機那張圖直接縮小字會太小看不清楚，所以另外準備
+  // 一張字級／版面重新設計過、專門給手機用的圖（pf-rules-mobile.png），
+  // 顯示前依 isDetailMobile() 切換 <img> 的 src，兩種裝置各自載入
+  // 適合自己螢幕寬度的那一張，圖片本身請放在跟 favicon 同一層（網站
+  // 根目錄）。
+  const PF_RULES_IMG_SRC = {
+    desktop: '/pf-rules.png',
+    mobile: '/pf-rules-mobile.png'
+  };
 
   // 淡入時長：原本跟淡出共用 CSS 的 .15s，使用者要求淡入再拉長一點，
   // 改成用這顆常數搭配行內 style 覆蓋（見 showPfRulesOverlay()），跟
@@ -10711,7 +10721,12 @@
 
   function showPfRulesOverlay(){
     if(!pfRulesOverlay) return;
-    if(isDetailMobile()) return; // 使用者明確要求只在電腦版顯示，手機版整段跳過
+    if(pfRulesOverlayImg){
+      // 每次顯示前才依當下裝置決定要哪一張圖（而不是寫死在 HTML 裡），
+      // 這樣如果使用者中途轉螢幕方向、或是在桌機／手機切版寬度上下
+      // 遊走，之後每次重新觸發都還是抓到當下正確的那一張。
+      pfRulesOverlayImg.src = isDetailMobile() ? PF_RULES_IMG_SRC.mobile : PF_RULES_IMG_SRC.desktop;
+    }
     markPfRulesShownThisTab(); // 這次頁面載入顯示過了，記下來，同一次載入之後不用再顯示（重新整理會重跑 JS、旗標歸零，見上面完整說明）
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
@@ -10800,7 +10815,6 @@
   }
 
   function scheduleFallSettledRulesOverlay(){
-    if(isDetailMobile()) return; // 手機版本來就不顯示這張說明圖（見 showPfRulesOverlay() 內的判斷），提早跳過，不用多掛一個永遠用不到的計時器
     if(pfRulesAlreadyShownThisTab()) return; // 這個分頁已經顯示過一次了，這次進堆疊頁面不用再排程
     cancelFallSettledRulesOverlay(); // 保險：理論上每次 enterPhotoFallMode() 只會呼叫一次，但先清乾淨上一輪殘留的計時器，避免重疊
     pfRulesShowTimer = setTimeout(() => {
