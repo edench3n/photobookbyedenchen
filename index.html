@@ -6536,6 +6536,40 @@
   const dvdBounce = document.getElementById('dvdBounce');
   const dvdBounceImgEl = dvdBounce ? dvdBounce.querySelector('.dvd-bounce-img') : null;
 
+  // ---------- 效能優化：measureDvdSize() 不用每一影格都硬量 ----------
+  // 下面 stepDvdBounce() 裡原本每一影格都呼叫 measureDvdSize()（強制讀
+  // offsetWidth/offsetHeight，會逼瀏覽器同步跑一次版面計算），理由寫在
+  // 該處註解：.dvd-bounce-img 的 height 帶了一條 .32s 的 CSS transition，
+  // 換圖那 0.32 秒內顯示尺寸持續在變，撞牆框需要跟著即時更新，不能只在
+  // 換圖那一瞬間量一次就凍結不動。
+  // 但這條 transition「真的在跑」的時間，一次撞牆換圖也只有 0.32 秒；
+  // 其餘絕大多數時間（沒有正在換圖、沒有正在 resize）height 根本沒有在
+  // 變，這時候還逐影格強制重排就是白白浪費——尤其是手機／平板這種主
+  // 執行緒本來就比較吃緊的裝置，每秒 60 次不必要的強制同步重排會直接
+  // 墊高每一輪 RAF 的執行時間。
+  // 修法：改成事件驅動——監聽這顆元素自己的 transitionrun／transitionend／
+  // transitioncancel，只在瀏覽器「真的正在跑 height 這條 transition」的
+  // 這段期間，才讓 stepDvdBounce() 每影格重新量測（跟原本行為完全一樣，
+  // 一格不漏）；transition 沒有在跑的時候（絕大多數時間），直接沿用上一次
+  // 量到的快取值，不再逐影格強制重排。不管是撞牆換圖還是 resize 造成的
+  // height 變化，只要瀏覽器真的啟動了這條 transition 就會觸發
+  // transitionrun，這裡的判斷不需要另外分別處理這兩種觸發來源。
+  let dvdSizeTransitionActive = false;
+  if(dvdBounceImgEl){
+    dvdBounceImgEl.addEventListener('transitionrun', (e) => {
+      if(e.propertyName === 'height') dvdSizeTransitionActive = true;
+    });
+    const endDvdSizeTransition = (e) => {
+      if(e.propertyName !== 'height') return;
+      dvdSizeTransitionActive = false;
+      // transition 剛落定的這一刻，額外補量一次，確保拿到的是真正最終
+      // 的落定尺寸，不會因為錯過最後一影格而卡在快落定前的舊數值。
+      measureDvdSize();
+    };
+    dvdBounceImgEl.addEventListener('transitionend', endDvdSizeTransition);
+    dvdBounceImgEl.addEventListener('transitioncancel', endDvdSizeTransition);
+  }
+
   // ---------- 飄動物件：只有真正的照片庫圖片就緒才放行顯示 ----------
   // 完整成因、設計理由見上面 CSS .dvd-bounce.dvd-image-pending 那段說明。
   // dvdRealImageReady 確保這裡只會真的放行一次；之後就算又被呼叫到
@@ -9154,16 +9188,14 @@
     // 還沒碰到，卻已經撞牆」（新圖比起點小，撞牆框比視覺尺寸領先）這兩種
     // 症狀共同的成因：只要換圖，接下來 0.32 秒內撞牆判斷用的框，跟畫面上
     // 真正看得到的圖片邊緣就是兩個不同、對不起來的尺寸。
-    // 修法：每一影格都重新呼叫 measureDvdSize()，讓 dvdW/dvdH 隨時貼著
-    // offsetWidth/offsetHeight 當下（不管有沒有正在過渡中）的即時排版
-    // 尺寸——跟上面 computeDvdPixelInsets() 因為物件持續旋轉、選擇「每一
-    // 影格重新算一次」是同一個道理。offsetWidth/offsetHeight 不受
-    // transform（旋轉、抓取縮放）影響（見 measureDvdSize() 上方原本的
-    // 說明），只會反映 height 這條 transition 當下真正算出來的排版高度，
-    // 所以這裡逐影格重新量測，量到的就是動畫過程中「這一瞬間」真正的
-    // 顯示尺寸，撞牆框全程跟畫面上的圖片邊緣同步，不會再有這段追不上的
-    // 空窗期。
-    measureDvdSize();
+    // 修法：只要 height 這條 transition 當下真的在跑（見上面 dvdBounceImgEl
+    // 的 transitionrun／transitionend 監聽，dvdSizeTransitionActive 這個
+    // 旗標），就每一影格重新呼叫 measureDvdSize()，讓 dvdW/dvdH 貼著
+    // offsetWidth/offsetHeight 即時排版尺寸——這段行為跟原本完全一樣，
+    // 一格不漏。差別只在 transition 沒有在跑的時候（沒有正在換圖、沒有
+    // 正在 resize，也就是絕大多數時間）直接沿用快取值，不再逐影格強制
+    // 重排，把這筆每秒 60 次的成本省下來給其他更需要的工作。
+    if(dvdSizeTransitionActive) measureDvdSize();
 
     // 正在快速滑出障礙物（見 resolveDvdObstacleCollision 裡修正距離太大的
     // 分支）：這幾影格單純沿著滑出的軌跡跑到目標位置，不疊加下面一般的
