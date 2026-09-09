@@ -1754,7 +1754,7 @@
     align-items:center;
     justify-content:center;
     flex-direction:column;
-    gap:18px;
+    gap:28px;
     background:rgba(255,255,255,0.96);
     backdrop-filter: blur(6px);
     -webkit-backdrop-filter: blur(6px);
@@ -1777,34 +1777,33 @@
     transition: opacity 180ms ease, visibility 0s linear 0s;
   }
   .wallpaper-preview-img{
-    max-width:min(86vw, 480px);
-    max-height:70vh;
+    max-width:min(90vw, 640px);
+    max-height:74vh;
     object-fit:contain;
-    box-shadow:0 12px 40px rgba(0,0,0,0.18);
-    border-radius:4px;
     background:#fff;
   }
   .wallpaper-preview-actions{
     display:flex;
-    gap:14px;
+    flex-direction:column;
     align-items:center;
+    gap:20px;
   }
   .wallpaper-preview-btn{
     font-family:inherit;
-    font-size:14px;
-    letter-spacing:0.02em;
-    padding:10px 22px;
-    border-radius:999px;
-    border:1px solid #111;
-    background:#111;
-    color:#fff;
+    font-size:17px;
+    font-weight:400;
+    letter-spacing:0.01em;
+    padding:0;
+    border:none;
+    background:none;
+    color:#111;
     cursor:pointer;
-    text-decoration:none;
+    text-decoration:underline;
+    text-underline-offset:6px;
     line-height:1.2;
   }
   .wallpaper-preview-btn.secondary{
-    background:transparent;
-    color:#111;
+    text-decoration:none;
   }
 
   ::selection{ background:#000; color:#fff; }
@@ -1880,8 +1879,8 @@
   <div class="wallpaper-preview-overlay" id="wallpaperPreviewOverlay" aria-hidden="true">
     <img class="wallpaper-preview-img" id="wallpaperPreviewImg" alt="">
     <div class="wallpaper-preview-actions">
-      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg">下載</a>
-      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn">關閉</button>
+      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg">download</a>
+      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn">back</button>
     </div>
   </div>
 
@@ -10768,14 +10767,7 @@
   // 淡入時長：原本跟淡出共用 CSS 的 .15s，使用者要求淡入再拉長一點，
   // 改成用這顆常數搭配行內 style 覆蓋（見 showPfRulesOverlay()），跟
   // 淡出的 .15s 分開，之後要再調快／調慢淡入速度，改這個數字就好。
-  // 淡入時長：原本跟淡出共用 CSS 的 .15s，使用者要求淡入再拉長一點，
-  // 改成用這顆常數搭配行內 style 覆蓋（見 showPfRulesOverlay()），跟
-  // 淡出的 .15s 分開，之後要再調快／調慢淡入速度，改這個數字就好。
-  // 桌機／平板維持這顆數字；手機版另外用下面 PF_RULES_FADE_IN_MOBILE_MS
-  // 拉得更長——使用者反應手機版淡入還是不夠久，圖片還沒完全浮現的感覺
-  // 就已經到底了。
   const PF_RULES_FADE_IN_MS = 500;
-  const PF_RULES_FADE_IN_MOBILE_MS = 900;
 
   function showPfRulesOverlay(){
     if(!pfRulesOverlay) return;
@@ -10789,12 +10781,9 @@
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
     // 淡入／淡出用不同時長：淡出維持原本很快的 .15s（見 hidePfRulesOverlay），
-    // 淡入則改久一點，用行內 style 覆蓋 CSS 預設的 transition-duration；
-    // 手機版另外用拉得更長的 PF_RULES_FADE_IN_MOBILE_MS，桌機／平板維持
-    // PF_RULES_FADE_IN_MS，這樣兩個方向、兩種裝置都能各自獨立調整，不用
-    // 互相牽動。
-    const fadeInMs = isDetailMobile() ? PF_RULES_FADE_IN_MOBILE_MS : PF_RULES_FADE_IN_MS;
-    pfRulesOverlay.style.transitionDuration = (fadeInMs / 1000) + 's';
+    // 淡入則改久一點，用行內 style 覆蓋 CSS 預設的 transition-duration
+    // （PF_RULES_FADE_IN_MS），這樣兩個方向可以各自獨立調整，不用互相牽動。
+    pfRulesOverlay.style.transitionDuration = (PF_RULES_FADE_IN_MS / 1000) + 's';
     pfRulesOverlay.classList.add('active');
     // 先讓 display 真的切成 flex，隔兩個 frame 才加 .show 觸發 opacity
     // 的 transition，避免「display:none→flex」跟「opacity:0→1」疊在
@@ -10808,8 +10797,7 @@
     if(!pfRulesOverlay) return;
     if(!pfRulesOverlay.classList.contains('active')) return;
     // 切回淡出用的短時長，再拿掉 .show 觸發淡出，不會被淡入時設的較長
-    // transition-duration 拖慢。桌機／手機共用同一個 .15s（使用者確認過
-    // 淡出的速度沒問題，只有淡入需要拉長，見上面 fadeInMs 的說明）。
+    // transition-duration 拖慢。
     pfRulesOverlay.style.transitionDuration = '0.15s';
     pfRulesOverlay.classList.remove('show');
     clearTimeout(pfRulesHideTimer);
