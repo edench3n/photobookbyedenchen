@@ -1768,6 +1768,14 @@
        整個瞬間隱藏、看起來像沒有淡出效果。 */
     transition: opacity 180ms ease, visibility 0s linear 180ms;
   }
+  .wallpaper-preview-overlay.bg-light{
+    /* 截圖底色剛好是純白時，預覽彈窗的底色也用同一套近白色
+       （rgba(255,255,255,0.96)）會讓桌布邊緣跟背後的彈窗融成一片，
+       分不出圖片邊界在哪。改用淡灰色，讓白底桌布跟彈窗背景之間
+       有明顯對比，見 JS showWallpaperPreview() 裡依 pfCaptureBgColor
+       判斷是否加上這個 class 的說明。 */
+    background:rgba(230,230,230,0.96);
+  }
   .wallpaper-preview-overlay.active{
     opacity:1;
     visibility:visible;
@@ -12341,7 +12349,8 @@
     return pfMaskVisibleUVBounds(entry.maskEntry) || pfLiveTrimUVBounds(entry.img);
   }
 
-  function capturePhotoFallWallpaper(){
+  function capturePhotoFallWallpaper(retryAttempt){
+    retryAttempt = retryAttempt || 0;
     try{
       if(!pfItems.length && !pfDvdItem) return; // 畫面上什麼都沒有，沒什麼好擷取的
 
@@ -12382,7 +12391,26 @@
           entries.push({ img: dvdBounceImgEl, cx: c.x, cy: c.y, angle: pfDvdItem.body.angle, boxW: pfDvdItem.w, boxH: pfDvdItem.h, maskEntry });
         }
       }
-      if(!entries.length) return;
+      if(!entries.length){
+        // ---------- 修正：「堆疊頁面第一批長按不會出現截圖預覽視窗（換過
+        // 一批之後又正常）」----------
+        // 成因：entries 只收「img.complete && img.naturalWidth 都成立」的
+        // 物件（見上面 forEach 內的判斷），也就是圖片真的下載＋decode完成
+        // 才算數。第一批照片是剛雙擊進場那一刻才開始要求瀏覽器載入的
+        // 全新圖檔，使用者手速夠快、長按滿 550ms 那一刻，圖片很可能還在
+        // 網路下載或 decode 中途，導致這裡收集到的 entries 是空的——原本
+        // 直接 return，使用者因此完全看不到任何反應，就像長按沒有用一樣。
+        // 換一批之後，圖片早就被瀏覽器快取，幾乎不會再踩到這個時間窗，
+        // 才會有「第一批不行、之後都正常」這種使用者感知落差。
+        // 修法：不要一次收集不到就直接放棄，短暫延遲後用同一份長按結果
+        // 重新收集一次（最多重試 8 次、間隔 120ms，合計約 1 秒），給圖片
+        // 一點時間真正載入完成；真的等超過這個上限還是收集不到，才視為
+        // 沒什麼好擷取的而放棄，不會無限重試卡住。
+        if(retryAttempt < 8){
+          setTimeout(() => capturePhotoFallWallpaper(retryAttempt + 1), 120);
+        }
+        return;
+      }
 
       // 算出每個物件旋轉後的外接邊界，彙整成整批構圖的外接邊界——這個
       // 邊界之後會被整批等比例縮放去貼齊輸出畫布，邊界的極值點自然就會
@@ -12521,7 +12549,8 @@
       // 解析度下仍在合理範圍。
       canvas.toBlob((blob) => {
         if(!blob) return;
-        showWallpaperPreview(URL.createObjectURL(blob));
+        showWallpaperPreview(URL.createObjectURL(blob), pfCaptureBgColor); // 多帶一個擷取當下的底色，
+        // 讓 showWallpaperPreview() 判斷是否要把預覽彈窗底色切成淡灰色（見該函式說明）
       }, 'image/jpeg', 0.97);
     } catch(err){
       // 擷取失敗（例如圖片解碼中途被瀏覽器某些安全限制擋下）就靜靜放棄，
@@ -12538,7 +12567,7 @@
   const WALLPAPER_FADE_MS = 180; // 跟上面 CSS .wallpaper-preview-overlay 的 transition 時間保持一致
   let wallpaperHideCleanupTimer = null; // 淡出動畫播完之後才真正清掉 src／釋放 blob URL 的計時器
 
-  function showWallpaperPreview(objectUrl){
+  function showWallpaperPreview(objectUrl, captureBgColor){
     if(!wallpaperPreviewOverlay || !wallpaperPreviewImg) { URL.revokeObjectURL(objectUrl); return; }
     // 如果上一張的淡出動畫還沒播完使用者就又長按了一次，先取消那個排定中的
     // 清理，直接沿用下面「換成新圖」的流程，不要讓舊的計時器之後跑出來把
@@ -12548,6 +12577,10 @@
     wallpaperPreviewObjectUrl = objectUrl;
     wallpaperPreviewImg.src = objectUrl;
     if(wallpaperDownloadBtn) wallpaperDownloadBtn.href = objectUrl;
+    // 截圖底色剛好是純白時（captureBgColor 是 PHOTO_FALL_BG_WHITE），彈窗
+    // 底色改用 .bg-light 那個淡灰色，避免桌布跟彈窗背景融成一片、看不出
+    // 圖片邊界；其他底色則維持原本的近白色，見上面 CSS .bg-light 的說明。
+    wallpaperPreviewOverlay.classList.toggle('bg-light', captureBgColor === PHOTO_FALL_BG_WHITE);
     wallpaperPreviewOverlay.classList.add('active'); // CSS transition 負責淡入
     wallpaperPreviewOverlay.setAttribute('aria-hidden', 'false');
   }
