@@ -8262,12 +8262,15 @@
     // 已經是這張「從沒被排除過」的新圖——這張圖完全可能同時也被抽進掉落
     // 批次，畫面上就會看到兩張一模一樣的 PNG。
     // 修法：借用 setDvdBounceImageSrc() 原本就有、給 promoteBatchPhotoToDvd()
-    // 用的 shouldApply 保護參數——只要套用新圖那一刻已經進入堆疊模式
-    // （photoFallModeActive 為 true，enterPhotoFallMode() 一開頭就會設定），
-    // 就直接放棄這次套用，dvdActiveImgSrc 會維持雙擊當下真正顯示的那張，
-    // 跟 pickInitialFallBatch() 排除的是同一張，不會再對不起來。堆疊模式
-    // 以外的正常撞牆換圖（shouldApply() 這時回傳 true）完全不受影響。
-    setDvdBounceImageSrc(nextEntry.src, nextEntry.scale, () => !photoFallModeActive);
+    // 用的 shouldApply 保護參數——但不能直接看「現在是不是還在堆疊模式」
+    // （photoFallModeActive 從雙擊進場一路維持到整個堆疊模式徹底收尾，包含
+    // 中途按 Preview 瀏覽的那段時間，用它當條件會連坐擋住 preview 瀏覽期間
+    // 的正常撞牆換圖，見上面 pfEnterGeneration 宣告處的完整說明）。改成先
+    // 記住呼叫當下的世代編號，decode 真的完成時只比對「這段期間有沒有發生
+    // 一次全新的雙擊進場」——世代沒變就正常套用，真的變了（使用者在這次
+    // decode 飛行途中又雙擊了一次）才放棄，精準對應原本要修的競速情境。
+    const dvdEnterGenAtCycle = pfEnterGeneration;
+    setDvdBounceImageSrc(nextEntry.src, nextEntry.scale, () => pfEnterGeneration === dvdEnterGenAtCycle);
   }
   // =====================================================================
   // ⚠️ 以下這段（末速度偵測 + 定速回穩規則）已經跟使用者來回確認、調到
@@ -10104,6 +10107,30 @@
 
   let photoFallState = 'idle'; // 'idle' | 'entering' | 'active' | 'exiting' | 'reshuffling'（單擊換批，見 reshufflePhotoFallBatch()）
   let photoFallModeActive = false; // entering/active/exiting 這整段期間都是 true
+  // ---------- 修正：「從堆疊頁面按 Preview 之後，飄動的 e 撞邊界永遠不會換照片」----------
+  // 成因：cycleDvdEImage() 傳給 setDvdBounceImageSrc() 的 shouldApply（見該處
+  // 呼叫點的完整說明）原本寫的是 `() => !photoFallModeActive`——本意只是想擋掉
+  // 「雙擊進堆疊模式那一刻，剛好有一次撞牆換圖的 decode() 還在飛行中，decode
+  // 完成時 pickInitialFallBatch() 早就已經讀過舊圖排除、來不及排除這張新圖」
+  // 這個極窄的競速空檔（真正需要擋的，只有『這次換圖的 decode 期間，剛好發生了
+  // 一次全新的雙擊進場』這一種情況）。但 photoFallModeActive 這個旗標從雙擊進場
+  // 一路維持 true 到整個堆疊模式徹底收尾為止——中間使用者從堆疊頁面按下
+  // Preview、飄動的 e 早就在 resumeDvdFloatAfterPhotoFallCover() 裡脫離物理
+  // 世界恢復成一般飄動狀態（見該函式），這整段時間 photoFallModeActive 其實
+  // 仍然是 true，卻已經跟「還在堆疊畫面裡、需要擋重複 PNG」這件事完全無關。
+  // 用這個永遠是 true 的旗標當條件，等於「只要這次雙擊堆疊還沒完全結束
+  // （包含之後整段 preview 瀏覽期間），撞牆換圖永遠只更新內部索引、卻永遠
+  // 不會真的把新圖套到畫面上」——使用者看到的就是「撞邊界完全沒反應、
+  // 圖片一直不會換」。
+  // 修法：不要用「是不是還在同一次堆疊模式」這種持續性狀態來判斷，改用
+  // 「這次換圖的 decode 期間，是否發生了一次全新的雙擊進場」這個一次性事件
+  // 來判斷——每次 enterPhotoFallMode() 真正被呼叫時遞增這個世代編號，
+  // cycleDvdEImage() 呼叫的當下先記住這個編號，等 decode 真的完成、shouldApply()
+  // 被呼叫時，只要世代編號沒有變化（代表這段期間沒有發生新的雙擊進場），
+  // 就照常放行套用；只有世代編號真的變了（代表這段 decode 飛行途中使用者
+  // 真的又雙擊了一次，pickInitialFallBatch() 用的是舊圖），才擋下來，
+  // 精準對應原本要修的那個競速情境，不再連坐擋住 preview 瀏覽期間的正常換圖。
+  let pfEnterGeneration = 0;
   const photoFallStage = document.getElementById('photoFallStage');
 
   // ---------- 新功能：點擊堆疊畫面切換背景顏色 ----------
@@ -10669,6 +10696,9 @@
   function enterPhotoFallMode(){
     photoFallState = 'entering';
     photoFallModeActive = true;
+    // 每次真正雙擊進場都算一次新世代，供 cycleDvdEImage() 的 shouldApply
+    // 判斷用（見上面 pfEnterGeneration 宣告處的完整說明）。
+    pfEnterGeneration++;
     document.body.classList.add('photo-fall-active');
     shrinkHomeForPhotoFall();
 
