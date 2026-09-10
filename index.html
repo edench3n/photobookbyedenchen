@@ -11015,10 +11015,35 @@
     // 判斷用（見上面 pfEnterGeneration 宣告處的完整說明）。
     pfEnterGeneration++;
     document.body.classList.add('photo-fall-active');
-    // 規則說明圖不在這裡蓋上——原本「進場當下立刻顯示」的行為改成等
-    // png 物件掉得差不多了才出現，完整原因跟時機判斷邏輯見
-    // scheduleFallSettledRulesOverlay()／showPfRulesOverlay() 的說明；
-    // 實際觸發呼叫搬到下面 startPhotoFallEngine() 真正跑起來之後。
+    // ---------- 修正：「規則圖出現之前，先點底下剛掉下來的堆疊照片就能
+    // 觸發換一批」（手機版回報）----------
+    // 成因：原本「滿版透明遮罩提早站上去擋點擊」這件事，是掛在
+    // scheduleFallSettledRulesOverlay() 裡（見該函式完整說明），而
+    // scheduleFallSettledRulesOverlay() 要等 Matter.js 載入完成、15 張
+    // 照片＋e 真的 spawn 進物理世界、又等它們掉到「大概一半」的固定延遲
+    // （PHOTO_FALL_RULES_SHOW_DELAY_MS）都跑完才會被呼叫——也就是說，從
+    // 雙擊進場這一刻，到 scheduleFallSettledRulesOverlay() 真正把遮罩掛上
+    // 去之間，其實有一大段「照片已經掉下來、可以互動，但遮罩還沒站上去」
+    // 的空檔，使用者這段時間點在照片上，事件會直接穿透到
+    // .photo-fall-stage，正常觸發換一批／換色，跟「規則圖出現前不能誤觸」
+    // 的要求不符。
+    // 修法：把「提早掛上 .active、擋下整版點擊」這一步搬到最前面、
+    // enterPhotoFallMode() 一開始就做，讓「擋點擊」跟「進入堆疊頁面」
+    // 這兩件事完全同時發生，不再有任何空檔。只有「這個分頁這次是第一次
+    // 進堆疊頁面、稍後真的會顯示規則圖」的情況才需要提早擋（用
+    // pfRulesAlreadyShownThisTab() 判斷——已經看過規則圖的分頁，這次
+    // 進場不會再顯示，也就不需要、也不應該擋點擊，維持原本可以直接互動
+    // 的體驗）。scheduleFallSettledRulesOverlay() 裡原本那行
+    // classList.add('active') 保留不拿掉：對已經加過的 class 重複呼叫是
+    // no-op，同時也涵蓋這裡判斷失準的極端邊界情況，雙重保險。
+    if(pfRulesOverlay && !pfRulesAlreadyShownThisTab()){
+      pfRulesOverlay.classList.add('active');
+    }
+    // 規則說明圖本身（真正換上圖片、淡入顯示）不在這裡蓋上——原本
+    // 「進場當下立刻顯示」的行為改成等 png 物件掉得差不多了才出現，完整
+    // 原因跟時機判斷邏輯見 scheduleFallSettledRulesOverlay()／
+    // showPfRulesOverlay() 的說明；實際觸發呼叫搬到下面
+    // startPhotoFallEngine() 真正跑起來之後。
     shrinkHomeForPhotoFall();
 
     // 飄動字的迴圈立刻停下來（不再繼續彈跳），但完全不搬動它的位置、也不
