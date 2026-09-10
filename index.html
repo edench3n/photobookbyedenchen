@@ -9997,6 +9997,20 @@
     // 需要攔截、判斷是不是要抓取它，跟原本手機版「抓不到飄動字」那個
     // 問題的修法互不影響。
     if(dvdBounce.classList.contains('dvd-hidden')) return;
+    // ---------- 修正：「手機版桌布截圖預覽彈窗，back 按鈕偶爾按了沒反應」----------
+    // 成因：進入桌布截圖預覽彈窗時，飄動的 e（#dvdBounce）並不會被標記成
+    // dvd-hidden（那個 class 只在照片詳細頁才會加上）——它其實還停在物理
+    // 堆疊模式當下的某個畫面位置，只是被 z-index:999999 的預覽彈窗整層蓋住
+    // 看不到。這裡的座標比對完全不管畫面上實際疊著什麼，只要使用者這一下
+    // 觸控剛好落在 e 那個隱形矩形的容錯熱區內，就會呼叫 e.preventDefault()
+    // ——瀏覽器規範規定，觸控序列裡只要有一次被 preventDefault()，就不會再
+    // 補送 click 等相容滑鼠事件，預覽彈窗裡 back／download 按鈕的 click
+    // 監聽器因此完全不會被觸發，看起來就是「按了沒反應」，而且是否失靈全看
+    // e 飄到哪個位置，才會是「偶爾」這種不規律的症狀。
+    // 修法：跟其他地方已經有的同款保護一致，只要桌布預覽彈窗目前是開著的
+    // （.active），這裡直接整段放行，不做任何命中判斷、不呼叫
+    // preventDefault()，讓觸控正常穿透到彈窗裡真正看得到的按鈕。
+    if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return;
     const touch = e.touches && e.touches[0];
     if(!touch) return;
     const rect = dvdBounce.getBoundingClientRect();
@@ -10050,6 +10064,11 @@
     // 隱藏狀態（dvd-hidden）時，它的邊界框只是停在最後位置的「隱形」
     // 矩形，不該繼續攔截落在它範圍內的點擊/觸控，直接放行。
     if(dvdBounce.classList.contains('dvd-hidden')) return;
+    // 跟上面 touchstart 監聽器同樣的理由（見該處「桌布截圖預覽彈窗，back
+    // 按鈕偶爾按了沒反應」那段完整說明）：桌布預覽彈窗開著時，e 的隱形
+    // 矩形一樣不該繼續攔截落在它範圍內的點擊/觸控，直接放行，讓觸控正常
+    // 送達彈窗裡的 back／download 按鈕。
+    if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return;
 
     // ---------- 修正：「手機版兩指抓住飄動的 e 一定要先單指抓住、再用
     // 第二指旋轉才行，沒辦法一開始就兩指同時按住直接同步拖曳＋旋轉」
@@ -12802,9 +12821,20 @@
     }, WALLPAPER_FADE_MS);
   }
   if(wallpaperCloseBtn) wallpaperCloseBtn.addEventListener('click', hideWallpaperPreview);
-  // 點背景（不是點在圖片或按鈕上）也能直接關閉，跟其他全站彈窗手感一致。
+
+  // ---------- 需求：「點擊截圖之外的底色範圍，都能觸發 back」----------
+  // 原本只認 `e.target === wallpaperPreviewOverlay`——由於 overlay 本身是
+  // flex 容器（截圖 <img> 跟下方 download/back 按鈕都是它的子元素），只有
+  // 點在 overlay 自己的 padding／間距那圈「真正空白」的地方，e.target 才會
+  // 精準等於 overlay，其餘情況（例如點在包著兩顆按鈕的 actions 容器本身、
+  // 而不是按鈕上）反而點不到、沒有關閉，跟需求「截圖以外都能 back」不符。
+  // 修法：改成「只要這一下沒有點在截圖本身、也沒有點在 download／back 兩顆
+  // 按鈕上」，一律視為點到底色，觸發關閉——用 closest() 判斷、不要求精準
+  // 等於某個節點，對按鈕內實際被點到的 <img>（e.target 會是那張圖，不是
+  // 按鈕本身）一樣能正確排除掉，不會誤觸背景關閉。
   if(wallpaperPreviewOverlay) wallpaperPreviewOverlay.addEventListener('click', (e) => {
-    if(e.target === wallpaperPreviewOverlay) hideWallpaperPreview();
+    if(e.target.closest('.wallpaper-preview-img, .wallpaper-preview-btn')) return;
+    hideWallpaperPreview();
   });
 
   // ---------- 手機／觸控：堆疊頁面裡抓著的漂浮物件，補上第二根手指可以旋轉它 ----------
