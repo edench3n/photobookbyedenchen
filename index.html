@@ -1826,6 +1826,29 @@
   #wallpaperDownloadBtn img{ width:92px; height:auto; }
   #wallpaperCloseBtn img{ width:46px; height:auto; }
 
+  /* ---------- 手機版：桌布截圖預覽彈窗，截圖縮小、下方按鈕跟著調整 ----------
+     桌機／平板維持原本 min(92vw,820px) / 80vh 的大小不變。手機版螢幕本來就窄，
+     92vw 的截圖幾乎頂滿整個寬度，這裡縮小成 min(62vw,360px)，同時把
+     overlay 跟 actions 的間距也等比例縮小，讓 download／back 兩顆按鈕
+     不會因為截圖變小而離得老遠，而是緊跟在截圖下方。按鈕本身也依照
+     跟桌機版相同的縮放比例（92→68，46→34，同樣維持 2:1 的原始比例）
+     一起等比例縮小，視覺上才會跟變小的截圖搭配得上，不會顯得按鈕相對
+     過大。 */
+  @media (max-width:640px){
+    .wallpaper-preview-img{
+      max-width:min(62vw, 360px);
+      max-height:55vh;
+    }
+    .wallpaper-preview-overlay{
+      gap:18px;
+    }
+    .wallpaper-preview-actions{
+      gap:22px;
+    }
+    #wallpaperDownloadBtn img{ width:68px; }
+    #wallpaperCloseBtn img{ width:34px; }
+  }
+
 
   ::selection{ background:#000; color:#fff; }
 </style>
