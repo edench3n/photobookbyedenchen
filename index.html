@@ -10753,6 +10753,7 @@
   const pfRulesOverlay = document.getElementById('pfRulesOverlay');
   const pfRulesOverlayImg = document.getElementById('pfRulesOverlayImg');
   let pfRulesHideTimer = null;
+  let pfRulesInteractable = false; // 規則圖是不是已經完全淡入完成、可以被點掉了——見下面 pfRulesOverlay click 監聽器的完整說明
 
   // 原本這張說明圖只在桌機／平板顯示，手機版整段跳過；使用者現在要求
   // 手機版也要有同一套功能（一樣的出現時機、淡入淡出、點一下收掉），
@@ -10789,6 +10790,7 @@
   // 改成用這顆常數搭配行內 style 覆蓋（見 showPfRulesOverlay()），跟
   // 淡出的 .15s 分開，之後要再調快／調慢淡入速度，改這個數字就好。
   const PF_RULES_FADE_IN_MS = 500;
+  let pfRulesInteractableTimer = null; // 淡入播完、把 pfRulesInteractable 設成 true 的計時器
 
   function showPfRulesOverlay(){
     if(!pfRulesOverlay) return;
@@ -10812,11 +10814,25 @@
     requestAnimationFrame(() => {
       requestAnimationFrame(() => { pfRulesOverlay.classList.add('show'); });
     });
+    // 使用者要求：規則圖必須「完全淡入顯示出來之後」才能被點掉——淡入
+    // 播放的這段期間，點擊只會被擋下（見 CSS pointer-events），不會觸發
+    // 收掉的動作，也不會漏到底下堆疊舞台。pfRulesInteractable 這個旗標
+    // 就是拿來擋「淡入還沒播完就點掉」用的，等淡入時長（PF_RULES_FADE_IN_MS）
+    // 真的跑完才翻成 true，之後點擊才會真的把圖收掉。
+    pfRulesInteractable = false;
+    clearTimeout(pfRulesInteractableTimer);
+    pfRulesInteractableTimer = setTimeout(() => {
+      pfRulesInteractableTimer = null;
+      pfRulesInteractable = true;
+    }, PF_RULES_FADE_IN_MS);
   }
 
   function hidePfRulesOverlay(){
     if(!pfRulesOverlay) return;
     if(!pfRulesOverlay.classList.contains('active')) return;
+    clearTimeout(pfRulesInteractableTimer);
+    pfRulesInteractableTimer = null;
+    pfRulesInteractable = false;
     // 切回淡出用的短時長，再拿掉 .show 觸發淡出，不會被淡入時設的較長
     // transition-duration 拖慢。
     pfRulesOverlay.style.transitionDuration = '0.15s';
@@ -10834,15 +10850,14 @@
   if(pfRulesOverlay){
     pfRulesOverlay.addEventListener('click', (e) => {
       e.stopPropagation();
-      // 修正：使用者要求規則圖「淡入顯示出來之前」那段等待期也要擋住
-      // 點擊（見 scheduleFallSettledRulesOverlay() 內提早加上 .active 的
-      // 說明）——代表使用者這一下點擊，有可能發生在圖片本體都還沒淡入、
-      // 純粹只有這層透明遮罩在擋著的時候。不管使用者點下去那一刻圖片
-      // 淡入了沒有，這一下都算「跟這層遮罩互動過」，直接視同已經看過、
-      // 之後這次分頁不再顯示；同時取消還沒觸發的淡入計時器，避免使用者
-      // 剛把它點掉、下一瞬間計時器時間到又把它重新淡入顯示一次。
-      cancelFallSettledRulesOverlay();
-      markPfRulesShownThisTab();
+      // 修正：「規則圖淡入還沒播完，隨便一點就把它收掉了」——使用者要求
+      // 進堆疊頁面之後（不管圖片淡入完成了沒）點擊都要先被擋住，但只有
+      // 「完全淡入顯示出來之後」的點擊才算數、才能把圖收掉；淡入播放中
+      // （包括圖片本體都還沒換上、容器還只是透明遮罩擋著的那段更早期）
+      // 點下去，這一下只會被單純吃掉（點擊已經被 pointer-events 擋下，
+      // 不會漏到堆疊舞台），不會有任何效果，使用者要等圖片完全淡入清楚
+      // 顯示出來之後再點一次才能收掉、開始操作堆疊頁面。
+      if(!pfRulesInteractable) return;
       hidePfRulesOverlay();
     });
   }
