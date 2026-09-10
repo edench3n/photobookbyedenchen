@@ -12091,6 +12091,24 @@
   // 彈窗後面。
   function pfHandleStagePointerDown(e, opts){
     const skipTapTracking = !!(opts && opts.skipTapTracking); // 見下方 pfRulesOverlay 監聽器註冊處的說明：按在說明圖上只追蹤長按，不要連帶把單擊/雙擊的候選也記進去
+    // ---------- 手機版修正：「規則圖還沒淡入完成，長按就把它收掉並存了桌布」----------
+    // 成因：桌機／單擊那條路（pfRulesOverlay 的 click 監聽器，見上面
+    // showPfRulesOverlay()／hidePfRulesOverlay() 附近的完整說明）已經有
+    // pfRulesInteractable 這個旗標擋著，淡入播完之前點一下只會被吃掉。
+    // 但手機真正常用的是「長按存桌布」這個手勢，走的是這裡（pointerdown
+    // 開始計時、pointerup 或計時器時間到才判定成立）另一條完全獨立的路，
+    // 從頭到尾沒有檢查過 pfRulesInteractable——使用者手指一壓上規則圖
+    // 不放，滿 PF_LONGPRESS_MS 直接觸發 hidePfRulesOverlay()＋
+    // capturePhotoFallWallpaper()，等於在淡入播放中（甚至圖片都還沒真的
+    // 看清楚）就把說明圖收掉、還連帶存了一張桌布，跟單擊那條路的行為
+    // 完全不一致，也不符合「必須完全淡入顯示出來之後才能收掉」的要求。
+    // 修法：這裡只有 skipTapTracking 為 true（代表這次 pointerdown 是壓在
+    // pfRulesOverlay 本身，而不是壓在底下的堆疊舞台）時才需要檢查——壓在
+    // 說明圖上、但淡入還沒播完，整個長按追蹤都不開始，直接擋在最前面；
+    // 等淡入播完、pfRulesInteractable 翻成 true 之後再按下去，才會照原本
+    // 邏輯正常走完整段長按判斷。壓在底下堆疊舞台上的 pointerdown（一般
+    // 情境）完全不受影響。
+    if(skipTapTracking && !pfRulesInteractable) return;
     // ---------- 修正：「雙擊回首頁，點畫面空白處沒反應，只有點在飄動物件
     // 的圖片上才有效」----------
     // 成因：這裡原本是 `if(photoFallState !== 'active') return;`，把
