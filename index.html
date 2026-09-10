@@ -1598,28 +1598,12 @@
     pointer-events:none;
     transition: opacity .15s ease;
   }
-  .pf-rules-overlay.active{ display:flex; }
-  /* 修正：「剛進堆疊頁面、規則圖還沒淡入完成看起來像沒出現的那極短時間內，
-     點擊圖片換批／點背景換色全部沒反應，好像整個堆疊頁面卡住」。
-     成因：pointer-events:auto 原本跟 .active 綁在一起，在 showPfRulesOverlay()
-     一開始（加上 .active 的當下）就立刻生效——但淡入的 opacity transition
-     （PF_RULES_FADE_IN_MS，見該處常數）長達 500ms，這段期間畫面上這張圖
-     其實幾乎看不見（opacity 還在 0 附近往上爬），可是這層滿版容器已經在
-     pointer-events:auto 狀態、把底下 .photo-fall-stage 的點擊整個擋下來了。
-     使用者這時候點下去，事件其實被這層看不見的容器吃掉，只觸發到它自己
-     的 click 監聽器（收掉說明圖、見下面 hidePfRulesOverlay()），沒有真的
-     换批/换色——看起来就像「点了完全没反应」，要等使用者搞懂、再點第二下
-     才會作用在堆疊舞台上，符合回報的「必須先把（幾乎看不到的）說明圖點掉
-     才能操作」。
-     修法：pointer-events:auto 改成掛在另一個獨立的 .block class 上，由 JS
-     用一個比淡入時長短一截的計時器（PF_RULES_BLOCK_DELAY_MS，見
-     showPfRulesOverlay() 的說明）延後加上——等說明圖真的淡到使用者看得見
-     的程度，才開始擋下底下的點擊；在那之前，這段「还没真的看到」的時間，
-     點擊會直接穿透到 .photo-fall-stage，正常換批/換色，不會有「看不到卻
-     擋住」的空窗期。淡出（hidePfRulesOverlay）維持原樣不受影響：淡出時
-     .block 繼續留著直到 .active 一起被拿掉，跟原本「消失之後才能操控」的
-     需求一致，只有「淡入還沒到看得見的程度」這段才改變行為。 */
-  .pf-rules-overlay.block{ pointer-events:auto; }
+  /* 使用者明確要求：規則圖從「加上 .active」那一刻就要立刻擋下底下堆疊
+     舞台的所有點擊，不管這時候 opacity 淡入到多少、視覺上看不看得清楚，
+     目的就是避免使用者在還沒看清楚說明之前誤觸換批/換色/長按存桌布——
+     所以 pointer-events:auto 維持跟 .active 綁在一起、立刻生效，不額外
+     拖延。 */
+  .pf-rules-overlay.active{ display:flex; pointer-events:auto; }
   .pf-rules-overlay.show{ opacity:1; }
   .pf-rules-overlay img{
     display:block;
@@ -10769,7 +10753,6 @@
   const pfRulesOverlay = document.getElementById('pfRulesOverlay');
   const pfRulesOverlayImg = document.getElementById('pfRulesOverlayImg');
   let pfRulesHideTimer = null;
-  let pfRulesBlockTimer = null; // 延後加上 .block（真正開始擋下點擊）的計時器，見 CSS .pf-rules-overlay.block 旁的完整說明
 
   // 原本這張說明圖只在桌機／平板顯示，手機版整段跳過；使用者現在要求
   // 手機版也要有同一套功能（一樣的出現時機、淡入淡出、點一下收掉），
@@ -10807,12 +10790,6 @@
   // 淡出的 .15s 分開，之後要再調快／調慢淡入速度，改這個數字就好。
   const PF_RULES_FADE_IN_MS = 500;
 
-  // 延後多久才真正開始擋下點擊（加上 .block，見 CSS 該 class 旁的完整
-  // 說明）：抓在淡入時長的中段附近，這時候 opacity 已經爬到使用者看得清楚
-  // 「有東西出現了」的程度，之前那段還很淡、幾乎看不見的時間點擊會直接
-  // 穿透到堆疊舞台，不會有「看不到卻被擋住」的空窗期。
-  const PF_RULES_BLOCK_DELAY_MS = 220;
-
   function showPfRulesOverlay(){
     if(!pfRulesOverlay) return;
     if(pfRulesOverlayImg){
@@ -10824,8 +10801,6 @@
     markPfRulesShownThisTab(); // 這次頁面載入顯示過了，記下來，同一次載入之後不用再顯示（重新整理會重跑 JS、旗標歸零，見上面完整說明）
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
-    clearTimeout(pfRulesBlockTimer);
-    pfRulesOverlay.classList.remove('block'); // 保險：確保上一輪殘留的 .block 不會讓這次重新顯示一開始就誤擋點擊
     // 淡入／淡出用不同時長：淡出維持原本很快的 .15s（見 hidePfRulesOverlay），
     // 淡入則改久一點，用行內 style 覆蓋 CSS 預設的 transition-duration
     // （PF_RULES_FADE_IN_MS），這樣兩個方向可以各自獨立調整，不用互相牽動。
@@ -10837,18 +10812,10 @@
     requestAnimationFrame(() => {
       requestAnimationFrame(() => { pfRulesOverlay.classList.add('show'); });
     });
-    // 等淡入播到使用者看得見的程度才加 .block、開始擋下點擊（見 CSS
-    // .pf-rules-overlay.block 旁的完整說明）。
-    pfRulesBlockTimer = setTimeout(() => {
-      pfRulesBlockTimer = null;
-      if(pfRulesOverlay.classList.contains('active')) pfRulesOverlay.classList.add('block');
-    }, PF_RULES_BLOCK_DELAY_MS);
   }
 
   function hidePfRulesOverlay(){
     if(!pfRulesOverlay) return;
-    clearTimeout(pfRulesBlockTimer);
-    pfRulesBlockTimer = null;
     if(!pfRulesOverlay.classList.contains('active')) return;
     // 切回淡出用的短時長，再拿掉 .show 觸發淡出，不會被淡入時設的較長
     // transition-duration 拖慢。
@@ -10856,10 +10823,10 @@
     pfRulesOverlay.classList.remove('show');
     clearTimeout(pfRulesHideTimer);
     // 等 opacity 的淡出 transition（.15s）真的播完，才把 display 收回
-    // none、.block（pointer-events）收回 none，這一刻之後底下的堆疊舞台
-    // 才真正開始接收點擊／拖曳，符合「消失之後才能操控堆疊頁面」的需求。
+    // none、pointer-events 收回 none，這一刻之後底下的堆疊舞台才真正開始
+    // 接收點擊／拖曳，符合「消失之後才能操控堆疊頁面」的需求。
     pfRulesHideTimer = setTimeout(() => {
-      pfRulesOverlay.classList.remove('active', 'block');
+      pfRulesOverlay.classList.remove('active');
       pfRulesHideTimer = null;
     }, 170);
   }
@@ -10867,6 +10834,15 @@
   if(pfRulesOverlay){
     pfRulesOverlay.addEventListener('click', (e) => {
       e.stopPropagation();
+      // 修正：使用者要求規則圖「淡入顯示出來之前」那段等待期也要擋住
+      // 點擊（見 scheduleFallSettledRulesOverlay() 內提早加上 .active 的
+      // 說明）——代表使用者這一下點擊，有可能發生在圖片本體都還沒淡入、
+      // 純粹只有這層透明遮罩在擋著的時候。不管使用者點下去那一刻圖片
+      // 淡入了沒有，這一下都算「跟這層遮罩互動過」，直接視同已經看過、
+      // 之後這次分頁不再顯示；同時取消還沒觸發的淡入計時器，避免使用者
+      // 剛把它點掉、下一瞬間計時器時間到又把它重新淡入顯示一次。
+      cancelFallSettledRulesOverlay();
+      markPfRulesShownThisTab();
       hidePfRulesOverlay();
     });
   }
@@ -10921,6 +10897,19 @@
   function scheduleFallSettledRulesOverlay(){
     if(pfRulesAlreadyShownThisTab()) return; // 這個分頁已經顯示過一次了，這次進堆疊頁面不用再排程
     cancelFallSettledRulesOverlay(); // 保險：理論上每次 enterPhotoFallMode() 只會呼叫一次，但先清乾淨上一輪殘留的計時器，避免重疊
+    // 修正：使用者要求「規則圖真正淡入出現之前」那段等待期，也要跟出現
+    // 之後一樣擋住底下堆疊舞台的點擊，防止使用者在圖片淡入完成前手滑
+    // 誤觸、觸發換批/換色/長按存桌布。
+    // 做法：這裡先讓 .pf-rules-overlay 提早掛上 .active（CSS 對應的
+    // display:flex + pointer-events:auto 立刻生效，整層滿版點擊承接層先
+    // 站上去），但先不呼叫 showPfRulesOverlay()、不換圖片 src、也不加
+    // .show——這樣容器本身維持 CSS 預設的 opacity:0（完全透明），畫面上
+    // 什麼都看不到，但點擊已經被這層透明遮罩接住、不會穿透到底下的
+    // .photo-fall-stage。等下面計時器時間到，showPfRulesOverlay() 才真正
+    // 換上圖片並淡入顯示出來，讓「擋住點擊」跟「圖片可見」這兩件事的起訖
+    // 時間點連成一段完整、沒有空檔的區間：從使用者剛進堆疊頁面，一路到
+    // 規則圖淡入完成、使用者點掉為止，全程都不能誤觸堆疊照片。
+    if(pfRulesOverlay) pfRulesOverlay.classList.add('active');
     pfRulesShowTimer = setTimeout(() => {
       pfRulesShowTimer = null;
       // 修正：「堆疊頁面第一批照片，點進照片詳情頁按 download／上一頁都
@@ -10939,6 +10928,11 @@
       // 照片詳情頁或 preview），是的話就直接放棄這次顯示，不要疊到別的
       // 頁面上面去；等使用者真的按上一頁回到堆疊畫面、下次重新雙擊進場
       // 才會依 pfRulesAlreadyShownThisTab() 的狀態決定要不要再排一次。
+      // ----------
+      // 註：因為上面已經提早加了 .active（擋住點擊），這個分支現在其實
+      // 幾乎不會發生——使用者已經進不去照片詳情頁了（點擊都被這層透明
+      // 遮罩接住）。保留這段判斷單純當保險，涵蓋任何理論上還是有機會
+      // 繞過去的邊界情況，不拿掉既有的防呆。
       if(document.body.classList.contains('detail-active') || document.body.classList.contains('preview-active')) return;
       showPfRulesOverlay();
     }, PHOTO_FALL_RULES_SHOW_DELAY_MS);
