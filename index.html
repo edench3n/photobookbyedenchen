@@ -1548,6 +1548,28 @@
                              的成因——Matter.Mouse 從頭到尾沒收到任何一次 mousedown。 */
     display:none;
     cursor:grab;
+    /* ---------- 偵錯修正：「長按偶爾沒辦法進入桌布截圖預覽頁」----------
+       成因：這個容器從沒設過 touch-action，實際生效的值因此沿用 html/body
+       的全站預設 touch-action:manipulation（見上面 body 選擇器附近的說明：
+       manipulation 只擋雙擊縮放，平移/捲動手勢仍然開放給瀏覽器自己判斷）。
+       跟這個容器一樣「整段手勢完全交給 JS 的 Pointer Events 處理」的其他
+       元素（例如飄動的 e／.dvd-bounce、拉簾）都已經另外加上 touch-action:
+       none，只有這裡漏掉。長按判斷本身（見 JS pfHandleStagePointerDown／
+       PF_LONGPRESS_MS 那組邏輯）雖然已經修過好幾種計時器被延後、
+       pointercancel 被瀏覽器提前送出的情境，但那些修法都是「pointercancel
+       送出之後盡量搶救」；manipulation 這個 touch-action 設定本身才是
+       pointercancel 會被送出的根本原因之一——使用者長按時手指幾乎不可能
+       完全靜止，只要瀏覽器的手勢辨識判斷這個些微的位移「像是要開始平移
+       捲動」，就可能在還沒滿 550ms 前就把整個觸控序列判定成捲動手勢並取消
+       （送出 pointercancel），這時候即使 pointercancel 監聽器裡的補救邏輯
+       也無法通過「heldMs >= PF_LONGPRESS_MS」這道門檻，長按就會被使用者
+       感知成「完全沒反應」；因為是否被誤判成捲動手勢取決於當下手指極細微
+       的抖動，發生與否本身帶有隨機性，正好對應使用者回報的「偶爾」。
+       修法：比照 .dvd-bounce 等元素，直接把這個容器的 touch-action 設成
+       none，明確告訴瀏覽器「這個範圍內的手勢完全交給 JS 處理、不要自己
+       介入判斷平移/捲動」，從源頭上不再產生這種提前取消，不需要再靠
+       pointercancel 那組事後補救邏輯。 */
+    touch-action:none;
     /* ---------- 新功能：點擊堆疊畫面切換背景顏色 ----------
        這個容器本身已經是蓋滿整個視窗、疊在首頁格子之上的滿版圖層（見上面
        z-index/inset 說明），本來完全透明、沒有設背景色，使用者實際看到的
@@ -1597,6 +1619,13 @@
     opacity:0;
     pointer-events:none;
     transition: opacity .15s ease;
+    /* 跟上面 .photo-fall-stage 同一個修法、同一個理由（見該處「長按偶爾
+       沒辦法進入桌布截圖預覽頁」完整說明）：這張規則說明圖顯示期間，
+       JS 一樣是靠 pfHandleStagePointerDown 走同一套長按判斷（見該函式
+       skipTapTracking 分支），沒有 touch-action:none 一樣會被瀏覽器的
+       平移/捲動手勢辨識搶先送出 pointercancel，導致「照著教學長按卻偶爾
+       沒反應」。 */
+    touch-action:none;
   }
   /* 使用者明確要求：規則圖從「加上 .active」那一刻就要立刻擋下底下堆疊
      舞台的所有點擊，不管這時候 opacity 淡入到多少、視覺上看不看得清楚，
