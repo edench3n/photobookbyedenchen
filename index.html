@@ -9991,6 +9991,38 @@
   let dvdTapStartX = 0, dvdTapStartY = 0;
   const DVD_TAP_MAX_MOVE = 10; // px，pointerdown→pointerup 之間位移在這個範圍內才算「原地點一下」，拖曳／甩出去不算
   window.addEventListener('pointerdown', (e) => {
+    // ---------- 修正：「規則圖出現之前，按下面的堆疊照片還是能觸發換一批」
+    // （前一版「提早幫 .pf-rules-overlay 掛上 .active」的修正沒有真正生效）
+    // ----------
+    // 成因：飄動的 e（#dvdBounce）平常是全站最高的 z-index（99999），比
+    // .pf-rules-overlay（1600）高出一大截；它自己又是 pointer-events:none
+    // （見上面 CSS／touchstart 監聽器旁的完整說明），沒辦法靠瀏覽器原生
+    // hit-test 來抓取，所以這整組「抓住飄動字」的判斷從一開始就刻意繞開
+    // DOM 的 z-index／pointer-events 疊層規則，改成在這裡（window 層級的
+    // pointerdown）用 dvdBounce.getBoundingClientRect() 手動比對座標——
+    // 不管上面實際疊著什麼、擋不擋得住點擊，只要落點在這個矩形範圍內，
+    // 這裡永遠判定「按到了」。
+    // 使用者雙擊進場那一刻，飄動的 e 會原地凍結在畫面上（見
+    // enterPhotoFallMode() 內「維持在雙擊當下所在的畫面位置不動」那段
+    // 說明），剛好通常就是使用者接下來最容易按到的地方——即使
+    // .pf-rules-overlay 已經照上一版修正提早掛上 .active、pointer-events:
+    // auto 也已經生效，畫面上「看起來」整層都被透明遮罩擋住了，這組獨立
+    // 的手動座標比對完全不知道、也不會去檢查這件事，照樣正常觸發
+    // dvdTapCandidatePointerId／dvdDragCandidatePointerId，放開時一路
+    // 呼叫到 handleDvdSingleClick() 換一批——這正是「規則圖還沒出現、按
+    // 下面的照片就能換批」在上一版修正後依然存在的真正原因，跟
+    // photoFallStage 那組走正常 DOM hit-test 的點擊完全是兩套邏輯，上一版
+    // 只堵住了前者。
+    // 修法：這裡直接補上跟 pfHandleStagePointerDown() 對稱的檢查——只要
+    // .pf-rules-overlay 目前帶著 .active（不管淡入播完了沒、也不管實際
+    // 疊在最上層的視覺是不是看得到），這一整組給飄動字專用的 window
+    // pointerdown 判斷直接整段放棄，不記錄任何候選狀態；下面 pointerup
+    // 那組因為 dvdTapCandidatePointerId 從頭到尾都是 null，本來就會在
+    // 開頭直接 return，不用另外重複加這個檢查。等使用者真的點開規則圖、
+    // hidePfRulesOverlay() 把 .active 拿掉之後，這裡才會恢復正常判斷，
+    // 跟其他堆疊照片一致，符合「規則圖收掉之前完全不能誤觸任何東西」的
+    // 要求。
+    if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) return;
     // 跟上面 touchstart 監聽器同樣的理由（見該處完整說明）：飄動的 e
     // 隱藏狀態（dvd-hidden）時，它的邊界框只是停在最後位置的「隱形」
     // 矩形，不該繼續攔截落在它範圍內的點擊/觸控，直接放行。
