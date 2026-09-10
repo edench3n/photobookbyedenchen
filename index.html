@@ -13462,9 +13462,33 @@
     // 的輪詢有機會等到它們真正掉出去再收尾。這個計時器因此退回原本設計的
     // 本意——單純當作「萬一輪詢那條路徑意外沒被觸發」的備援，而不是一個
     // 會提早打斷掉落動畫、讓照片憑空消失的強制關卡。
+    // ---------- 新增修正：「換批偶爾會整個卡住，下一批永遠不會掉下來」----------
+    // 成因：上面這個保底邏輯原本只要 pfDragging 或 !allOut 任一成立，就會
+    // 無限期把自己重新排程下去（每次 +1700ms），完全沒有一個「不管怎樣、
+    // 最多等到這裡就必須繼續」的絕對上限。正常情況下這沒問題——物理引擎
+    // 遲早會讓照片掉出畫面，使用者遲早會放手——但兩種極端情況會讓這個
+    // 迴圈永遠不會被打斷：(1) 物理引擎極端邊界情況（例如某張照片的碰撞
+    // 形狀剛好卡在牆角、或数值上出現幾乎靜止不動的穩定解），這張照片的
+    // y 座標可能永遠不會真的超過 vh+40 這個門檻；(2) pfDragging 這個旗標
+    // 理論上已經加了不少保護（見上面 pfMouseButtonGuard 的完整說明），但
+    // 觸控裝置在極端情況下（例如手勢途中分頁被系統強制切走、或瀏覽器沒有
+    // 送出 touchend/touchcancel）仍然可能讓它永遠停在 true。不管是哪一種，
+    // 使用者看到的都是「換批換到一半，整個畫面卡住不動，怎麼點都沒有下一批
+    // 掉下來」，而且因為 photoFallState 這時停在 'reshuffling'，後續單擊
+    // 也會因為狀態不是 'active' 而被直接忽略（見上面 handleDvdSingleClick()
+    // 的完整說明），感覺就是「點了完全沒反應」。
+    // 修法：另外記一個絕對期限（比原本的保底逾時再寬裕 6 倍，約 10 秒），
+    // 不管 pfDragging 或 allOut 當下是什麼狀態，一旦超過這個期限就強制呼叫
+    // settleOnce()——finishReshuffleOldBatch() 內部本來就是無條件把 oldItems
+    // 的每一顆 body／DOM 元素直接移除（不看它們實際掉到哪裡），所以就算這時
+    // 候還有照片視覺上卡在畫面中間，強制收尾也只是讓它跟著這批一起被清掉、
+    // 換上新的一批，不會留下殭屍物件或讓物理世界處於不一致狀態；這是「畫面
+    // 上一張照片忽然被跳過」跟「整個堆疊頁面永久卡死」兩者之間，明顯更好的
+    // 那個結果。
+    const reshuffleHardDeadline = Date.now() + PHOTO_FALL_EXIT_MAX_WAIT_MS * 6;
     const triggerReshuffleFallback = () => {
       const allOut = oldItems.every(({ body, h }) => pfBoxCenter(body).y - h / 2 > vh + 40);
-      if(pfDragging || !allOut){
+      if((pfDragging || !allOut) && Date.now() < reshuffleHardDeadline){
         pfExitFallbackTimer = setTimeout(triggerReshuffleFallback, PHOTO_FALL_EXIT_MAX_WAIT_MS);
         return;
       }
@@ -13727,10 +13751,23 @@
     // 真的已經全部掉出畫面，會讓卡在半空久一點的照片被提早清掉、憑空消失。
     // 這裡同樣補上 allOut 檢查，只有真的全部掉出畫面（或使用者放手後
     // checkAllOut 輪詢先偵測到）才收尾，其餘情況一律繼續往後延。
+    // ---------- 新增修正：「雙擊收起堆疊，偶爾整個卡住回不去首頁」----------
+    // 跟 reshufflePhotoFallBatch() 裡 triggerReshuffleFallback() 同一個
+    // 成因、同一種修法（完整說明見該處）：這裡原本也是「只要還在拖曳、
+    // 或還有東西沒掉出畫面，就永遠往後延」，沒有絕對上限。萬一真的踩到
+    // 物理引擎邊界情況讓某個 body 永遠量不到「已掉出畫面」，或 pfDragging
+    // 因為某些極端裝置情況卡在 true，使用者雙擊想退出堆疊模式、回到首頁，
+    // 會變成畫面卡住不動、永遠回不去——比只是「換批卡住」更嚴重，因為
+    // 使用者這時連首頁都進不去。同樣補上一個絕對期限，超過就不再理會
+    // pfDragging／allOut，直接強制呼叫 finishExitPhotoFallMode()——該函式
+    // 本來就是無條件清空整個物理世界跟 DOM，不會因為提早呼叫而留下殘留
+    // 狀態，只是使用者會看到畫面「忽然跳回首頁」而不是照原本節奏掉出去，
+    // 遠比整頁卡死不能動好。
+    const exitHardDeadline = Date.now() + PHOTO_FALL_EXIT_MAX_WAIT_MS * 6;
     const triggerExitFallback = () => {
       const allOut = pfItems.every(({ body, h }) => pfBoxCenter(body).y - h / 2 > vh + 40)
         && (!pfDvdItem || pfBoxCenter(pfDvdItem.body).y - pfDvdItem.h / 2 > vh + 40);
-      if(pfDragging || !allOut){
+      if((pfDragging || !allOut) && Date.now() < exitHardDeadline){
         pfExitFallbackTimer = setTimeout(triggerExitFallback, PHOTO_FALL_EXIT_MAX_WAIT_MS);
         return;
       }
