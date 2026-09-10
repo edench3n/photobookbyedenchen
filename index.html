@@ -10011,6 +10011,27 @@
     // （.active），這裡直接整段放行，不做任何命中判斷、不呼叫
     // preventDefault()，讓觸控正常穿透到彈窗裡真正看得到的按鈕。
     if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return;
+    // ---------- 修正：「手機版堆疊頁面規則說明圖，點螢幕大部分地方沒反應，
+    // 只有點在圖片本身才點得掉」----------
+    // 成因：跟上面 wallpaperPreviewOverlay 那段完全同樣的機制，只是這次
+    // 撞上的是 .pf-rules-overlay——規則說明圖顯示期間，飄動的 e
+    // （#dvdBounce）依然停在雙擊進場那一刻凍結的畫面位置（隱形矩形，見上面
+    // 完整說明），這個監聽器完全不管畫面上蓋著規則圖，只要觸控落點剛好在
+    // 那個隱形矩形的容錯熱區內，就會呼叫 e.preventDefault()——瀏覽器規範
+    // 規定，觸控序列一旦有任何一次被 preventDefault()，就不會再補送 click
+    // 等相容滑鼠事件，掛在 .pf-rules-overlay 上負責「點一下收掉規則圖」的
+    // click 監聽器因此完全不會被觸發，使用者這一下等於白點。規則圖的圖片
+    // 本身雖然佔滿大半個螢幕，但四周仍有留白（.pf-rules-overlay img 的
+    // calc(100% - 2*var(--edge)) 寬度、以及上下置中留下的間距），飄動的 e
+    // 又特別容易凍結在使用者剛剛雙擊的那個大概位置附近（往往偏留白區），
+    // 使用者因此感覺「點圖片本身可以、點旁邊空白處大多沒反應」，症狀跟
+    // wallpaperPreviewOverlay 那個回報一模一樣，只是這次的彈窗換成規則圖。
+    // 修法：跟上面同款保護一致，只要 .pf-rules-overlay 目前帶著 .active
+    // （不管淡入播完了沒），這裡直接整段放行，不做任何命中判斷、不呼叫
+    // preventDefault()，讓觸控正常穿透到規則圖的 click 監聽器；等使用者
+    // 真的把規則圖點掉、.active 被拿掉之後，這裡才恢復原本「抓取飄動字」
+    // 的判斷，不影響其他情境。
+    if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) return;
     const touch = e.touches && e.touches[0];
     if(!touch) return;
     const rect = dvdBounce.getBoundingClientRect();
