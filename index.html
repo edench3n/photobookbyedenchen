@@ -1548,28 +1548,6 @@
                              的成因——Matter.Mouse 從頭到尾沒收到任何一次 mousedown。 */
     display:none;
     cursor:grab;
-    /* ---------- 偵錯修正：「長按偶爾沒辦法進入桌布截圖預覽頁」----------
-       成因：這個容器從沒設過 touch-action，實際生效的值因此沿用 html/body
-       的全站預設 touch-action:manipulation（見上面 body 選擇器附近的說明：
-       manipulation 只擋雙擊縮放，平移/捲動手勢仍然開放給瀏覽器自己判斷）。
-       跟這個容器一樣「整段手勢完全交給 JS 的 Pointer Events 處理」的其他
-       元素（例如飄動的 e／.dvd-bounce、拉簾）都已經另外加上 touch-action:
-       none，只有這裡漏掉。長按判斷本身（見 JS pfHandleStagePointerDown／
-       PF_LONGPRESS_MS 那組邏輯）雖然已經修過好幾種計時器被延後、
-       pointercancel 被瀏覽器提前送出的情境，但那些修法都是「pointercancel
-       送出之後盡量搶救」；manipulation 這個 touch-action 設定本身才是
-       pointercancel 會被送出的根本原因之一——使用者長按時手指幾乎不可能
-       完全靜止，只要瀏覽器的手勢辨識判斷這個些微的位移「像是要開始平移
-       捲動」，就可能在還沒滿 550ms 前就把整個觸控序列判定成捲動手勢並取消
-       （送出 pointercancel），這時候即使 pointercancel 監聽器裡的補救邏輯
-       也無法通過「heldMs >= PF_LONGPRESS_MS」這道門檻，長按就會被使用者
-       感知成「完全沒反應」；因為是否被誤判成捲動手勢取決於當下手指極細微
-       的抖動，發生與否本身帶有隨機性，正好對應使用者回報的「偶爾」。
-       修法：比照 .dvd-bounce 等元素，直接把這個容器的 touch-action 設成
-       none，明確告訴瀏覽器「這個範圍內的手勢完全交給 JS 處理、不要自己
-       介入判斷平移/捲動」，從源頭上不再產生這種提前取消，不需要再靠
-       pointercancel 那組事後補救邏輯。 */
-    touch-action:none;
     /* ---------- 新功能：點擊堆疊畫面切換背景顏色 ----------
        這個容器本身已經是蓋滿整個視窗、疊在首頁格子之上的滿版圖層（見上面
        z-index/inset 說明），本來完全透明、沒有設背景色，使用者實際看到的
@@ -1619,13 +1597,6 @@
     opacity:0;
     pointer-events:none;
     transition: opacity .15s ease;
-    /* 跟上面 .photo-fall-stage 同一個修法、同一個理由（見該處「長按偶爾
-       沒辦法進入桌布截圖預覽頁」完整說明）：這張規則說明圖顯示期間，
-       JS 一樣是靠 pfHandleStagePointerDown 走同一套長按判斷（見該函式
-       skipTapTracking 分支），沒有 touch-action:none 一樣會被瀏覽器的
-       平移/捲動手勢辨識搶先送出 pointercancel，導致「照著教學長按卻偶爾
-       沒反應」。 */
-    touch-action:none;
   }
   /* 使用者明確要求：規則圖從「加上 .active」那一刻就要立刻擋下底下堆疊
      舞台的所有點擊，不管這時候 opacity 淡入到多少、視覺上看不看得清楚，
@@ -12136,24 +12107,6 @@
   let pfPhotoTapCandidatePointerId = null;
   let pfPhotoTapStartX = 0, pfPhotoTapStartY = 0;
   let pfPhotoTapStartIsPng = false; // 這次候選點擊按下時，是否落在某個 .photo-fall-item（飄落的 png 物件）上，還是落在空白背景
-  // ---------- 偵錯修正：「單按 PNG 抓著拖曳一陣子，放開時卻還是觸發了單擊換一批」----------
-  // 成因：下面 pointerup 判斷「這一下算不算點一下（而不是拖曳）」，原本只看
-  // 「放開那一刻」的座標跟「按下那一刻」的座標兩點間的直線距離（淨位移）夠不夠
-  // 小，完全沒有管中途整段路徑實際跑到哪裡去過。使用者抓著 PNG 拖著到處甩、
-  // 用 Matter.Mouse／MouseConstraint 那條彈簧真的把照片拖離原位好一陣子，這段
-  // 過程本身跟「點一下」的意圖完全不同；但只要放開手指的那一刻、指尖剛好又繞回
-  // 靠近一開始按下的位置附近（例如畫了一個圈、或稍微抖了一下又移回原地），這裡
-  // 算出來的淨位移就會落在 PF_PHOTO_TAP_MAX_MOVE 門檻之內，被誤判成「原地點了
-  // 一下」，因而多觸發一次不該有的換一批——使用者感受到的正是「明明是抓著拖
-  // 曳、不是單純點一下，放開卻還是換了一批」。
-  // 修法：另外用這個旗標，在下面共用的 pointermove 監聽器裡持續追蹤「這根手指
-  // 從按下到現在，路徑中有沒有任何一刻已經明顯偏離過起點」（只要曾經超過
-  // PF_PHOTO_TAP_MAX_MOVE 就標記一次，不會因為之後移回去而重設回 false）；
-  // pointerup 判斷點擊是否成立時，除了原本的「淨位移」檢查，還要求這個旗標
-  // 從頭到尾都沒被標記過，兩個條件缺一才算「點一下」。這樣使用者只要在放開之前
-  // 曾經有一段明顯的拖曳位移，不管放開那一刻的座標繞回哪裡，都不會再被誤判成
-  // 單擊換一批；真正原地按著沒什麼移動的一般點擊，行為完全不受影響。
-  let pfPhotoTapMoved = false;
   let pfPhotoLastRealClickTime = 0;
   let pfPhotoLastRealClickX = 0, pfPhotoLastRealClickY = 0; // 上一次「有效點擊」的落點座標，用來判斷這一次是不是跟上一次靠得夠近，才能算雙擊
 
@@ -12207,20 +12160,50 @@
   // 就會清掉候選 id，讓另一邊的判斷自然失效，不會重複擷取兩次。
   let pfLongPressCurrentX = 0, pfLongPressCurrentY = 0;
   let pfLongPressTimer = null;
+  // ---------- 偵錯修正：「長按其實有按滿時間，放開卻被當成單擊誤觸換一批／
+  // 長按明明沒動卻偶爾還是判定失敗」（擴大偵查後的根因，兩個回報症狀
+  // 其實是同一個問題的兩面） ----------
+  // 成因：長按「有沒有動」跟單擊/換一批「有沒有動」，原本是用兩份完全
+  // 獨立、可能互相對不上的資料在各自判斷：
+  //   - 長按這邊：只在放開/計時器到期「那一瞬間」，拿 pfLongPressCurrentX/Y
+  //     （最後一次 pointermove 回報的座標）跟按下當下的起點算一次「淨位移」。
+  //   - 下面單擊/換一批那邊：拿的是 pointerup 這個事件「自己」附帶的
+  //     e.clientX/Y，理論上應該等於最後一次 pointermove 的座標，但不保證
+  //     一定相等——尤其是抓著照片長按時，Matter 的拖曳彈簧、瀏覽器觸控
+  //     取樣本身的雜訊，都可能讓手指中途有過一次明顯偏移（觸發過一次
+  //     pointermove、把 pfLongPressCurrentX/Y 更新到偏移後的位置），但放開
+  //     前手指其實又幾乎移回原地——這時候「長按那份判斷」看到的是中途那個
+  //     偏移最大的座標（判定成「有位移，不算長按」），「單擊那份判斷」看到
+  //     的卻是放開當下真正的座標（幾乎沒位移，判定成「沒位移，算一次
+  //     點擊」）——兩邊用不同的座標來源各自比對，得出互相矛盾的結論：長按
+  //     判失敗、單擊判成立，使用者體感就是「明明長按著，放開卻被當成點一下
+  //     觸發換一批」；反過來，如果單純只看「淨位移」而不管中途路徑，長按
+  //     期間手指自然的生理性顫抖、或被彈簧吸過去物件跟著手指晃動，也很容易
+  //     讓某一次取樣點偏移超過 10px 門檻，即使放開那一刻早就已經移回原地、
+  //     使用者主觀感覺整段都「按得很穩」，長按還是可能因為中途那一次瞬間
+  //     偏移被誤判成「有拖曳」而完全沒反應。
+  // 修法：不要在「判斷那一瞬間」才回頭比較兩個座標點的淨位移，改成從
+  // pointerdown 那一刻開始，用同一個 pointermove 監聽器持續「即時」累計
+  // 一個旗標 pfGestureMoved——只要這根手指的路徑中，曾經有任何一刻偏離
+  // 起點超過 PF_PHOTO_TAP_MAX_MOVE，就把它標記成 true，之後不管座標怎麼
+  // 移動（包含移回原地）都不會被重設回 false，直到下一次 pointerdown 重新
+  // 歸零。長按判斷（setTimeout／pointerup／pointercancel 三處）跟下面單擊/
+  // 換一批的判斷，全部改成只看這同一個旗標，不再各自拿座標算一次淨位移。
+  // 兩邊資料來源完全統一之後：
+  //   - 長按放開時如果真的被判定「有位移」，單擊那邊用的是同一個旗標，
+  //     也一定會判定「有位移」而放棄，不會再誤觸換一批／換色。
+  //   - 長按期間手指只是路徑中瞬間抖動、最終仍在原地放開，只要那次抖動
+  //     沒有真的超過門檻，旗標就不會被標記，長按一樣正常成立——這部分
+  //     跟原本行為一致，沒有放寬「真的拖著甩出去」該有的保護。
+  let pfGestureMoved = false;
   window.addEventListener('pointermove', (e) => {
     if(pfLongPressCandidatePointerId !== null && e.pointerId === pfLongPressCandidatePointerId){
       pfLongPressCurrentX = e.clientX;
       pfLongPressCurrentY = e.clientY;
-    }
-    // ---------- 配合 pfPhotoTapMoved 的修法：持續追蹤單擊候選這根手指的路徑
-    // ----------
-    // 見上面 pfPhotoTapMoved 宣告處的完整說明：只要中途任何一刻已經明顯偏離
-    // 按下時的起點，就把旗標標記起來、之後不會再重設回 false（就算之後又移回
-    // 起點附近也一樣維持已標記狀態），pointerup 判斷點擊是否成立時才不會只看
-    // 「放開那一刻」剛好又繞回起點附近，就把整段拖曳誤判成點一下。
-    if(pfPhotoTapCandidatePointerId !== null && e.pointerId === pfPhotoTapCandidatePointerId && !pfPhotoTapMoved){
-      const tdx = e.clientX - pfPhotoTapStartX, tdy = e.clientY - pfPhotoTapStartY;
-      if(Math.hypot(tdx, tdy) > PF_PHOTO_TAP_MAX_MOVE) pfPhotoTapMoved = true;
+      if(!pfGestureMoved){
+        const gdx = e.clientX - pfLongPressStartX, gdy = e.clientY - pfLongPressStartY;
+        if(Math.hypot(gdx, gdy) > PF_PHOTO_TAP_MAX_MOVE) pfGestureMoved = true;
+      }
     }
   }, { passive: true });
 
@@ -12289,7 +12272,6 @@
       pfPhotoTapCandidatePointerId = e.pointerId;
       pfPhotoTapStartX = e.clientX;
       pfPhotoTapStartY = e.clientY;
-      pfPhotoTapMoved = false; // 每次重新按下都要重設，見上面 pfPhotoTapMoved 宣告處的完整說明
       // 按下的當下就記錄這一下是不是點在某個 png 物件（.photo-fall-item）
       // 上——單擊要「點 png 換一批」還是「點背景換顏色」，靠的是這個判斷；
       // 用 pointerdown 當下的 e.target 而不是等 pointerup 再判斷，是因為
@@ -12334,6 +12316,7 @@
       pfLongPressCurrentX = e.clientX;
       pfLongPressCurrentY = e.clientY;
       pfLongPressStartTime = Date.now();
+      pfGestureMoved = false; // 每次新的按下都重新歸零，見上面 pfGestureMoved 宣告處的完整說明
 
       // 不等放開，按住滿 PF_LONGPRESS_MS 且還在原地就直接觸發——不分
       // 裝置／pointerType，桌機／手機／平板行為一致（見上方「不等放開就
@@ -12344,8 +12327,11 @@
       pfLongPressTimer = setTimeout(() => {
         pfLongPressTimer = null;
         if(pfLongPressCandidatePointerId !== firedPointerId) return; // 已經放開或被取消，不重複觸發
-        const ldx = pfLongPressCurrentX - pfLongPressStartX, ldy = pfLongPressCurrentY - pfLongPressStartY;
-        const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE; // 明顯位移＝拖曳，不算長按
+        // 修法：不再用「這一刻」的座標回頭算一次淨位移，改成看
+        // pfGestureMoved 這個從按下當下就開始累計的旗標（見宣告處說明），
+        // 跟下面 pointerup／pointercancel 兩處、還有單擊/換一批那組判斷，
+        // 資料來源完全統一。
+        const isStillish = !pfGestureMoved;
         const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
         if(isStillish && noOverlay && photoFallState === 'active'){
           pfLongPressCandidatePointerId = null; // 標記已處理，放開時 pointerup 那組判斷不再重複觸發一次
@@ -12362,64 +12348,20 @@
   // 候選也一起記，使用者單純點一下想收掉說明圖時，會被下面 window 的
   // pointerup 誤判成「點了一下 png／背景」，多餘觸發一次換批或換色。
   if(pfRulesOverlay) pfRulesOverlay.addEventListener('pointerdown', (e) => pfHandleStagePointerDown(e, { skipTapTracking: true }));
-  // ---------- 擴大偵查後新發現的根因：「長按偶爾還是沒辦法進入桌布截圖
-  // 預覽頁」（上一輪只加了 touch-action:none，還是偶爾會發生）----------
-  // touch-action:none 擋掉的是瀏覽器把這次觸控「當成平移/捲動手勢」處理，
-  // 但手機瀏覽器的長按行為其實還有另一條完全獨立的路徑：使用者長按在
-  // <img> 這種原生元素上（這裡的每個漂浮物件就是 <img>），不管有沒有設
-  // touch-action，作業系統/瀏覽器自己內建的「長按開啟選單」手勢辨識
-  // （Android Chrome 的「儲存圖片／在新分頁開啟圖片」選單、部分瀏覽器對
-  // 可選取內容跳出的複製選單）都還是會照常倒數計時，常見門檻落在
-  // 500ms 上下，剛好卡在我們自己 PF_LONGPRESS_MS(550ms) 門檻的前面一點點。
-  // 這個系統長按手勢一旦被觸發，Touch Events／Pointer Events 規範規定：
-  // 瀏覽器會先把這根手指目前的觸控序列判定為「已經被系統手勢接管」、送出
-  // pointercancel，之後才真正 dispatch 一個 contextmenu 事件——即使我們在
-  // 別處已經有 `document.addEventListener('contextmenu', e=>e.preventDefault())`
-  // 把選單本身的視覺效果攔下來，那個 preventDefault() 也只能擋住選單
-  // 「跳出來」這件事，時間點上已經太晚，攔不住更早發生的那個 pointercancel——
-  // 我們自己這一整套長按判斷（pfLongPressCandidatePointerId 那組）在
-  // pointercancel 抵達的當下，量到的 heldMs 常常還沒滿 550ms，因而
-  // 判定「長按不成立」而放棄擷取，即使使用者手指實際上根本還按著、
-  // 也還沒真的放開——是否會踩到這個系統手勢辨識的門檻，取決於使用者
-  // 那一次長按落在哪個瀏覽器/系統版本、當下手指角度/壓力等細節，正是
-  // 「偶爾」這種不規律症狀的真正成因，跟先前 touch-action 的修法完全是
-  // 兩個不同的觸發路徑，各自獨立、需要分開處理。
-  // 修法：比照這個檔案裡飄動的 e／#dvdBounce 早就採用過的同一招（見上面
-  // window 的 touchstart 監聽器旁「非 passive 的 touchstart 呼叫
-  // preventDefault() 是瀏覽器公認、保證有效取消原生手勢的寫法」那段完整
-  // 說明）：額外掛一個非 passive 的 touchstart 監聽器，只要這次觸控落在
-  // 目前正在進行的堆疊模式範圍內（active/reshuffling/entering，理由跟
-  // pfHandleStagePointerDown 內長按候選的範圍判斷一致），就立刻同步呼叫
-  // preventDefault()。跟 contextmenu 監聽器不同，這裡是在觸控序列最一
-  // 開始（touchstart 本身）就搶先攔截，瀏覽器規範保證只要 touchstart 被
-  // preventDefault()，這整根手指後續就不會再觸發任何原生預設行為（捲動、
-  // 長按選單、文字選取……全部一併取消），連「長按選單」這個系統手勢辨識
-  // 本身都不會被啟動，自然也就不會有前面說的那個提早送出的 pointercancel。
-  // 只呼叫 preventDefault()、不呼叫 stopPropagation()：Matter.Mouse 自己
-  // 也是直接綁在同一個元素的原生 touchstart 上（見 startPhotoFallEngine()
-  // 內 `Mouse.create(photoFallStage)` 的完整說明），一個 touchstart 事件
-  // 上可以同時掛好幾個獨立的監聽器，呼叫 preventDefault() 完全不會讓其他
-  // 監聽器收不到這個事件、也不會影響 Matter 判斷要不要抓取物件，兩者互不
-  // 干擾。
-  function pfShouldInterceptNativeTouch(){
-    return (photoFallState !== 'idle' && photoFallState !== 'exiting')
-      || (pfRulesOverlay && pfRulesOverlay.classList.contains('active'));
-  }
-  photoFallStage.addEventListener('touchstart', (e) => {
-    if(pfShouldInterceptNativeTouch()) e.preventDefault();
-  }, { passive: false });
-  if(pfRulesOverlay) pfRulesOverlay.addEventListener('touchstart', (e) => {
-    if(pfShouldInterceptNativeTouch()) e.preventDefault();
-  }, { passive: false });
   window.addEventListener('pointerup', (e) => {
     // 長按候選優先判斷：命中就直接處理完畢，不落到下面單擊/雙擊那組邏輯，
     // 避免這次放開同時被算成一次點擊。
     if(pfLongPressCandidatePointerId !== null && e.pointerId === pfLongPressCandidatePointerId){
       pfLongPressCandidatePointerId = null;
       if(pfLongPressTimer !== null){ clearTimeout(pfLongPressTimer); pfLongPressTimer = null; } // 桌機計時器還沒到時間就放開了，取消它
-      const ldx = e.clientX - pfLongPressStartX, ldy = e.clientY - pfLongPressStartY;
       const heldMs = Date.now() - pfLongPressStartTime;
-      const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE; // 明顯位移＝拖曳/甩動，不算長按
+      // 修法（見上面 pfGestureMoved 宣告處的完整說明）：不再用「放開這一刻
+      // 的 e.clientX/Y」回頭跟起點算一次淨位移——這個座標來源跟下面單擊/
+      // 換一批那組判斷用的座標，理論上該相等，但長按中途一旦有過偏移，
+      // 兩邊實際比對出來的結果可能對不上，變成「長按判失敗、卻被當一次
+      // 單擊觸發換一批」。改成兩邊統一看同一個從按下就開始累計的旗標，
+      // 徹底消除這個落差。
+      const isStillish = !pfGestureMoved;
       const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
       if(isStillish && heldMs >= PF_LONGPRESS_MS && noOverlay){
         pfPhotoTapCandidatePointerId = null; // 避免下面單擊/雙擊邏輯又把這次放開重複處理一次
@@ -12432,12 +12374,11 @@
     }
     if(pfPhotoTapCandidatePointerId === null || e.pointerId !== pfPhotoTapCandidatePointerId) return;
     pfPhotoTapCandidatePointerId = null;
-    const dx = e.clientX - pfPhotoTapStartX, dy = e.clientY - pfPhotoTapStartY;
-    // 「淨位移」（起點到放開那一刻的直線距離）跟 pfPhotoTapMoved（整段路徑
-    // 中途有沒有明顯偏離過起點，見該旗標宣告處的完整說明）兩個條件只要中一個，
-    // 就代表這是一次拖曳／甩動而不是單純點一下——只看淨位移會漏掉「拖著繞一圈
-    // 又放回起點附近」這種情況，兩者一起檢查才不會誤判成單擊換一批。
-    if(pfPhotoTapMoved || Math.hypot(dx, dy) > PF_PHOTO_TAP_MAX_MOVE) return; // 明顯位移＝拖曳，不算點擊
+    // 同上：單擊/換一批是否成立，也改成看 pfGestureMoved（跟長按判斷共用
+    // 同一份資料），不再拿 e.clientX/Y 自己另外算一次淨位移——只有兩個
+    // pointerId 不同（另一根手指）的極端情況下 pfGestureMoved 才可能不適用，
+    // 但那種情況本來 pfPhotoTapCandidatePointerId 也不會相符，不會走到這裡。
+    if(pfGestureMoved) return; // 明顯位移＝拖曳，不算點擊
     if(document.body.classList.contains('detail-active') || document.body.classList.contains('preview-active')) return;
     // ---------- 修正：「長按第一批照片進到桌布截圖預覽頁之後，滑鼠在
     // 預覽頁上放開時，會被判定成單擊、誤觸發堆疊頁面換一批（第二批之後
@@ -12553,9 +12494,11 @@
     // 上這次長按理應成立，不該因為瀏覽器內部這個跟使用者意圖無關的取消
     // 訊號就悄悄放棄，讓使用者以為「長按 PNG 沒有用」。
     if(pfLongPressCandidatePointerId === e.pointerId){
-      const ldx = pfLongPressCurrentX - pfLongPressStartX, ldy = pfLongPressCurrentY - pfLongPressStartY;
       const heldMs = Date.now() - pfLongPressStartTime;
-      const isStillish = Math.hypot(ldx, ldy) <= PF_PHOTO_TAP_MAX_MOVE;
+      // 修法：跟上面 pointerup、跟下面單擊/換一批共用同一個 pfGestureMoved
+      // 旗標（完整原因見宣告處的說明），不再自己另外用 pfLongPressCurrentX/Y
+      // 對起點算一次淨位移。
+      const isStillish = !pfGestureMoved;
       const noOverlay = !document.body.classList.contains('detail-active') && !document.body.classList.contains('preview-active');
       const shouldCapture = isStillish && heldMs >= PF_LONGPRESS_MS && noOverlay && photoFallState === 'active';
       pfLongPressCandidatePointerId = null;
