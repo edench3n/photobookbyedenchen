@@ -2322,17 +2322,54 @@
   // 遮罩本身還在畫面上擋著，這段等待使用者感覺不到「卡住」，只會覺得
   // 是遮罩淡出前的正常載入時間。
   const INITIAL_REVEAL_EXTRA_BUFFER_MS = 450;
+  // ---------- 修正：「手機版前幾次撞擊常常不會換照片，載入還是不夠快」----------
+  // 成因：上面 INITIAL_REVEAL_EXTRA_BUFFER_MS 原本是「固定多等 450ms」就
+  // 放行遮罩，不管背景那批快速預載（DVD_E_QUICK_PRELOAD_COUNT 張，見
+  // init() 內對應段落）當下實際已經準備好幾張。cycleDvdEImage() 要換到
+  //「不一樣的一張」，前提是已就緒池至少要有 2 張以上候選（見
+  // pickNextDvdEImageIndex() n<=1 的分支）——網路快的裝置 450ms 綽綽有
+  // 餘，但手機網路稍慢一點，這個固定時間常常不夠讓候選池湊到 2 張以
+  // 上，遮罩一放行、使用者能撞牆了，池子卻還只有 1 張，撞了也不會換圖，
+  // 這正是「前幾次撞擊常常都不會換照片」的成因：問題不在載入本身不夠
+  // 快，而是「放行的時間點」跟「候選池實際準備好的時間點」用同一個猜測
+  // 出來的固定數字對不上拍。
+  // 修法：不再用單一固定時間猜，改成「輪詢已就緒候選數，湊到門檻張數
+  // 就放行，但最多不會無限等」——網路快的裝置很快就湊到門檻，幾乎跟原
+  // 本一樣快放行；網路慢的裝置會多等一點，但最多只會等到
+  // INITIAL_REVEAL_MAX_EXTRA_WAIT_MS 這個上限，不會讓使用者對著全白遮罩
+  // 等太久（原本的 INITIAL_REVEAL_FALLBACK_MS 4 秒保底逾時依然在，兩層
+  // 保底互不影響）。INITIAL_REVEAL_EXTRA_BUFFER_MS 保留當作下限：就算候
+  // 選池一瞬間就湊滿門檻，也至少維持原本這段緩衝，不會比修正前更早放
+  // 行、削弱其他部分依賴這段緩衝時間的行為。
+  const INITIAL_REVEAL_MIN_READY_COUNT = 3; // 至少要湊到這麼多張候選，撞牆才有機會真的隨機換到不同張
+  const INITIAL_REVEAL_MAX_EXTRA_WAIT_MS = 1400; // 湊不滿門檻時，最多願意多等這麼久（手機慢網路的上限）
+  const INITIAL_REVEAL_POLL_MS = 80; // 輪詢間隔，夠密才不會讓「湊到門檻」跟「實際放行」之間多出明顯的空檔
   let initialRevealExtraBufferTimer = null;
+  let initialRevealPollStartedAt = null;
+  function pollDvdReadyThenReveal(){
+    const elapsed = performance.now() - initialRevealPollStartedAt;
+    const readyCount = dvdEReadyIndices().length;
+    if(readyCount >= INITIAL_REVEAL_MIN_READY_COUNT || elapsed >= INITIAL_REVEAL_MAX_EXTRA_WAIT_MS){
+      // 已經達標（或已經等到上限），但至少維持 INITIAL_REVEAL_EXTRA_BUFFER_MS
+      // 這個下限，理由見上面完整說明。
+      const remain = Math.max(0, INITIAL_REVEAL_EXTRA_BUFFER_MS - elapsed);
+      initialRevealExtraBufferTimer = setTimeout(() => {
+        initialRevealExtraBufferTimer = null;
+        initialRevealPollStartedAt = null;
+        revealInitialChrome();
+      }, remain);
+      return;
+    }
+    initialRevealExtraBufferTimer = setTimeout(pollDvdReadyThenReveal, INITIAL_REVEAL_POLL_MS);
+  }
   function attemptInitialReveal(){
     if(initialChromeRevealed) return;
     if(previewReadyForInitialReveal && dvdReadyForInitialReveal){
       clearTimeout(initialRevealGraceTimer);
       initialRevealGraceTimer = null;
-      if(!initialRevealExtraBufferTimer){
-        initialRevealExtraBufferTimer = setTimeout(() => {
-          initialRevealExtraBufferTimer = null;
-          revealInitialChrome();
-        }, INITIAL_REVEAL_EXTRA_BUFFER_MS);
+      if(!initialRevealExtraBufferTimer && initialRevealPollStartedAt === null){
+        initialRevealPollStartedAt = performance.now();
+        pollDvdReadyThenReveal();
       }
       return;
     }
