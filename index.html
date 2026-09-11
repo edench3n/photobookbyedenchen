@@ -3043,15 +3043,20 @@
       }
       if(!res.ok) return null;
       const manifest = await res.json();
-      const entries = Object.keys(manifest || {});
-      if(entries.length === 0) return null;
+      // build-e-manifest.js 產生的是巢狀格式：{generatedAt, folderId, images:[{id,file,contentType}]}，
+      // 不是「id → 檔名」的扁平物件，這裡要對應讀 manifest.images 這個陣列。
+      const images = Array.isArray(manifest && manifest.images) ? manifest.images : [];
+      if(images.length === 0) return null;
 
       const ids = [];
-      const urls = entries.map(id => {
-        const fileName = manifest[id];
+      const urls = images.map(entry => {
+        // entry.file 本身已經是 "e-images/<id>.<ext>"（含資料夾前綴），
+        // EDEN_E_IMAGES_BASE_URL 尾端也是 "e-images/"，兩者直接相加會重複
+        // 一層 "e-images/e-images/"，所以這裡只取檔名本身再拼接。
+        const fileName = String(entry.file || '').replace(/^e-images\//, '');
         const url = EDEN_E_IMAGES_BASE_URL + fileName;
-        dvdEImageUrlToId.set(url, id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
-        ids.push(id);
+        dvdEImageUrlToId.set(url, entry.id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
+        ids.push(entry.id);
         return url;
       });
 
