@@ -2065,6 +2065,12 @@
   // 之後真的覺得慢，要退可以再換 jsdelivr。
   const EDEN_E_MANIFEST_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-manifest.json';
   const EDEN_E_IMAGES_BASE_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-images/';
+  // build-masks.js（GitHub Actions 離線產生）輸出的靜態碰撞遮罩檔案。
+  // 跟下面 precomputedEMasksPromise 一起看：這裡改成優先直接 fetch 這個
+  // 固定網址，一次要到內容；原本「先查 Drive 檔名拿 file id、再用 id
+  // 另外抓一次內容」那兩趟 API 往返，降級成單純的備援路徑，不再是預設
+  // 行為。理由、效益完整說明見 precomputedEMasksPromise 內。
+  const EDEN_E_MASKS_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/masks.json';
 
   // ---------- 預算好的碰撞遮罩（離線用 Puppeteer 算好，放在同一個 Drive 資料夾） ----------
   // dvdEImageUrlToId：這次頁面載入真的打了 Drive API 查詢時，記錄「這張圖片
@@ -2089,7 +2095,39 @@
   // 不等 init()。找不到檔案、解析失敗、或任何一步出錯，都直接回傳 null，
   // 下面 requestAlphaMask() 查不到就會照舊退回即時算，不影響網站運作。
   let precomputedEMasks = null;
+  // ---------- 修正：masks.json 明明已經離線算好放雲端，抓起來還是很花時間 ----------
+  // 原本這裡一律進站現查 Drive API，而且是「先查檔名拿 file id、再用 id
+  // 另外抓一次內容」依序兩趟網路往返，兩次都刻意標成 priority:'low'，會被
+  // 瀏覽器排在照片下載之後才處理——手機網路 RTT 本來就比桌機高，兩趟
+  // 往返疊起來、又排在低優先權，延遲格外有感。
+  // 改成優先直接 fetch 上面 EDEN_E_MASKS_URL 這個固定網址（build-masks.js
+  // 離線產生、由 GitHub Actions push 上去的靜態檔案，做法跟 e-manifest.json
+  // 完全對應）：一次請求直接拿到完整內容，不用先問「在哪」。抓不到（檔案
+  // 還沒 build、暫時性網路問題）才退回下面原本「進站現查 Drive API」那段
+  // 當備援，行為不會壞掉，只是那種情況下延遲退回原本的舊行為。
   const precomputedEMasksPromise = (async () => {
+    try{
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      let res;
+      try{
+        res = await fetch(EDEN_E_MASKS_URL, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if(res.ok){
+        const json = await res.json();
+        const map = new Map();
+        Object.keys(json).forEach(id => map.set(id, json[id]));
+        precomputedEMasks = map;
+        return map;
+      }
+    }catch(err){
+      // 靜態檔案抓不到（離線、還沒 build 過、暫時性網路問題），往下走
+      // 備援路徑，不在這裡直接放棄。
+    }
+
+    // ---------- 備援：進站現查 Drive API（原本的行為，一字不動） ----------
     if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
        !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
       return null;
@@ -15243,6 +15281,20 @@
       // 用 setDvdBounceImageSrc() 原本就有的「畫面外先解碼好才切換」機制
       // 無縫換成正式畫質，使用者不會感覺到任何跳動。
       const quickUrl = /=s\d+$/.test(firstUrl) ? firstUrl.replace(/=s\d+$/, '=s400') : firstUrl;
+      // ---------- 修正：「剛進站撞在圖片周圍的透明區域上，不是實際去背邊緣」----------
+      // 成因：quickUrl 從來沒有被送進 trimTransparentImage()，
+      // dvdETrimmedSrcToId（requestAlphaMask() 查離線遮罩用的對照表，見
+      // recordDvdEMaskMapping() 的完整說明）裡從頭到尾沒有 quickUrl 的
+      // 紀錄——即使 masks.json 早就抓回來了，用 quickUrl 當 src 查表還是
+      // 查不到，只能先退回「遮罩還沒準備好」的矩形外框行為（見
+      // computeDvdPixelInsets() 的說明），直到背景裁切出正式版本才會
+      // 換成精確判斷。這正是「剛進站那幾秒特別容易撞在留白上」的主因。
+      // 修法：quickUrl 只是把 firstUrl 換了個尺寸參數，圖案本身（去背
+      // 輪廓）跟 firstUrl 是同一張圖，而遮罩座標本來就正規化成 0..1、不
+      // 受解析度影響，可以直接沿用 firstUrl 對應的同一筆離線資料，不用
+      // 等到正式裁切版本才查得到。
+      const firstImageId = dvdEImageUrlToId.get(firstUrl);
+      if(firstImageId) dvdETrimmedSrcToId.set(quickUrl, firstImageId);
 
       // ---------- 修正：「手機版剛進站，第一次撞牆永遠不會換照片」----------
       // 成因：撞牆真的能換到「不一樣的一張」，前提是已就緒池
@@ -15308,6 +15360,10 @@
         const quickIdx = qi; // 迴圈變數本身在閉包裡會變動，先固定成獨立變數給下面的 closure 用
         const urlN = orderedUrls[quickIdx];
         const quickUrlN = /=s\d+$/.test(urlN) ? urlN.replace(/=s\d+$/, '=s400') : urlN;
+        // 理由同上面 quickUrl／firstImageId 那段的完整說明：quickUrlN 只是
+        // urlN 換了尺寸參數，同一張圖可以直接沿用同一筆離線遮罩資料。
+        const quickImageIdN = dvdEImageUrlToId.get(urlN);
+        if(quickImageIdN) dvdETrimmedSrcToId.set(quickUrlN, quickImageIdN);
         const offscreenN = new Image();
         offscreenN.src = quickUrlN;
         const markReadyN = () => {
