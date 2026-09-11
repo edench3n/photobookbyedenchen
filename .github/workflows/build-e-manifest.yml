@@ -38,5 +38,25 @@ jobs:
             echo "沒有變動，不 commit。"
           else
             git commit -m "chore: update e-manifest (automated)"
-            git push
+
+            # push 前先跟遠端同步一次：如果 push 這段期間，main 被別的
+            # 東西（例如網頁上手動編輯、或另一次執行）動過，直接 push
+            # 會被拒絕（non-fast-forward）。這裡改成「push 失敗就先
+            # pull --rebase 再重試」，最多試 5 次，兩次之間隨機等一下
+            # （避免剛好又撞在一起）。這份 workflow 只會動
+            # e-manifest.json／e-images/ 這兩個路徑，跟其他改動（例如
+            # index.html）不會有實質內容衝突，rebase 基本上都能自動
+            # 完成，不需要人工處理。
+            n=0
+            until git push; do
+              n=$((n+1))
+              if [ "$n" -ge 5 ]; then
+                echo "push 重試 5 次仍失敗，放棄。"
+                exit 1
+              fi
+              echo "push 被拒絕（第 $n 次），同步遠端最新內容後重試..."
+              git fetch origin main
+              git rebase origin/main
+              sleep $((RANDOM % 5 + 1))
+            done
           fi
