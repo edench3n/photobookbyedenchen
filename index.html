@@ -10898,6 +10898,11 @@
     markPfRulesShownThisTab(); // 這次頁面載入顯示過了，記下來，同一次載入之後不用再顯示（重新整理會重跑 JS、旗標歸零，見上面完整說明）
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
+    // 保險：如果上一輪 hidePfRulesOverlay() 才剛把 pointer-events 行內覆蓋成
+    // none（見該函式內的完整說明），這裡重新顯示前先清乾淨，讓 CSS
+    // .pf-rules-overlay.active 原本的 pointer-events:auto 規則能正常生效，
+    // 不會被上一輪殘留的行內樣式蓋住。
+    pfRulesOverlay.style.pointerEvents = '';
     // 淡入／淡出用不同時長：淡出維持原本很快的 .15s（見 hidePfRulesOverlay），
     // 淡入則改久一點，用行內 style 覆蓋 CSS 預設的 transition-duration
     // （PF_RULES_FADE_IN_MS），這樣兩個方向可以各自獨立調整，不用互相牽動。
@@ -10928,16 +10933,41 @@
     clearTimeout(pfRulesInteractableTimer);
     pfRulesInteractableTimer = null;
     pfRulesInteractable = false;
+    // ---------- 修正：「規則圖按掉之後緊接著長按，偶爾完全沒反應（點 png
+    // 或點背景都一樣），只有在第一批出現、換一批之後就不會了」----------
+    // 成因：CSS .pf-rules-overlay.active 把 display:flex 跟 pointer-events:auto
+    // 綁在同一個 class 上，原本這裡是等淡出的 opacity transition（170ms）
+    // 真的播完，才用 setTimeout 把 .active 整個拿掉——用意是让淡出動畫
+    // 期間視覺上還沒完全消失時，點擊依然被這層滿版遮罩擋著。但代價是：
+    // 使用者「點一下收掉規則圖」跟「緊接著開始長按」這兩個動作只要間隔
+    // 小於這 170ms，長按的第一下（pointerdown）還是會先打在這層還沒真正
+    // 撤除的遮罩上——遮罩自己掛的 pointerdown 監聽器（見下面
+    // `pfRulesOverlay.addEventListener('pointerdown', ...)`，帶
+    // skipTapTracking:true）這時候檢查到 pfRulesInteractable 已經被這裡
+    // 設成 false，直接整段放棄追蹤，長按候選狀態從頭到尾沒被記下來，等於
+    // 這一下完全沒反應；不管使用者壓的是底下的 png 物件還是空白背景，
+    // 反正都被同一層遮罩統一擋下，症狀才會兩者一致。滑鼠使用者點完常常
+    // 手不動直接接著按住，間隔特別容易落在 170ms 內；觸控使用者點完通常
+    // 要重新對準位置才長按，間隔自然拉長，比較少踩到這個空窗期，正是
+    // 使用者回報「滑鼠常中、手機不會」的成因。
+    // 修法：把「視覺淡出」跟「攔截點擊」拆開——點一下收掉的這一刻，立刻用
+    // 行內 style 把 pointer-events 蓋成 none（優先權比 CSS class 高，不用等
+    // .active 被拿掉才生效），底下堆疊舞台這一刻就能正常接收點擊／長按，
+    // 符合原本「消失之後就都可以操作」的需求（這裡「消失」改成以使用者的
+    // 點擊動作為準，而不是以動畫播完為準）；.active 本身照舊留到動畫播完
+    // 才拿掉，單純只是收尾、讓 display 最後收回 none，不影響互動判斷。
+    pfRulesOverlay.style.pointerEvents = 'none';
     // 切回淡出用的短時長，再拿掉 .show 觸發淡出，不會被淡入時設的較長
     // transition-duration 拖慢。
     pfRulesOverlay.style.transitionDuration = '0.15s';
     pfRulesOverlay.classList.remove('show');
     clearTimeout(pfRulesHideTimer);
     // 等 opacity 的淡出 transition（.15s）真的播完，才把 display 收回
-    // none、pointer-events 收回 none，這一刻之後底下的堆疊舞台才真正開始
-    // 接收點擊／拖曳，符合「消失之後才能操控堆疊頁面」的需求。
+    // none——底下堆疊舞台的點擊/長按已經在上面那行行內樣式生效的當下就
+    // 立刻放行了，不用等到這裡。
     pfRulesHideTimer = setTimeout(() => {
       pfRulesOverlay.classList.remove('active');
+      pfRulesOverlay.style.pointerEvents = '';
       pfRulesHideTimer = null;
     }, 170);
   }
@@ -12645,6 +12675,45 @@
     return pfMaskVisibleUVBounds(entry.maskEntry) || pfLiveTrimUVBounds(entry.img);
   }
 
+  // ---------- 修正：「長按有時候完全沒反應，主控台跳出 SecurityError：
+  // Failed to execute 'toBlob'...Tainted canvases may not be exported」----------
+  // 成因：堆疊頁面掉落的照片是從 Google Drive／googleusercontent 這種跨
+  // 網域來源載入的，但畫面上實際顯示、後面會被 capturePhotoFallWallpaper()
+  // 拿去 ctx.drawImage() 的那個 <img> 元素，建立時完全沒有設定
+  // crossOrigin——瀏覽器因此把它當成「不透明的跨網域資源」處理：畫到
+  // canvas 上完全不會出錯（肉眼看起來一切正常），但只要 canvas 上曾經畫過
+  // 任何一張這樣的圖，整張 canvas 就會被標記成「tainted（受污染）」，之後
+  // 呼叫 canvas.toBlob()／toDataURL()／getImageData() 一律直接丟出
+  // SecurityError，而且完全沒有畫面提示，只有 DevTools 主控台看得到——這正是
+  // 使用者「長按看起來完全沒反應」的真正成因。是否踩到則要看那幾張圖片
+  // 當下各自的瀏覽器快取／CORS 驗證狀態，才會有「有時候會成功」這種
+  // 看似隨機的現象。
+  // 修法：不要直接拿畫面上那個沒有 crossOrigin 的 <img> 來畫，改成额外用
+  // fetch()（帶 mode:'cors'）把圖片位元組整個抓下來、包成 blob: URL 再建立
+  // 一份「乾淨」的 <img>——只要伺服器真的開放 CORS，fetch 拿到的內容一定
+  // 允許讀取，blob: URL 本身又是同源，畫到 canvas 上絕對不會被判定成
+  // tainted（這跟上面 requestAlphaMask() 讀取像素遮罩時用的是同一套、已經
+  // 驗證過確實有效的手法，這裡只是額外把結果保留下來重複使用，不像遮罩
+  // 那邊讀完像素就把 blob: URL 釋放掉）。同一張圖片同一次頁面停留期間只會
+  // 真的 fetch 一次，之後不管長按幾次都直接沿用快取，不會重複下載。萬一
+  // 某一張圖片連 fetch 都失敗（例如伺服器真的完全不開放跨網域讀取），優雅
+  // 退場成「這張圖就不畫進這次的桌布裡」，不會讓整次擷取整個失敗。
+  const pfCorsSafeImgCache = new Map(); // src -> Promise<HTMLImageElement|null>，同一張圖片全站共用一份快取，不重複 fetch
+  function loadCorsSafeImageForCapture(src){
+    if(pfCorsSafeImgCache.has(src)) return pfCorsSafeImgCache.get(src);
+    const p = fetch(src, { mode: 'cors' }).then(res => {
+      if(!res.ok) throw new Error('fetch failed: ' + res.status);
+      return res.blob();
+    }).then(blob => new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null); // 讀得到 blob 但解碼失敗，一樣視為拿不到，呼叫端會跳過這張
+      img.src = URL.createObjectURL(blob);
+    })).catch(() => null); // fetch 本身失敗（伺服器完全不開放 CORS），視為拿不到
+    pfCorsSafeImgCache.set(src, p);
+    return p;
+  }
+
   function capturePhotoFallWallpaper(retryAttempt){
     retryAttempt = retryAttempt || 0;
     try{
@@ -12788,80 +12857,98 @@
       const contentW = maxX - minX, contentH = maxY - minY;
       if(!(contentW > 0) || !(contentH > 0)) return;
 
-      // 手機／平板／桌機三組固定輸出解析度，跟全站既有的裝置寬度斷點
-      // （DESKTOP_BREAKPOINT=1100、640）保持一致，不另外發明新的判斷。
-      // 這裡故意用比裝置螢幕更高一階的解析度（大致是常見手機/平板/桌機
-      // 螢幕實際像素密度的 2 倍），畫質可以撐得住當作桌布放大檢視、甚至
-      // 印出來也不會糊，跟 JPEG 品質（見下面 canvas.toBlob 那行）一起
-      // 兩邊都調高。
-      const vw = window.innerWidth;
-      let canvasW, canvasH;
-      if(vw <= 640){ canvasW = 2160; canvasH = 4680; } // 9:19.5，手機直式
-      else if(vw <= DESKTOP_BREAKPOINT){ canvasW = 3072; canvasH = 4096; } // 3:4，平板
-      else { canvasW = 3840; canvasH = 2160; } // 16:9，桌機橫式（4K）
+      // 正式畫到 canvas 上之前，先確保每一張要用到的圖片都已經有一份
+      // CORS 乾淨的版本可用（見上面 loadCorsSafeImageForCapture() 的完整
+      // 說明）；同一張圖片同一次頁面停留期間只會真的 fetch 一次，之後
+      // 每次長按都直接沿用快取，幾乎不會有感覺得到的延遲。
+      const uniqueSrcs = Array.from(new Set(entries.map(entry => entry.img.src)));
+      Promise.all(uniqueSrcs.map(loadCorsSafeImageForCapture)).then((safeImgs) => {
+        const srcToSafeImg = new Map(uniqueSrcs.map((src, i) => [src, safeImgs[i]]));
+        entries.forEach(entry => { entry.safeImg = srcToSafeImg.get(entry.img.src); });
 
-      const canvas = document.createElement('canvas');
-      canvas.width = canvasW;
-      canvas.height = canvasH;
-      const ctx = canvas.getContext('2d');
-      // ---------- 底色改成跟擷取當下的堆疊背景顏色一致 ----------
-      // 原本這裡固定寫死 '#ffffff'，不管使用者當時把背景換成哪個顏色，
-      // 截出來的桌布底色永遠是白色，跟畫面上看到的不一致。改成直接讀
-      // pfBgColorIndex 目前指到哪一個顏色——白色現在也是 PHOTO_FALL_BG_COLORS
-      // 陣列本身的第一個顏色，pfBgColorIndex 永遠是合法的陣列索引，不再需要
-      // 額外判斷「-1 代表白色」這個特例，直接查陣列即可，跟畫面上
-      // photoFallStage 當下的背景色保持同步。
-      const pfCaptureBgColor = PHOTO_FALL_BG_COLORS[pfBgColorIndex];
-      ctx.fillStyle = pfCaptureBgColor;
-      ctx.fillRect(0, 0, canvasW, canvasH);
+        // 手機／平板／桌機三組固定輸出解析度，跟全站既有的裝置寬度斷點
+        // （DESKTOP_BREAKPOINT=1100、640）保持一致，不另外發明新的判斷。
+        // 這裡故意用比裝置螢幕更高一階的解析度（大致是常見手機/平板/桌機
+        // 螢幕實際像素密度的 2 倍），畫質可以撐得住當作桌布放大檢視、甚至
+        // 印出來也不會糊，跟 JPEG 品質（見下面 canvas.toBlob 那行）一起
+        // 兩邊都調高。
+        const vw = window.innerWidth;
+        let canvasW, canvasH;
+        if(vw <= 640){ canvasW = 2160; canvasH = 4680; } // 9:19.5，手機直式
+        else if(vw <= DESKTOP_BREAKPOINT){ canvasW = 3072; canvasH = 4096; } // 3:4，平板
+        else { canvasW = 3840; canvasH = 2160; } // 16:9，桌機橫式（4K）
 
-      // ---------- 對齊方式：左、右、下三邊都精準貼齊，只有上方可能留白 ----------
-      // 原本這裡是「整批置中＋兩軸都留白」（跟 CSS object-fit:contain 一樣
-      // 的置中手法）。改成優先用「寬度」決定縮放比例：整批構圖的寬度直接
-      // 撐滿畫布寬度，左右兩側因此一定精準貼齊；縮放後的高度如果小於等於
-      // 畫布高度（絕大多數情況——手機直式輸出通常比實際視窗畫面更高、更窄，
-      // 構圖高度本來就撐不滿），就把整批構圖貼齊畫布下緣（照片本來就是
-      // 從上面掉下來、堆在下半部，貼齊下緣最符合視覺直覺），只有上方留白，
-      // 完全符合「左、右、下三邊都精準對齊」的需求。
-      // 極端情況（構圖高度按這個縮放比例算出來反而超過畫布高度，貼滿寬度
-      // 會讓上緣被裁掉一截）才退回改用高度為準縮放、水平置中——這種退回
-      // 完全是為了信守「絕不裁切任何物件」這個更高優先的原則，一般使用
-      // 情境幾乎不會踩到。
-      const scaleByWidth = canvasW / contentW;
-      let scale, offsetX, offsetY;
-      if(contentH * scaleByWidth <= canvasH){
-        scale = scaleByWidth;
-        offsetX = -minX * scale;           // 左緣精準貼齊 x=0
-        offsetY = canvasH - maxY * scale;  // 下緣精準貼齊 y=canvasH，上方留白
-      } else {
-        scale = canvasH / contentH;
-        offsetX = (canvasW - contentW * scale) / 2 - minX * scale; // 貼滿高度時改成水平置中，避免裁切
-        offsetY = canvasH - maxY * scale;
-      }
+        const canvas = document.createElement('canvas');
+        canvas.width = canvasW;
+        canvas.height = canvasH;
+        const ctx = canvas.getContext('2d');
+        // ---------- 底色改成跟擷取當下的堆疊背景顏色一致 ----------
+        // 原本這裡固定寫死 '#ffffff'，不管使用者當時把背景換成哪個顏色，
+        // 截出來的桌布底色永遠是白色，跟畫面上看到的不一致。改成直接讀
+        // pfBgColorIndex 目前指到哪一個顏色——白色現在也是 PHOTO_FALL_BG_COLORS
+        // 陣列本身的第一個顏色，pfBgColorIndex 永遠是合法的陣列索引，不再需要
+        // 額外判斷「-1 代表白色」這個特例，直接查陣列即可，跟畫面上
+        // photoFallStage 當下的背景色保持同步。
+        const pfCaptureBgColor = PHOTO_FALL_BG_COLORS[pfBgColorIndex];
+        ctx.fillStyle = pfCaptureBgColor;
+        ctx.fillRect(0, 0, canvasW, canvasH);
 
-      entries.forEach(entry => {
-        ctx.save();
-        ctx.translate(entry.cx * scale + offsetX, entry.cy * scale + offsetY);
-        ctx.rotate(entry.angle);
-        ctx.drawImage(
-          entry.img,
-          -entry.drawW * scale / 2, -entry.drawH * scale / 2,
-          entry.drawW * scale, entry.drawH * scale
-        );
-        ctx.restore();
+        // ---------- 對齊方式：左、右、下三邊都精準貼齊，只有上方可能留白 ----------
+        // 原本這裡是「整批置中＋兩軸都留白」（跟 CSS object-fit:contain 一樣
+        // 的置中手法）。改成優先用「寬度」決定縮放比例：整批構圖的寬度直接
+        // 撐滿畫布寬度，左右兩側因此一定精準貼齊；縮放後的高度如果小於等於
+        // 畫布高度（絕大多數情況——手機直式輸出通常比實際視窗畫面更高、更窄，
+        // 構圖高度本來就撐不滿），就把整批構圖貼齊畫布下緣（照片本來就是
+        // 從上面掉下來、堆在下半部，貼齊下緣最符合視覺直覺），只有上方留白，
+        // 完全符合「左、右、下三邊都精準對齊」的需求。
+        // 極端情況（構圖高度按這個縮放比例算出來反而超過畫布高度，貼滿寬度
+        // 會讓上緣被裁掉一截）才退回改用高度為準縮放、水平置中——這種退回
+        // 完全是為了信守「絕不裁切任何物件」這個更高優先的原則，一般使用
+        // 情境幾乎不會踩到。
+        const scaleByWidth = canvasW / contentW;
+        let scale, offsetX, offsetY;
+        if(contentH * scaleByWidth <= canvasH){
+          scale = scaleByWidth;
+          offsetX = -minX * scale;           // 左緣精準貼齊 x=0
+          offsetY = canvasH - maxY * scale;  // 下緣精準貼齊 y=canvasH，上方留白
+        } else {
+          scale = canvasH / contentH;
+          offsetX = (canvasW - contentW * scale) / 2 - minX * scale; // 貼滿高度時改成水平置中，避免裁切
+          offsetY = canvasH - maxY * scale;
+        }
+
+        entries.forEach(entry => {
+          // 這張圖片連 CORS 乾淨的版本都拿不到（伺服器完全不開放跨網域
+          // 讀取，極少見），優雅跳過、不畫這一張，不讓它拖累整批擷取。
+          if(!entry.safeImg) return;
+          ctx.save();
+          ctx.translate(entry.cx * scale + offsetX, entry.cy * scale + offsetY);
+          ctx.rotate(entry.angle);
+          ctx.drawImage(
+            entry.safeImg,
+            -entry.drawW * scale / 2, -entry.drawH * scale / 2,
+            entry.drawW * scale, entry.drawH * scale
+          );
+          ctx.restore();
+        });
+
+        // 輸出成 JPEG：因為畫布本身一開始就已經鋪滿白色底色（見上面
+        // ctx.fillRect），JPEG 不支援透明度也完全不受影響，畫面上看到的
+        // 白底不會變成黑底或其他顏色。品質從 0.92 調到 0.97——檔案會大一點，
+        // 但堆疊照片本身邊緣線條、細節較多，0.92 在放大檢視時偶爾看得出
+        // 壓縮的色塊感，0.97 幾乎跟原圖無異，換來的檔案大小增加在現在的
+        // 解析度下仍在合理範圍。
+        canvas.toBlob((blob) => {
+          if(!blob) return;
+          showWallpaperPreview(URL.createObjectURL(blob), pfCaptureBgColor); // 多帶一個擷取當下的底色，
+          // 讓 showWallpaperPreview() 判斷是否要把預覽彈窗底色切成淡灰色（見該函式說明）
+        }, 'image/jpeg', 0.97);
+      }).catch(err => {
+        // fetch CORS 乾淨版本這段是額外包出去的 Promise，跟外層 try/catch
+        // 是兩條獨立的錯誤處理路徑，這裡要自己接住、自己印警告，不然會變成
+        // 沒人處理的 unhandled rejection，一樣靜靜放棄、不影響堆疊模式本身。
+        console.warn('擷取堆疊畫面失敗：', err);
       });
-
-      // 輸出成 JPEG：因為畫布本身一開始就已經鋪滿白色底色（見上面
-      // ctx.fillRect），JPEG 不支援透明度也完全不受影響，畫面上看到的
-      // 白底不會變成黑底或其他顏色。品質從 0.92 調到 0.97——檔案會大一點，
-      // 但堆疊照片本身邊緣線條、細節較多，0.92 在放大檢視時偶爾看得出
-      // 壓縮的色塊感，0.97 幾乎跟原圖無異，換來的檔案大小增加在現在的
-      // 解析度下仍在合理範圍。
-      canvas.toBlob((blob) => {
-        if(!blob) return;
-        showWallpaperPreview(URL.createObjectURL(blob), pfCaptureBgColor); // 多帶一個擷取當下的底色，
-        // 讓 showWallpaperPreview() 判斷是否要把預覽彈窗底色切成淡灰色（見該函式說明）
-      }, 'image/jpeg', 0.97);
     } catch(err){
       // 擷取失敗（例如圖片解碼中途被瀏覽器某些安全限制擋下）就靜靜放棄，
       // 不影響堆疊模式本身任何既有功能，使用者大不了再長按一次。
