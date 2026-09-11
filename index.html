@@ -2974,6 +2974,14 @@
   // ---------- 讀取「e」圖片庫（撞牆換圖用）的快取 ----------
   // 邏輯跟上面 readDriveCache()/writeDriveCache() 完全一樣，只是換一組
   // key／TTL，兩份快取彼此獨立，互不覆蓋。
+  // 修法（對應上面「預算好的碰撞遮罩」段落）：這層 session 快取原本只存了
+  // 網址、沒有存對應的 Drive file id，導致只要命中這層快取，dvdEImageUrlToId
+  // 這張對照表就是空的——就算 masks.json 已經上傳、內容也是對的，
+  // requestAlphaMask() 一樣查不到 id，只能整批退回即時算 alpha mask，完全
+  // 沒吃到離線預算好的資料。這裡把 file id 一起存進快取、讀取時一併還原
+  // 回 dvdEImageUrlToId，讓命中 session 快取時 masks.json 查表照樣能生效，
+  // 即時運算只留給「masks.json 還沒抓回來」「新照片還沒收錄進 masks.json」
+  // 這兩種真正需要備援的情況。
   function readDvdECache(){
     try{
       const raw = sessionStorage.getItem(EDEN_E_CACHE_KEY);
@@ -2981,12 +2989,22 @@
       const parsed = JSON.parse(raw);
       if(!parsed || !Array.isArray(parsed.urls) || typeof parsed.savedAt !== 'number') return null;
       if(Date.now() - parsed.savedAt > EDEN_E_CACHE_TTL_MS) return null;
+      // 把快取裡存的 file id 還原回 dvdEImageUrlToId，讓 recordDvdEMaskMapping()／
+      // requestAlphaMask() 能繼續查到對應的 masks.json 資料。舊版（補這個欄位
+      // 之前）寫入的快取不會有 ids，用 length 比對保護，沒有就靜靜跳過，退回
+      // 原本「這批圖沒有 id 對照、全部即時算」的行為，不會壞掉。
+      if(Array.isArray(parsed.ids) && parsed.ids.length === parsed.urls.length){
+        parsed.urls.forEach((url, i) => {
+          const id = parsed.ids[i];
+          if(url && id) dvdEImageUrlToId.set(url, id);
+        });
+      }
       return parsed.urls;
     }catch(err){ return null; }
   }
-  function writeDvdECache(urls){
+  function writeDvdECache(urls, ids){
     try{
-      sessionStorage.setItem(EDEN_E_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), urls: urls }));
+      sessionStorage.setItem(EDEN_E_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), urls: urls, ids: ids || [] }));
     }catch(err){ /* 私密瀏覽模式等情況，忽略即可 */ }
   }
 
@@ -3100,15 +3118,17 @@
       // （手機版 1000px 疊上最大 656px、3x Retina 已經算是取捨後的下限，
       // 見上面該段完整說明），這裡的 1000px 純粹是桌機/平板這邊「原本明顯
       // 超額」的部分被修掉，不是同一種取捨。
+      const ids = [];
       const urls = data.files.map(file => {
         const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
         const size = '=s1000';
         const url = thumbBase ? (thumbBase + size) : `https://drive.google.com/uc?export=view&id=${file.id}`;
         dvdEImageUrlToId.set(url, file.id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
+        ids.push(file.id);
         return url;
       });
 
-      writeDvdECache(urls);
+      writeDvdECache(urls, ids); // 把 file id 一起存進 session 快取，見上面 readDvdECache() 的完整說明
       return urls;
     }catch(err){
       return [];
