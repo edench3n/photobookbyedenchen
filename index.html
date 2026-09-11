@@ -2052,6 +2052,20 @@
   // key 本身不綁定資料夾，同一把 key 可以查詢任何一個公開分享的資料夾）。
   const EDEN_E_FOLDER_ID = '1QXgbx5t6KC5q07gyhGL6tXqo_YUKzpKH';
 
+  // ---------- 「e」圖片庫的靜態備援來源（GitHub Actions 離線產生） ----------
+  // build-e-manifest.js 這支離線腳本會把 EDEN_E_FOLDER_ID 這個 Drive 資料夾
+  // 的圖片，下載進 repo 的 e-images/ 資料夾、並產生 e-manifest.json（key 沿用
+  // 原始 Drive file id，跟 masks.json 的對照表完全相容）。有了這份靜態檔案
+  // 之後，fetchDvdEImages() 會優先讀這裡，讀不到才退回下面原本「進站現查
+  // Drive API」那段（當成備援，一行都不用改）。
+  // 選 raw.githubusercontent.com 而不是 jsdelivr：jsdelivr 對 default branch
+  // 的內容會 CDN 快取到數小時甚至到七天（除非手動 purge），之後想換圖/换
+  // 遮罩時會多一道手動 purge 才會生效；raw.githubusercontent.com 的快取窗口
+  // 短很多（約 5 分鐘等級），跟上面 og-image 現在用的方式一致，行為好預測。
+  // 之後真的覺得慢，要退可以再換 jsdelivr。
+  const EDEN_E_MANIFEST_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-manifest.json';
+  const EDEN_E_IMAGES_BASE_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-images/';
+
   // ---------- 預算好的碰撞遮罩（離線用 Puppeteer 算好，放在同一個 Drive 資料夾） ----------
   // dvdEImageUrlToId：這次頁面載入真的打了 Drive API 查詢時，記錄「這張圖片
   // 的網址 → Drive file id」，供下面 recordDvdEMaskMapping() 用來把「裁切完
@@ -3008,6 +3022,46 @@
     }catch(err){ /* 私密瀏覽模式等情況，忽略即可 */ }
   }
 
+  // 讀 build-e-manifest.js 產生、由 GitHub Actions push 上去的 e-manifest.json，
+  // 回傳一組可以直接拿來當 <img src> 用的靜態網址陣列。manifest 的 key 沿用
+  // 原始 Drive file id（跟 masks.json 對照表相容），這裡連同 id 一起還原回
+  // dvdEImageUrlToId，讓 recordDvdEMaskMapping()／requestAlphaMask() 照樣能
+  // 查表命中預算好的遮罩，不會因為改走靜態檔案就少了這個優化。
+  // manifest 抓不到、格式不對、或是空的，一律回傳 null——呼叫端
+  // （fetchDvdEImages()）看到 null 就會退回原本「進站現查 Drive API」那段，
+  // 當成備援，不會讓整個網站因為這個額外功能而壞掉。
+  async function fetchDvdEImagesFromManifest(){
+    if(!EDEN_E_MANIFEST_URL || !EDEN_E_IMAGES_BASE_URL) return null;
+    try{
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      let res;
+      try{
+        res = await fetch(EDEN_E_MANIFEST_URL, { signal: controller.signal, priority: 'low' });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if(!res.ok) return null;
+      const manifest = await res.json();
+      const entries = Object.keys(manifest || {});
+      if(entries.length === 0) return null;
+
+      const ids = [];
+      const urls = entries.map(id => {
+        const fileName = manifest[id];
+        const url = EDEN_E_IMAGES_BASE_URL + fileName;
+        dvdEImageUrlToId.set(url, id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
+        ids.push(id);
+        return url;
+      });
+
+      writeDvdECache(urls, ids); // 把 file id 一起存進 session 快取，讀取路徑跟 Drive 現查那段共用
+      return urls;
+    }catch(err){
+      return null;
+    }
+  }
+
   // 抓「e」圖片庫資料夾內所有 PNG／圖片檔案，回傳一組可以直接拿來當
   // <img src> 用的網址陣列。刻意跟上面照片牆的 fetchDriveImages() 分開
   // 寫成兩個獨立函式：這裡只需要「網址」，不需要標題、長寬比這些照片牆
@@ -3017,13 +3071,19 @@
   // 回傳空陣列——呼叫端（cycleDvdEImage）看到空陣列就會直接放棄換圖，
   // 維持原本內建的那張圖片，不會讓整個網站因為這個額外功能而壞掉。
   async function fetchDvdEImages(){
+    const cached = readDvdECache();
+    if(cached) return cached;
+
+    // 優先吃靜態 manifest（GitHub Actions 離線產生），抓得到就直接用、
+    // 不再進站現查 Drive API；抓不到（manifest 還沒 build、暫時性網路
+    // 問題等）才退回下面原本的 Drive API 現查那段，行為完全不變。
+    const fromManifest = await fetchDvdEImagesFromManifest();
+    if(fromManifest) return fromManifest;
+
     if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
        !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
       return [];
     }
-
-    const cached = readDvdECache();
-    if(cached) return cached;
 
     try{
       const q = encodeURIComponent(`'${EDEN_E_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
