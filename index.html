@@ -15281,20 +15281,19 @@
       // 用 setDvdBounceImageSrc() 原本就有的「畫面外先解碼好才切換」機制
       // 無縫換成正式畫質，使用者不會感覺到任何跳動。
       const quickUrl = /=s\d+$/.test(firstUrl) ? firstUrl.replace(/=s\d+$/, '=s400') : firstUrl;
-      // ---------- 修正：「剛進站撞在圖片周圍的透明區域上，不是實際去背邊緣」----------
-      // 成因：quickUrl 從來沒有被送進 trimTransparentImage()，
-      // dvdETrimmedSrcToId（requestAlphaMask() 查離線遮罩用的對照表，見
-      // recordDvdEMaskMapping() 的完整說明）裡從頭到尾沒有 quickUrl 的
-      // 紀錄——即使 masks.json 早就抓回來了，用 quickUrl 當 src 查表還是
-      // 查不到，只能先退回「遮罩還沒準備好」的矩形外框行為（見
-      // computeDvdPixelInsets() 的說明），直到背景裁切出正式版本才會
-      // 換成精確判斷。這正是「剛進站那幾秒特別容易撞在留白上」的主因。
-      // 修法：quickUrl 只是把 firstUrl 換了個尺寸參數，圖案本身（去背
-      // 輪廓）跟 firstUrl 是同一張圖，而遮罩座標本來就正規化成 0..1、不
-      // 受解析度影響，可以直接沿用 firstUrl 對應的同一筆離線資料，不用
-      // 等到正式裁切版本才查得到。
-      const firstImageId = dvdEImageUrlToId.get(firstUrl);
-      if(firstImageId) dvdETrimmedSrcToId.set(quickUrl, firstImageId);
+      // ---------- 修正：quickUrl 不能直接沿用離線遮罩資料 ----------
+      // 曾經在這裡讓 quickUrl 直接查表沿用 firstUrl 對應的離線遮罩，理由
+      // 是「兩者是同一張圖、遮罩座標是正規化的、不受解析度影響」——但這個
+      // 假設漏算了一件事：masks.json 裡的遮罩座標系統對應的是「裁切掉
+      // 四周透明留白之後」的那個框（見 build-masks.js 的完整說明），不是
+      // 「整張原始圖」的框。quickUrl 從頭到尾沒有被裁切過，它顯示出來的
+      // 框（dvdW/dvdH）是「整張原圖」的大小，直接套用「裁切後」座標系統
+      // 算出來的遮罩，兩個框對不上，會讓碰撞範圍跑位、變成「圖案明明還
+      // 沒碰到就已經疊在一起」——這正是這一版回報的疊圖成因。
+      // 修法：quickUrl 這極短暫的過渡期間，維持原本「遮罩還沒準備好就
+      // 退回矩形外框判斷」的安全行為（不查表、不即時算也不用等），等
+      // 背景裁切完成、真正換上裁切乾淨的正式版本時，requestAlphaMask()
+      // 才會用 dvdETrimmedSrcToId 查到跟這個版本座標系統一致的離線遮罩。
 
       // ---------- 修正：「手機版剛進站，第一次撞牆永遠不會換照片」----------
       // 成因：撞牆真的能換到「不一樣的一張」，前提是已就緒池
@@ -15360,10 +15359,8 @@
         const quickIdx = qi; // 迴圈變數本身在閉包裡會變動，先固定成獨立變數給下面的 closure 用
         const urlN = orderedUrls[quickIdx];
         const quickUrlN = /=s\d+$/.test(urlN) ? urlN.replace(/=s\d+$/, '=s400') : urlN;
-        // 理由同上面 quickUrl／firstImageId 那段的完整說明：quickUrlN 只是
-        // urlN 換了尺寸參數，同一張圖可以直接沿用同一筆離線遮罩資料。
-        const quickImageIdN = dvdEImageUrlToId.get(urlN);
-        if(quickImageIdN) dvdETrimmedSrcToId.set(quickUrlN, quickImageIdN);
+        // 這些 quickUrlN 一樣是未裁切的過渡版本，不直接沿用離線遮罩——
+        // 理由同上面 quickUrl 那段的完整說明（座標系統對不上，會疊圖）。
         const offscreenN = new Image();
         offscreenN.src = quickUrlN;
         const markReadyN = () => {
