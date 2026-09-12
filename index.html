@@ -7207,13 +7207,16 @@
   // 解析度換來的是每一影格取樣時的運算量大幅降低，物件飛得再快也不會
   // 拖慢畫面。
   // 效能較弱裝置（見上面 DVD_LOW_POWER_DEVICE 的完整說明）把遮罩取樣
-  // 格數上限調降一階：這個數字連同下面 PF_ALPHA_MASK_FULL_CAP_DIM 是
-  // buildAlphaMaskFromSourceChunked() 要讀取／掃描的像素總量的主要決定
-  // 因素（大致是這兩個數字的平方量級），調降能讓每一次建立遮罩的運算
-  // 量明顯減少，換來的精細度差異在撞牆判斷這個用途上肉眼感覺不出來。
-  // 桌機、或原本就有真正 requestIdleCallback 且核心數足夠的裝置，維持
-  // 原本數值不變，畫質/精細度完全不受影響。
-  const PF_ALPHA_MASK_MAX_DIM = DVD_LOW_POWER_DEVICE ? 48 : 72; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能
+  // ---------- 大幅效能優化：不追求拖曳手感，優先求快 ----------
+  // 這個常數同時決定了「碰撞形狀精細度」跟「poly-decomp 要拆出幾片凸多邊形」
+  // 兩件事：遮罩解析度越高，描出來的輪廓線頂點越多，poly-decomp 為了貼合
+  // 這些細節，切出來的凸多邊形碎片也跟著等比例變多——這正是桌機拖曳多張
+  // 照片互相碰撞時，接觸點暴增、卡到誇張的根本原因（見 startPhotoFallEngine()
+  // 那段完整說明）。原本桌機用 72、手機用 48，這裡直接大砍到 40／28：
+  // 碰撞邊界會變得比較粗糙（貼合度不像原本那麼精準地咬合每個凹陷細節），
+  // 但完全不影響「照片掉落、堆疊、拖曳」這整套功能本身，只是形狀邊界略微
+  // 簡化，肉眼在快速拖曳/碰撞的當下幾乎感覺不到差異。
+  const PF_ALPHA_MASK_MAX_DIM = DVD_LOW_POWER_DEVICE ? 28 : 40; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能——這裡刻意犧牲精細度換效能
   const PF_ALPHA_MASK_THRESHOLD = 10; // 跟 DVD_TRIM_ALPHA_THRESHOLD 用同一個容忍值，判斷是否為「有畫到東西」
   const PF_ALPHA_MASK_CELL_MAJORITY = 0.5; // 縮小成遮罩格子時，這一格裡「有畫到東西」的像素要佔多少比例才算整格實心——見下面 buildAlphaMaskFromSourceChunked() 內的完整說明，避免只沾到一點顏色的邊緣格被整格補滿，讓遮罩邊界比原圖實際邊緣多凸出一圈
 
@@ -7861,7 +7864,7 @@
   // Body.create({parts}) 組成複合物體）。任何一步失敗（poly-decomp 還沒
   // 載入好、這張圖的輪廓數學上分解不了……）一律回傳 null，呼叫端
   // buildFallItemBody() 會自動退回舊版網格矩形法，不會讓功能整個壞掉。
-  const PF_POLY_MIN_CHUNK_AREA = 6; // px²，分解出來面積小於這個值的碎片直接丟棄，避免解算器多花力氣處理幾乎沒有物理意義的細小接觸面
+  const PF_POLY_MIN_CHUNK_AREA = 30; // px²，分解出來面積小於這個值的碎片直接丟棄，避免解算器多花力氣處理幾乎沒有物理意義的細小接觸面——原本是 6，這裡調高到 30，配合上面調低的遮罩解析度，進一步削減複合物體的 part 數量，換取大幅效能提升
   function buildFallItemPolyParts(Matter, maskEntry, x, y, w, h, partOptions){
     if(!window.decomp || typeof window.decomp.quickDecomp !== 'function') return null;
     try{
@@ -11711,26 +11714,20 @@
     // 2）：這個數字管的是拖曳用的 MouseConstraint 這條「彈簧」本身解算得
     // 多準，調高可以讓抓著的照片更緊跟著滑鼠／手指本身的位置，減少因為
     // 彈簧本身沒解準、疊加出額外一層晃動或穿透感。
-    const pfMobile = isDetailMobile();
     pfEngine = Engine.create({
-      // ---------- 效能優化：桌機迭代次數從 14/8/4 調降到 10/6/3 ----------
-      // 原本為了修「拖曳照片去頂別張照片，會先滑進去才慢慢彈開」的手感，
-      // 把桌機迭代次數從 Matter.js 預設的 6/4/2 一路調到 14/8/4（總計
-      // position+velocity 從預設的 10 拉高到 22，超過 2 倍）。問題是這批
-      // 照片的碰撞形狀是 poly-decomp 拆出來的複合多邊形（見上面
-      // buildFallItemBody() 的完整說明），拖曳造成多張照片同時深度重疊時，
-      // 接觸點數量本來就遠比一般矩形碰撞多，迭代次數又疊加在這個已經放大
-      // 的接觸點數量上，兩者相乘才是桌機拖曳碰撞「誇張」卡頓的根本原因。
-      // 調降到 10/6/3（總計 16，介於預設 10 跟原本 22 之間、更靠近預設）：
-      // 犧牲一點點「立刻擋住不滑進去」的手感精準度，換取拖曳多物件碰撞
-      // 時單一影格的運算量明顯下降。可以用上面新加的 pfdebug 量測工具
-      // （網址加 ?pfdebug）實際比較調整前後 Engine.update() 的平均/最大
-      // 毫秒數，如果手感回滑得太明顯，可以再往上微調（例如 12/7/3）找一個
-      // 兩邊都能接受的平衡點。手機端維持原本的 8/5/3 不變——手機本來就沒有
-      // 明顯卡頓回報，不需要跟著降。
-      positionIterations: pfMobile ? 8 : 10,
-      velocityIterations: pfMobile ? 5 : 6,
-      constraintIterations: pfMobile ? 3 : 3,
+      // ---------- 大幅效能優化：不追求拖曳手感，優先求快 ----------
+      // 使用者明確表示不需要「撞到立刻擋住」的精準手感，這裡直接把迭代
+      // 次數砍到接近 Matter.js 官方最低可用範圍（預設本身是 6/4/2），
+      // 桌機／手機統一用同一組低數字，不再為了桌機的拖曳手感特別調高。
+      // 配合上面 PF_ALPHA_MASK_MAX_DIM／PF_POLY_MIN_CHUNK_AREA 調整後
+      // 已經大幅減少的碰撞部件數量，這裡再把「每個接觸點要解算幾輪」
+      // 也砍低，兩件事一起大幅降低拖曳多張照片碰撞時的運算量。代價是
+      // 重疊修正會變慢（幾張照片深度重疊時，可能要多花幾影格才會被
+      // 完全推開分離，過程中會看到短暫的「滑一下才彈開」），這是
+      // 用手感換效能的直接取捨。
+      positionIterations: 4,
+      velocityIterations: 3,
+      constraintIterations: 2,
       enableSleeping: true,
     });
     pfEngine.gravity.y = PHOTO_FALL_GRAVITY;
