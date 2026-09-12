@@ -11794,6 +11794,76 @@
       }
     });
 
+    // ---------- 新增修正：極少數「疊超深」沒被上面深度判斷抓到、以及靜止前
+    // 那一兩秒偶爾還有極細微殘留抖動 ----------
+    // 上面 PF_STUCK_OVERLAP_DEPTH 依賴 Matter.js 算出來的精確穿透深度
+    // （SAT 演算法）。SAT 在「兩個物體重疊得非常深」（例如剛好整張疊在
+    // 另一張正上方，不是一般貼合）的極端狀況下，本身有個已知限制：算出
+    // 來的穿透深度可能反而失真、被算成一個偏小的數字，導致上面那道
+    // 门檻判斷誤以為「沒有真的卡住」而放行，同時也可能讓物體在快睡著的
+    // 臨界點附近，因為深度數字本身有一點點浮動誤差，連續好幾影格在
+    // 「差一點達標／被吵醒一點點」之間來回，肉眼看起來就是靜止前有一點
+    // 殘留抖動。
+    // 這裡加兩道保險，兩道都刻意做得保守（門檻拉高、低頻率），避免像
+    // 最早那版 AABB 判斷一樣，反而變成新的抖動來源：
+    //
+    // 保險一：物體本身速度／角速度已經小到肉眼絕對感知不到的程度，卻因為
+    // 浮點數尾數殘留，一直沒有低於 Matter.js 內建判斷「可以睡覺」的門檻——
+    // 直接把它歸零，讓它乾脆一次到位進入睡眠，不再有「差一點達標又被沖
+    // 回去」的來回擺盪。只處理已經幾乎完全靜止、且沒有被拖曳中的物體，
+    // 真正還在掉落／碰撞／被拖曳的物體，速度遠高於這個門檻，不會被這裡
+    // 影響到，手感完全不變。
+    const PF_SETTLE_SPEED_EPS = 0.02; // 世界座標（≈px）／每影格，遠低於肉眼能感知的移動量
+    const PF_SETTLE_ANGSPEED_EPS = 0.0006; // 弧度／每影格
+    Events.on(pfEngine, 'afterUpdate', () => {
+      const draggedNow = pfMouseConstraint.body;
+      const settleIfNegligible = (body) => {
+        if(!body || body.isSleeping || body === draggedNow) return;
+        const v = body.velocity, w = body.angularVelocity;
+        if(Math.abs(v.x) < PF_SETTLE_SPEED_EPS && Math.abs(v.y) < PF_SETTLE_SPEED_EPS && Math.abs(w) < PF_SETTLE_ANGSPEED_EPS){
+          Matter.Body.setVelocity(body, { x: 0, y: 0 });
+          Matter.Body.setAngularVelocity(body, 0);
+        }
+      };
+      pfItems.forEach(({ body }) => settleIfNegligible(body));
+      if(pfDvdItem) settleIfNegligible(pfDvdItem.body);
+    });
+    //
+    // 保險二：每隔一段時間（刻意不是每影格，這是唯一一段兩兩互相比對的
+    // O(n^2) 邏輯，拉開頻率能把成本壓到幾乎量不到）用外接矩形（bounds，
+    // Matter.js 每影格都會算好、不用自己重算）粗略掃一次「有沒有睡著的
+    // 物體，重疊比例高到不正常」。門檻刻意設在「重疊面積佔較小那顆一半
+    // 以上」——一般斜著貼在一起的照片，因為外接矩形本來就比實際歪斜的
+    // 圖形範圍大一圈，重疊比例通常遠低於這個門檻，不會被誤判成卡住，
+    // 也就不會重新踩到最早那版「AABB 一相交就判定卡住」的抖動陷阱；只有
+    // 真的整張疊在另一張正上方那種明顯異常的狀況，才會超過這個比例。
+    let pfStuckSweepCounter = 0;
+    const PF_STUCK_SWEEP_INTERVAL = 45; // 影格數，約每 0.75 秒才掃一次
+    const PF_STUCK_OVERLAP_RATIO = 0.5;
+    Events.on(pfEngine, 'afterUpdate', () => {
+      pfStuckSweepCounter++;
+      if(pfStuckSweepCounter % PF_STUCK_SWEEP_INTERVAL !== 0) return;
+      const all = pfDvdItem ? pfItems.concat([pfDvdItem]) : pfItems;
+      for(let i = 0; i < all.length; i++){
+        const bodyA = all[i].body;
+        for(let j = i + 1; j < all.length; j++){
+          const bodyB = all[j].body;
+          if(!bodyA.isSleeping && !bodyB.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理
+          const ax0 = bodyA.bounds.min.x, ax1 = bodyA.bounds.max.x, ay0 = bodyA.bounds.min.y, ay1 = bodyA.bounds.max.y;
+          const bx0 = bodyB.bounds.min.x, bx1 = bodyB.bounds.max.x, by0 = bodyB.bounds.min.y, by1 = bodyB.bounds.max.y;
+          const ix = Math.min(ax1, bx1) - Math.max(ax0, bx0);
+          const iy = Math.min(ay1, by1) - Math.max(ay0, by0);
+          if(ix <= 0 || iy <= 0) continue; // 外接矩形根本沒相交，不用算比例
+          const overlapArea = ix * iy;
+          const areaA = (ax1 - ax0) * (ay1 - ay0);
+          const areaB = (bx1 - bx0) * (by1 - by0);
+          if(overlapArea / Math.min(areaA, areaB) < PF_STUCK_OVERLAP_RATIO) continue; // 只是靠著、比例不夠高，不當作卡住
+          if(bodyA.isSleeping) Matter.Sleeping.set(bodyA, false);
+          if(bodyB.isSleeping) Matter.Sleeping.set(bodyB, false);
+        }
+      }
+    });
+
     // ---------- 修正：「抓起下面那張照片移走，上面原本靠著的照片沒有掉下來，
     // 卡在半空中」----------
     // 成因：Matter.js 的 isSleeping 是「這顆 body 完全跳過這一步的物理運算」
@@ -11914,15 +11984,28 @@
     document.body.style.overflow = 'hidden';
 
     pfItems = [];
+    // ---------- 修正：「照片明明已經靜止，畫面看起來卻還在極輕微地抖」的
+    // 其中一個成因 ----------
+    // 這裡每一影格都直接把 Matter.js 算出來的原始浮點數座標／角度整串
+    // 丟進 translate()/rotate()，小數點後位數很長。即使物體其實已經完全
+    // 停止（速度趨近 0），浮點數運算本身仍會在極小範圍內有尾數飄動，
+    // 對瀏覽器排版引擎來說，只要這串 transform 文字跟上一影格不是「完全
+    // 一模一樣」，就會被當成「這個元素這一影格有變化」，照樣觸發重新
+    // 合成——肉眼看到的就是明明沒在動、邊緣卻在極輕微地閃動。
+    // 修法：四捨五入到小數點後 2 位（位置）／4 位（角度），跟上面第 5164
+    // 行 preview 頁滑動用的寫法同一套慣例。這個精細度遠超過肉眼能分辨的
+    // 範圍，正常移動／掉落／被拖曳中的物體看起來不會有任何差異；但物體
+    // 真正靜止時，每影格四捨五入後的結果會變成完全相同的字串，瀏覽器可以
+    // 正確判斷「這個元素沒有變化」而跳過重新合成，抖動就會消失。
     pfSyncHandler = () => {
       pfItems.forEach(({ body, el, w, h }) => {
         const c = pfBoxCenter(body);
-        el.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${body.angle}rad)`;
+        el.style.transform = `translate(${(c.x - w / 2).toFixed(2)}px, ${(c.y - h / 2).toFixed(2)}px) rotate(${body.angle.toFixed(4)}rad)`;
       });
       if(pfDvdItem){
         const { body, w, h } = pfDvdItem;
         const c = pfBoxCenter(body);
-        dvdBounce.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${body.angle}rad)`;
+        dvdBounce.style.transform = `translate(${(c.x - w / 2).toFixed(2)}px, ${(c.y - h / 2).toFixed(2)}px) rotate(${body.angle.toFixed(4)}rad)`;
       }
     };
     // 效能修正（手機版堆疊頁面 lag／fps 掉很低的根本成因）：原本這裡是
