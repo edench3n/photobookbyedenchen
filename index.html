@@ -11818,26 +11818,45 @@
     // 這裡加兩道保險，兩道都刻意做得保守（門檻拉高、低頻率），避免像
     // 最早那版 AABB 判斷一樣，反而變成新的抖動來源：
     //
-    // 保險一：物體本身速度／角速度已經小到肉眼絕對感知不到的程度，卻因為
-    // 浮點數尾數殘留，一直沒有低於 Matter.js 內建判斷「可以睡覺」的門檻——
-    // 直接把它歸零，讓它乾脆一次到位進入睡眠，不再有「差一點達標又被沖
-    // 回去」的來回擺盪。只處理已經幾乎完全靜止、且沒有被拖曳中的物體，
-    // 真正還在掉落／碰撞／被拖曳的物體，速度遠高於這個門檻，不會被這裡
-    // 影響到，手感完全不變。
-    const PF_SETTLE_SPEED_EPS = 0.02; // 世界座標（≈px）／每影格，遠低於肉眼能感知的移動量
-    const PF_SETTLE_ANGSPEED_EPS = 0.0006; // 弧度／每影格
+    // 保險一：原本這裡的門檻（PF_SETTLE_SPEED_EPS）抓得太保守，導致實測後
+    // 還是會持續抖動——真正成因不是浮點數尾數殘留這麼單純，是碰撞回彈
+    // 係數（restitution，上面設定的 0.3）本身的特性：重力每一步都會再
+    // 加一點點速度回去，回彈係數又會把這點速度的一部分「彈」回來，兩者
+    // 對「已經趴平、不會再繼續掉落」的照片來說，會形成一個幾乎沒完沒了
+    // 的極小回彈迴圈——單獨每一步的幅度小到肉眼幾乎看不出來，但因為
+    // 永遠沒辦法完全收斂到 0，也就永遠達不到 Matter.js 內建判斷「可以
+    // 睡覺」所需要的那個更嚴格的門檻，導致理論上早該定住的照片，實際上
+    // 永遠不會真正入睡，一直在原地做極小幅度的殘留彈跳，看起來就是
+    // 「靜止時還在抖」。
+    // 修法：不再只看「這一影格夠不夠慢」，改成自己追蹤「已經連續多少
+    // 影格，速度都維持在很小的範圍內」——只有真的已經穩定趴著超過一段
+    // 時間（約 1/3 秒）的物體，才由我們自己強制叫它睡覺，不用再等
+    // Matter.js 自己那個永遠達不到的門檻。強制睡著之後效果跟 Matter.js
+    // 自己判斷睡著完全相同，上面所有喚醒機制（拖曳、新照片撞上來、深度
+    // 判斷、重疊比例判斷）都還是正常生效，不會變成「睡死了叫不醒」。
+    // 剛落地、真的還在彈跳中的照片，速度忽大忽小、達不到「連續」這個
+    // 條件，計數器會一直被重置，不會被提早打斷，彈跳手感不受影響。
+    const PF_FORCE_SLEEP_SPEED = 0.6; // 世界座標（≈px）／每影格——比 Matter.js 內建睡眠門檻寬鬆，足以蓋過殘留回彈的幅度，但仍遠低於一般移動看得出來的速度
+    const PF_FORCE_SLEEP_ANGSPEED = 0.004; // 弧度／每影格
+    const PF_FORCE_SLEEP_FRAMES = 20; // 連續幾影格都維持低速，才強制睡著，約 1/3 秒（60fps）
     Events.on(pfEngine, 'afterUpdate', () => {
       const draggedNow = pfMouseConstraint.body;
-      const settleIfNegligible = (body) => {
+      const checkForceSleep = (body) => {
         if(!body || body.isSleeping || body === draggedNow) return;
+        if(!body.plugin) body.plugin = {};
         const v = body.velocity, w = body.angularVelocity;
-        if(Math.abs(v.x) < PF_SETTLE_SPEED_EPS && Math.abs(v.y) < PF_SETTLE_SPEED_EPS && Math.abs(w) < PF_SETTLE_ANGSPEED_EPS){
+        const isLow = Math.abs(v.x) < PF_FORCE_SLEEP_SPEED && Math.abs(v.y) < PF_FORCE_SLEEP_SPEED && Math.abs(w) < PF_FORCE_SLEEP_ANGSPEED;
+        if(!isLow){ body.plugin.pfLowMotionFrames = 0; return; }
+        body.plugin.pfLowMotionFrames = (body.plugin.pfLowMotionFrames || 0) + 1;
+        if(body.plugin.pfLowMotionFrames >= PF_FORCE_SLEEP_FRAMES){
           Matter.Body.setVelocity(body, { x: 0, y: 0 });
           Matter.Body.setAngularVelocity(body, 0);
+          Matter.Sleeping.set(body, true);
+          body.plugin.pfLowMotionFrames = 0;
         }
       };
-      pfItems.forEach(({ body }) => settleIfNegligible(body));
-      if(pfDvdItem) settleIfNegligible(pfDvdItem.body);
+      pfItems.forEach(({ body }) => checkForceSleep(body));
+      if(pfDvdItem) checkForceSleep(pfDvdItem.body);
     });
     //
     // 保險二：每隔一段時間（刻意不是每影格，這是唯一一段兩兩互相比對的
