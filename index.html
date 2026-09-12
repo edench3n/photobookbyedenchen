@@ -2095,6 +2095,40 @@
   // 不等 init()。找不到檔案、解析失敗、或任何一步出錯，都直接回傳 null，
   // 下面 requestAlphaMask() 查不到就會照舊退回即時算，不影響網站運作。
   let precomputedEMasks = null;
+
+  // ---------- 精細度提升：masks.json 的 mask 欄位改成「位元打包」的 base64
+  // 字串，不是逐格 0/1 數字陣列 ----------
+  // 既然是離線算好、只要正確抓回來就不用再現算，網格解析度可以拉得比原本
+  // 「即時運算」那組數值精細很多（見 build-masks.js 內完整說明），但解析度
+  // 拉高、格數是原本的 8~9 倍，如果還是每一格存一個 JSON 數字（逗號、換行
+  // 都要算進檔案大小），masks.json 體積會跟著等比例膨脹。這裡改成每一格只
+  // 用 1 個 bit 表示（8 格塞進 1 個 byte），再整包轉成 base64 字串存進 JSON
+  // ——同樣的格數，檔案大小大約只剩原本「數字陣列」寫法的 1/20 左右。
+  // 下面把 base64 字串還原成跟以前一樣的「每格一個 0/1」陣列（Uint8Array），
+  // 只在這裡解一次，後面 requestAlphaMask() 等既有程式碼完全不用改，讀到的
+  // pre.mask 用法跟以前一模一樣。
+  function decodeMaskBits(base64, w, h){
+    if(typeof base64 !== 'string') return base64; // 舊格式（還沒改版的 masks.json）：本來就是陣列，原樣送回去，不強制要求一定要是新格式
+    const binary = atob(base64);
+    const total = w * h;
+    const out = new Uint8Array(total);
+    for(let i = 0; i < total; i++){
+      const byte = binary.charCodeAt(i >> 3);
+      out[i] = (byte >> (i & 7)) & 1;
+    }
+    return out;
+  }
+  function decodePrecomputedMasksJson(json){
+    const map = new Map();
+    Object.keys(json).forEach(id => {
+      const entry = json[id];
+      if(entry && entry.mask && entry.w && entry.h){
+        entry.mask = decodeMaskBits(entry.mask, entry.w, entry.h);
+      }
+      map.set(id, entry);
+    });
+    return map;
+  }
   // ---------- 修正：masks.json 明明已經離線算好放雲端，抓起來還是很花時間 ----------
   // 原本這裡一律進站現查 Drive API，而且是「先查檔名拿 file id、再用 id
   // 另外抓一次內容」依序兩趟網路往返，兩次都刻意標成 priority:'low'，會被
@@ -2117,8 +2151,7 @@
       }
       if(res.ok){
         const json = await res.json();
-        const map = new Map();
-        Object.keys(json).forEach(id => map.set(id, json[id]));
+        const map = decodePrecomputedMasksJson(json);
         precomputedEMasks = map;
         return map;
       }
@@ -2145,8 +2178,7 @@
       const contentRes = await fetch(contentUrl, { priority: 'low' });
       if(!contentRes.ok) return null;
       const json = await contentRes.json();
-      const map = new Map();
-      Object.keys(json).forEach(id => map.set(id, json[id]));
+      const map = decodePrecomputedMasksJson(json);
       precomputedEMasks = map;
       return map;
     }catch(err){
