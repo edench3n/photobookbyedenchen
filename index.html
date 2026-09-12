@@ -1,188 +1,1404 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light only">
+<title>photobook by edenchen</title>
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="edenchen">
+<meta property="og:title" content="edenchen">
+<meta property="og:description" content="edenchen">
+<meta property="og:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png?v=5">
+<meta property="og:image:width" content="200">
+<meta property="og:image:height" content="200">
+<meta property="og:url" content="https://www.edench3n.com/">
+
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="edenchen">
+<meta name="twitter:description" content="edenchen">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png?v=5">
+
+<link rel="icon" href="/favicon-32x32.png?v=3" sizes="32x32" type="image/png">
+<link rel="icon" href="/favicon-16x16.png?v=3" sizes="16x16" type="image/png">
+<link rel="icon" href="/favicon-48x48.png?v=3" sizes="48x48" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2" sizes="180x180">
+<link rel="manifest" href="/site.webmanifest?v=2">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://drive.google.com">
+<link rel="preconnect" href="https://lh3.googleusercontent.com" crossorigin>
+<link rel="preconnect" href="https://www.googleapis.com" crossorigin>
+
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Stack+Sans+Text:wght@200..700&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Stack+Sans+Text:wght@200..700&display=swap" rel="stylesheet"></noscript>
+<style>
+  :root{
+    --header-h: 120px;
+    --gap: 18px;
+    --edge: 48px;
+    --fs-title-gap: 170px;
+    --header-font-size: clamp(12.28px, 10.27px + 0.59vw, 16.73px);
+    color-scheme: light only;
+  }
+  *{ box-sizing: border-box; }
+
+  html, body, *{
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html, body {
+    margin:0; padding:0;
+    background:#ffffff;
+    color:#000000;
+    font-family: 'Stack Sans Text', sans-serif;
+    font-weight:350;
+    -webkit-font-smoothing: antialiased;
+    overflow-x:hidden;
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  html{
+    scrollbar-gutter: stable;
+    overflow-y: scroll;
+  }
+
+  a, button, .grid-item, .header-left, .nav-arrow {
+    font-family:inherit;
+    font-weight:inherit;
+  }
+
+  .fixed-header{
+    position:fixed;
+    top:0; left:0; right:0;
+    z-index:1000;
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap: var(--gap);
+    padding: 36px var(--edge) 0 var(--edge);
+    pointer-events:none;
+    transition: opacity .3s ease;
+  }
+  .fixed-header .header-left,
+  .fixed-header .header-preview,
+  .fixed-header .header-right{
+    color:#000000;
+    transition: color .22s ease;
+    font-size: var(--header-font-size);
+    line-height:1.5;
+    pointer-events:auto;
+    white-space:pre-line;
+  }
+  .fixed-header .header-left{
+    letter-spacing:0.014em;
+    white-space:nowrap;
+    flex-shrink:0;
+    position:relative;
+    left: var(--header-left-nudge, 0px);
+    opacity:0;
+    transition: opacity .2s ease;
+  }
+  .fixed-header .header-left.positioned{ opacity:1; }
+  .fixed-header .header-preview{
+    letter-spacing:0.014em;
+    white-space:nowrap;
+    flex-shrink:0;
+    position:relative;
+    left: var(--preview-nudge, 0px);
+    opacity:0;
+    transition: opacity .2s ease;
+  }
+  .fixed-header .header-preview.positioned{ opacity:1; }
+  @media (hover: hover){
+    .fixed-header .header-preview.positioned:hover{ opacity:0.5; }
+  }
+  .fixed-header .header-right{
+    text-align:left;
+    letter-spacing:0.014em;
+    flex-shrink:0;
+    position:relative;
+    left: var(--header-right-nudge, 0px);
+    opacity:0;
+    transition: opacity .2s ease;
+  }
+  .fixed-header .header-right.positioned{ opacity:1; }
+
+  .page-clock{
+    display:none !important;
+    position:fixed;
+    left:0; right:0;
+    bottom:36px;
+    z-index:900;
+    pointer-events:none;
+    opacity:0;
+    transition: opacity .2s ease;
+  }
+  .page-clock.positioned{ opacity:1; }
+  .page-clock-year,
+  .page-clock-monthday,
+  .page-clock-time{
+    position:absolute;
+    bottom:0;
+    color:#000000;
+    font-size: var(--header-font-size);
+    line-height:1.5;
+    letter-spacing:0.014em;
+    white-space:nowrap;
+  }
+  .page-clock-year{ left: var(--clock-year-left, var(--edge)); }
+  .page-clock-monthday{ left: var(--clock-monthday-left, var(--edge)); }
+  .page-clock-time{ left: var(--clock-time-left, var(--edge)); }
+
+  .collab-line-break{ display:none; }
+  .collab-line3{
+    display:inline-block;
+    margin-top:-0.45em;
+  }
+
+  .fixed-header .header-right.collab-measure{
+    position:absolute;
+    visibility:hidden;
+    opacity:0;
+    pointer-events:none;
+    left:0;
+    top:0;
+    width:max-content;
+    transition:none;
+  }
+
+  #galleryPage{
+    position:relative;
+    min-height:100vh;
+    padding: calc(var(--header-h)) var(--edge) 140px var(--edge);
+    transition: opacity .5s ease, filter .5s ease;
+  }
+  .grid{
+    display:grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: var(--gap) var(--gap);
+    row-gap: var(--gap);
+  }
+  .grid-item{
+    position:relative;
+    touch-action: manipulation;
+  }
+  .grid-item .thumb-wrap{
+    width:100%;
+    aspect-ratio: 1 / 1;
+    overflow:visible;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    position:relative;
+  }
+  .grid-item img{
+    max-width:100%;
+    max-height:100%;
+    width:auto;
+    height:auto;
+    object-fit:contain;
+    display:block;
+    transform: scale(1);
+    transition: opacity .3s ease;
+    will-change: transform;
+    -webkit-user-drag:none;
+    -webkit-touch-callout:none;
+    opacity:0;
+  }
+  .grid-item img.loaded{ opacity:1; }
+  .grid-item .idx{
+    display:none;
+    position:absolute;
+    left:0; top:0;
+    font-size:9px;
+    letter-spacing:0.5px;
+    color:#aaaaaa;
+    text-align:left;
+    white-space:nowrap;
+    pointer-events:none;
+  }
+
+  @media (max-width: 1100px){
+    .grid{ grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 640px){
+    .grid{ grid-template-columns: repeat(2, 1fr); }
+    :root{ --header-h: 140px; --edge: 20px; }
+    .fixed-header{ flex-wrap: wrap; row-gap: 8px; }
+    .fixed-header .header-left, .fixed-header .header-preview{ flex-shrink:0; }
+    .fixed-header .header-right{
+      flex-basis:100%; flex-shrink:1; min-width:0;
+      overflow-wrap: anywhere; word-break: break-word;
+    }
+    .collab-line-break{ display:inline; }
+    .collab-line3{ margin-top:-1.1em; transform: translateY(-6px); }
+    :root{ --header-font-size: clamp(17.5px, 14px + 1.094vw, 21px); }
+    .page-clock-year{ left: var(--clock-monthday-left, var(--edge)); bottom: 1.25em; }
+    .page-clock{ bottom: 16px; }
+  }
+
+  body.detail-active .page-clock{ display:none; }
+
+  .hover-preview{
+    position:fixed; z-index:60; width: 45vw; max-width: 650px;
+    pointer-events:none; opacity:0; transition: none;
+  }
+  .hover-preview.show{ opacity:1; }
+  @media (max-width: 640px){ .hover-preview{ display:none !important; } }
+  .hover-preview img{
+    width:100%; height:auto; display:block;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.18); background:#111;
+    -webkit-user-drag:none; -webkit-touch-callout:none;
+  }
+
+  .detail-page{
+    position:fixed; inset:0; z-index:50; background:#ffffff;
+    opacity:0; pointer-events:none; touch-action: pinch-zoom; overflow:hidden;
+  }
+  .detail-page.active{ opacity:1; pointer-events:auto; }
+  .detail-image-wrap{ position:absolute; transition: opacity .25s ease; opacity:0; }
+  .detail-image-wrap.show{ opacity:1; }
+  .detail-image-wrap img{
+    width:100%; height:100%; object-fit:contain; display:block;
+    -webkit-user-drag:none; -webkit-touch-callout:none;
+  }
+
+  .nav-arrow{
+    position:fixed; top:50%; transform: translateY(-50%);
+    background:none; border:none; color:#000; z-index:55; padding:20px;
+    line-height:1; display:flex; align-items:center; justify-content:center;
+    transition: opacity .2s ease; touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .nav-arrow svg{ width:22px; height:22px; display:block; }
+  @media (min-width: 641px){ .nav-arrow svg{ width:25.5px; height:25.5px; } }
+  .nav-left{ left: calc(var(--edge) - 20px); }
+  .nav-right{ right: calc(var(--edge) - 20px); }
+  .nav-left svg{ transform: scaleX(-1); }
+  @media (hover: hover){ .nav-arrow:hover{ opacity:0.5; } }
+
+  .nav-back{
+    position:fixed; top: calc(36px + var(--header-font-size) * 1.5 + 22px);
+    left: calc(var(--edge) - 20px); transform:none;
+  }
+  .nav-back svg{ transform: rotate(-90deg); }
+  @media (hover: hover){ .nav-back:hover{ opacity:0.5; } }
+  @media (min-width: 641px){
+    .nav-back{
+      top: calc(36px + (var(--header-font-size) * 1.5) / 2);
+      left: auto; right: var(--edge); transform: translateY(-50%);
+    }
+  }
+  @media (max-width: 640px){ .nav-left, .nav-right{ top: calc(50% - 20px); } }
+
+  @media (min-width: 641px){ .detail-page .nav-left, .detail-page .nav-right{ display:none; } }
+  .detail-filmstrip{
+    position:fixed; top:0; bottom:0;
+    right: calc(var(--edge) + var(--fs-title-gap, 170px));
+    width: var(--fs-zone-w, 320px); z-index:52; overflow:hidden;
+    pointer-events:none; opacity:0; transform: translateX(30px);
+    transition: opacity .46s cubic-bezier(0.22,1,0.36,1), transform .46s cubic-bezier(0.22,1,0.36,1);
+    touch-action:none;
+  }
+  .detail-filmstrip.ready{ opacity:1; transform:translateX(0); pointer-events:auto; }
+  .detail-filmstrip.closing{ transform: translateX(0); }
+
+  @media (max-width:640px){
+    .detail-filmstrip{
+      top:auto; bottom: var(--fs-zone-bottom-gap, 18px); left:0; right:0;
+      width:100%; height: var(--fs-zone-h, 130px); transform: translateY(30px);
+    }
+    .detail-filmstrip.ready{ transform: translateY(0); }
+    .detail-filmstrip.closing{ transform: translateY(0); }
+    .detail-page .nav-left, .detail-page .nav-right{ display:none; }
+  }
+  .filmstrip-track{ position:absolute; inset:0; }
+  .filmstrip-item{
+    position:absolute; left:50%; top:50%; overflow:hidden;
+    cursor:pointer; background:#ffffff;
+  }
+  .filmstrip-item img{
+    position:absolute; inset:-1px; width:calc(100% + 2px); height:calc(100% + 2px);
+    object-fit:contain; display:block; -webkit-user-drag:none;
+    -webkit-touch-callout:none; pointer-events:none;
+  }
+
+  .detail-flip-clone{
+    position:fixed; top:0; left:0; transform-origin: 0 0; z-index:1500;
+    display:block; object-fit:cover; pointer-events:none;
+    -webkit-user-drag:none; will-change: transform;
+  }
+
+  body.detail-active:not(.preview-active) .fixed-header .header-right{
+    opacity:0 !important; pointer-events:none !important;
+  }
+  body.detail-active.collab-slide-exit .fixed-header .header-right{
+    opacity:0 !important;
+    transition: opacity var(--preview-slide-duration) var(--preview-slide-ease) !important;
+  }
+
+  .detail-info{
+    position:fixed; left: var(--detail-info-left, var(--edge));
+    top: var(--detail-info-top, auto); z-index:55; text-align:left;
+    font-size: var(--header-font-size); line-height:1.5;
+    max-width: calc(100vw - var(--detail-info-left, var(--edge)) - var(--edge));
+    overflow-wrap: break-word;
+  }
+  .detail-info .detail-number{ color:#000; }
+  .detail-info .detail-title{ color:#000; }
+
+  @media (min-width: 641px){
+    .detail-number, .detail-title{
+      position:fixed; top:50%; transform:translateY(-50%); z-index:55;
+      font-size: var(--header-font-size); line-height:1.5; white-space:nowrap;
+    }
+    .detail-number{
+      right: calc(var(--edge) + var(--fs-title-gap, 170px) + var(--fs-zone-w, 320px) + 32px);
+      text-align:right;
+    }
+    .detail-title{
+      right: var(--edge); transform: translateY(calc(var(--header-font-size) * -0.75));
+      text-align:left; width: calc(var(--fs-title-gap, 170px) - 16px);
+      max-width: calc(var(--fs-title-gap, 170px) - 16px); white-space: normal;
+      overflow-wrap: break-word;
+    }
+  }
+
+  @media (max-width: 640px){
+    .detail-info{ font-size: calc(var(--header-font-size) * 0.62); }
+  }
+
+  .preview-page{
+    position:fixed; inset:0; z-index:900; overflow:hidden; display:flex;
+    opacity:0; visibility:hidden; pointer-events:none; background:#fff;
+    transition: opacity .15s ease, visibility 0s linear 0s; touch-action:none;
+    transform: translateZ(0);
+  }
+  .preview-page.active{ opacity:1; visibility:visible; pointer-events:auto; }
+  .preview-page.no-fade{ transition:none !important; }
+  .preview-page:not(.active){ transition: opacity .15s ease, visibility 0s linear .15s; }
+
+  :root{
+    --preview-slide-duration: .42s;
+    --preview-slide-ease: cubic-bezier(.5, 0, .75, 0);
+  }
+  .preview-page.preview-slide-exit{
+    transition: transform var(--preview-slide-duration) var(--preview-slide-ease);
+    transform: translate3d(0, -100%, 0);
+  }
+  .preview-page.preview-slide-cover{
+    transition: transform var(--preview-slide-duration) var(--preview-slide-ease);
+    transform: translate3d(0, 0, 0);
+  }
+  .preview-page.preview-slide-start{ transform: translate3d(0, -100%, 0); }
+
+  .preview-col{
+    position:relative; width: calc(50% + 2px); height:100%; overflow:hidden;
+    transform: translateZ(0); background:#fff; transition: opacity .3s ease;
+  }
+  .preview-right{ margin-left: -2px; }
+  .preview-col img{
+    position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    display:block; background:#fff; -webkit-user-drag:none;
+    -webkit-touch-callout:none; transition:none !important;
+  }
+
+  @media (max-width: 640px){
+    .preview-page{ flex-direction: column; overflow:hidden; }
+    .preview-col{ width:100%; height: calc(50% + 2px); }
+    .preview-right{ margin-left: 0; margin-top: -2px; }
+  }
+
+  body.initial-reveal-pending .fixed-header,
+  body.initial-reveal-pending .page-clock,
+  body.initial-reveal-pending .dvd-bounce,
+  body.initial-reveal-pending .preview-col{
+    opacity:0 !important; transition:none !important;
+  }
+
+  .initial-load-overlay{
+    position:fixed; inset:0; background:#fff; z-index:2147483647;
+    opacity:1; transition:opacity .5s ease; pointer-events:auto;
+  }
+  .initial-load-overlay.hide{ opacity:0; pointer-events:none; }
+
+  .dvd-bounce{
+    position:fixed; top:0; left:0; box-sizing:border-box; z-index:99999;
+    display:inline-flex; align-items:center; justify-content:center; padding:0;
+    pointer-events:none; touch-action:none; -webkit-user-drag:none;
+    -webkit-touch-callout:none; will-change: transform; cursor: grab;
+    transition: opacity .3s ease;
+  }
+  .dvd-bounce:active{ cursor: grabbing; }
+  .dvd-bounce-img{
+    display:block;
+    height: calc(clamp(107.54px, 25.81vw, 315.45px) * var(--dvd-area-scale, 1));
+    width:auto; -webkit-user-drag:none; -webkit-touch-callout:none; pointer-events:none;
+    transform-origin: center center;
+    transition: transform .22s cubic-bezier(.34,1.56,.64,1), opacity .22s ease, height .32s cubic-bezier(.22,.61,.36,1);
+  }
+  .dvd-bounce.dvd-grabbing .dvd-bounce-img{ transform: scale(0.97); }
+  .dvd-bounce.dvd-hidden .dvd-bounce-img{
+    transform: scale(0); opacity: 0; transition: transform .28s linear, opacity .22s ease;
+  }
+  .dvd-bounce.dvd-instant .dvd-bounce-img{ transition: none !important; }
+
+  body.initial-reveal-pending .dvd-bounce-img{
+    transition: none !important; transform: none !important;
+  }
+  .dvd-bounce.dvd-reveal .dvd-bounce-img{
+    transition: none !important; transform: none !important;
+  }
+  .dvd-bounce.dvd-image-pending{ opacity:0 !important; transition:none !important; }
+
+  @media (max-width: 640px){
+    .dvd-bounce-img{
+      height: calc(clamp(181.18px, 43.49vw, 531.45px) * var(--dvd-area-scale, 1));
+    }
+  }
+  @media (hover: none) and (pointer: coarse) and (min-width: 641px){
+    .dvd-bounce-img{
+      height: calc(clamp(79.5px, 19.07vw, 233.17px) * var(--dvd-area-scale, 1));
+    }
+  }
+
+  body.preview-active .fixed-header, body.preview-active .fixed-header *{
+    pointer-events:none !important;
+  }
+  body.preview-header-white .fixed-header, body.preview-header-white .fixed-header *{
+    color:#ffffff !important;
+  }
+  body.pf-bg-black .fixed-header, body.pf-bg-black .fixed-header *{
+    color:#ffffff !important;
+  }
+
+  .hidden{ display:none !important; }
+
+  .photo-fall-stage{
+    position:fixed; inset:0; z-index:950; overflow:hidden; pointer-events:none;
+    display:none; cursor:grab; background-color:#ffffff; transition: background-color .16s ease;
+  }
+  .photo-fall-stage.active{ display:block; pointer-events:auto; }
+  .photo-fall-stage.grabbing{ cursor:grabbing; }
+
+  .pf-rules-overlay{
+    position:fixed; inset:0; z-index:1600; display:none; align-items:center;
+    justify-content:center; cursor:pointer; opacity:0; pointer-events:none;
+    transition: opacity .15s ease;
+  }
+  .pf-rules-overlay.active{ display:flex; pointer-events:auto; }
+  .pf-rules-overlay.show{ opacity:1; }
+  .pf-rules-overlay img{
+    display:block; width: calc(100% - 2 * var(--edge)); height:auto;
+    pointer-events:none; -webkit-user-drag:none; user-select:none;
+  }
+
+  body.photo-fall-active.preview-active .photo-fall-stage{ z-index: 890; }
+  body.photo-fall-active.detail-active .photo-fall-stage{ z-index: 40; pointer-events: none; }
+  body.pf-dvd-covering .dvd-bounce{ z-index: 895; }
+
+  .photo-fall-item{ position:absolute; top:0; left:0; overflow:visible; will-change: transform; }
+  .photo-fall-item img{
+    width:100%; height:100%; object-fit:contain; display:block; pointer-events:none;
+    -webkit-user-drag:none; -webkit-touch-callout:none; opacity:0; transition: opacity .22s ease;
+  }
+  .photo-fall-item img.loaded{ opacity:1; }
+  .photo-fall-item.pf-pending{ opacity: 0; pointer-events: none; }
+  body.photo-fall-active #photoGrid{ pointer-events:none; }
+
+  .wallpaper-preview-overlay{
+    position:fixed; inset:0; z-index:999999; display:flex; align-items:center;
+    justify-content:center; flex-direction:column; gap:28px;
+    background:rgba(255,255,255,0.96); backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px); padding:24px; box-sizing:border-box;
+    opacity:0; visibility:hidden; pointer-events:none;
+    transition: opacity 180ms ease, visibility 0s linear 180ms;
+  }
+  .wallpaper-preview-overlay.bg-light{ background:rgba(230,230,230,0.96); }
+  .wallpaper-preview-overlay.active{
+    opacity:1; visibility:visible; pointer-events:auto;
+    transition: opacity 180ms ease, visibility 0s linear 0s;
+  }
+  .wallpaper-preview-img{ max-width:min(92vw, 820px); max-height:80vh; object-fit:contain; background:#fff; }
+  .wallpaper-preview-actions{ display:flex; flex-direction:column; align-items:center; gap:38px; }
+  .wallpaper-preview-btn{ display:inline-flex; align-items:center; padding:0; border:none; background:none; color:#111; cursor:pointer; line-height:1; }
+  .wallpaper-preview-btn img{ display:block; -webkit-user-drag:none; user-select:none; }
+  #wallpaperDownloadBtn img{ width:92px; height:auto; }
+  #wallpaperCloseBtn img{ width:46px; height:auto; }
+
+  @media (max-width:640px){
+    .wallpaper-preview-img{ max-width:min(62vw, 360px); max-height:55vh; }
+    .wallpaper-preview-overlay{ gap:18px; }
+    .wallpaper-preview-actions{ gap:22px; }
+    #wallpaperDownloadBtn img{ width:68px; }
+    #wallpaperCloseBtn img{ width:34px; }
+  }
+
+  ::selection{ background:#000; color:#fff; }
+</style>
+</head>
+<body class="preview-active initial-reveal-pending">
+
+  <div class="initial-load-overlay" id="initialLoadOverlay" aria-hidden="true"></div>
+
+  <div class="dvd-bounce dvd-image-pending" id="dvdBounce" draggable="false"><img class="dvd-bounce-img" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" alt="" draggable="false"></div>
+
+  <header class="fixed-header">
+    <div class="header-left" id="backHome">Photobook by edenchen</div>
+    <div class="header-preview" id="previewLabel">Preview</div>
+    <div class="header-right">Collab at<br class="collab-line-break"> edenchenworks@<wbr>gmail.com<br><span class="collab-line3">@edench3n</span></div>
+    <div class="header-right collab-measure" id="collabMeasure" aria-hidden="true">Collab at<br class="collab-line-break"> edenchenworks@<wbr>gmail.com<br><span class="collab-line3">@edench3n</span></div>
+  </header>
+
+  <div class="page-clock" id="pageClock" aria-hidden="true">
+    <span class="page-clock-year" id="pageClockYear"></span>
+    <span class="page-clock-monthday" id="pageClockMonthDay"></span>
+    <span class="page-clock-time" id="pageClockTime"></span>
+  </div>
+
+  <main id="galleryPage">
+    <div class="grid" id="photoGrid"></div>
+  </main>
+
+  <div class="photo-fall-stage" id="photoFallStage" aria-hidden="true"></div>
+
+  <div class="pf-rules-overlay" id="pfRulesOverlay" aria-hidden="true">
+    <img id="pfRulesOverlayImg" src="/pf-rules.png" alt="one tap object to switch / double tap object to exit / one tap background to change color / hold to save" draggable="false">
+  </div>
+
+  <div class="wallpaper-preview-overlay" id="wallpaperPreviewOverlay" aria-hidden="true">
+    <img class="wallpaper-preview-img" id="wallpaperPreviewImg" alt="">
+    <div class="wallpaper-preview-actions">
+      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg"><img src="/download.png" alt="download" draggable="false"></a>
+      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn"><img src="/back.png" alt="back" draggable="false"></button>
+    </div>
+  </div>
+
+  <div class="hover-preview" id="hoverPreview"></div>
+
+  <div class="preview-page" id="previewPage">
+    <div class="preview-col preview-left">
+      <img id="previewLeftImg" alt="" draggable="false">
+    </div>
+    <div class="preview-col preview-right">
+      <img id="previewRightImg" alt="" draggable="false">
+    </div>
+  </div>
+
+  <section class="detail-page" id="detailPage">
+    <div class="detail-image-wrap" id="detailImageWrap">
+      <img id="detailImage" src="" alt="" draggable="false">
+    </div>
+    <div class="detail-filmstrip" id="detailFilmstrip">
+      <div class="filmstrip-track" id="filmstripTrack"></div>
+    </div>
+    <button class="nav-arrow nav-back" id="backArrowBtn" aria-label="back to gallery">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nav-arrow nav-left" id="prevBtn" aria-label="previous">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nav-arrow nav-right" id="nextBtn" aria-label="next">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="detail-info">
+      <div class="detail-number" id="detailNumber">1</div>
+      <div class="detail-title" id="detailTitle">Title</div>
+    </div>
+  </section>
+
 <script>
+(function(){
+
+  function scheduleIdle(fn, opts){
+    const hasTimeout = opts && typeof opts.timeout === 'number';
+    const fallbackDelay = (opts && typeof opts.fallbackDelay === 'number') ? opts.fallbackDelay : 0;
+    if('requestIdleCallback' in window){
+      return hasTimeout ? requestIdleCallback(fn, { timeout: opts.timeout }) : requestIdleCallback(fn);
+    }
+    return requestAnimationFrame(() => setTimeout(fn, fallbackDelay));
+  }
+
+  const DVD_HAS_REAL_IDLE_CALLBACK = ('requestIdleCallback' in window);
+  const DVD_LOW_POWER_DEVICE = !DVD_HAS_REAL_IDLE_CALLBACK ||
+    (typeof navigator.hardwareConcurrency === 'number' && navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4);
+
+  const DVD_SCRIPT_START_TS = performance.now();
+  const DVD_E_PRIORITY_WINDOW_MS = 10000;
+  function dvdEWithinPriorityWindow(){
+    return (performance.now() - DVD_SCRIPT_START_TS) < DVD_E_PRIORITY_WINDOW_MS;
+  }
+
+  const GOOGLE_DRIVE_FOLDER_ID = '1wQI2MMoORB78XoC8E5GnxKkLLUEZsxPn';
+  const GOOGLE_API_KEY = 'AIzaSyDoTpWEZ-UGEhOm3HScpL2mTlwc7tYiiNg';
+  const DRIVE_CACHE_KEY = 'photobook-cache-v1:' + GOOGLE_DRIVE_FOLDER_ID;
+  const DRIVE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+  const EDEN_E_FOLDER_ID = '1QXgbx5t6KC5q07gyhGL6tXqo_YUKzpKH';
+  const EDEN_E_MANIFEST_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-manifest.json';
+  const EDEN_E_IMAGES_BASE_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-images/';
+  const EDEN_E_MASKS_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/masks.json';
+
+  const dvdEImageUrlToId = new Map();
+  const dvdETrimmedSrcToId = new Map();
+  function recordDvdEMaskMapping(originalUrl, trimmedSrc){
+    if(!originalUrl || !trimmedSrc) return;
+    const id = dvdEImageUrlToId.get(originalUrl);
+    if(id) dvdETrimmedSrcToId.set(trimmedSrc, id);
+  }
+
+  let precomputedEMasks = null;
+
+  function decodeMaskBits(base64, w, h){
+    if(typeof base64 !== 'string') return base64;
+    const binary = atob(base64);
+    const total = w * h;
+    const out = new Uint8Array(total);
+    for(let i = 0; i < total; i++){
+      const byte = binary.charCodeAt(i >> 3);
+      out[i] = (byte >> (i & 7)) & 1;
+    }
+    return out;
+  }
+  function decodePrecomputedMasksJson(json){
+    const map = new Map();
+    Object.keys(json).forEach(id => {
+      const entry = json[id];
+      if(entry && entry.mask && entry.w && entry.h){
+        entry.mask = decodeMaskBits(entry.mask, entry.w, entry.h);
+      }
+      map.set(id, entry);
+    });
+    return map;
+  }
+
+  const precomputedEMasksPromise = (async () => {
+    try{
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      let res;
+      try{
+        res = await fetch(EDEN_E_MASKS_URL, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if(res.ok){
+        const json = await res.json();
+        const map = decodePrecomputedMasksJson(json);
+        precomputedEMasks = map;
+        return map;
+      }
+    }catch(err){}
+
+    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
+       !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
+      return null;
+    }
+    try{
+      const q = encodeURIComponent(`'${EDEN_E_FOLDER_ID}' in parents and name = 'masks.json' and trashed = false`);
+      const fields = encodeURIComponent('files(id)');
+      const listUrl = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&key=${GOOGLE_API_KEY}`;
+      const listRes = await fetch(listUrl, { priority: 'low' });
+      if(!listRes.ok) return null;
+      const listData = await listRes.json();
+      const fileId = listData.files && listData.files[0] && listData.files[0].id;
+      if(!fileId) return null;
+      const contentUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}`;
+      const contentRes = await fetch(contentUrl, { priority: 'low' });
+      if(!contentRes.ok) return null;
+      const json = await contentRes.json();
+      const map = decodePrecomputedMasksJson(json);
+      precomputedEMasks = map;
+      return map;
+    }catch(err){
+      return null;
+    }
+  })();
+
+  const EDEN_E_CACHE_KEY = 'photobook-e-cache-v3:' + EDEN_E_FOLDER_ID;
+  const EDEN_E_CACHE_TTL_MS = 10 * 60 * 1000;
+  const dvdEImagesPromise = fetchDvdEImages();
+  const photosPromise = fetchDriveImages();
+
+  const demoFileNames = [
+    'Akihabara, Tokyo.jpg', 'MJ Studio Visit.jpg', 'FA Laptop Session.jpg',
+    'Gaming Cafe Interior.jpg', 'FA Grid Archive.jpg', 'FA Golf Fit Label.jpg',
+    'Selina Miles Spread.jpg', 'Bruno Portrait Layout.jpg', 'DS Grande Print.jpg',
+    'Golf Fit Rolls.jpg', 'Creative Studio Collage.jpg', 'Desk Setup Detail.jpg',
+    'MJ Business Card.jpg', 'Skaff Deg Medlemskap.jpg', 'FA Phone Case Collab.jpg'
+  ];
+
+  const demoDims = [
+    { w: 900,  h: 1200 }, { w: 1000, h: 1000 }, { w: 1300, h: 900  },
+    { w: 1400, h: 800  }, { w: 1000, h: 1000 }, { w: 900,  h: 1200 },
+    { w: 850,  h: 1300 }, { w: 1300, h: 950  }, { w: 700,  h: 1400 },
+    { w: 850,  h: 1300 }, { w: 1100, h: 1100 }, { w: 1300, h: 900  },
+    { w: 1400, h: 850  }, { w: 900,  h: 1250 }, { w: 850,  h: 1350 }
+  ];
+
+  const demoColors = ['#1a1a1a','#242424','#151515','#2c2c2c','#1e1e1e'];
+
+  function makePlaceholder(w, h, color, label){
+    const fontSize = Math.round(w * 0.08);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`
+      + `<rect width="100%" height="100%" fill="${color}"/>`
+      + `<text x="50%" y="50%" fill="#ffffff" fill-opacity="0.85" font-family="sans-serif" `
+      + `font-size="${fontSize}" text-anchor="middle" dominant-baseline="middle">${label}</text>`
+      + `</svg>`;
+    return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  }
+
+  const demoPhotos = demoFileNames.map((name, i) => {
+    const dims = demoDims[i % demoDims.length];
+    const color = demoColors[i % demoColors.length];
+    const placeholderUrl = makePlaceholder(dims.w, dims.h, color, String(i + 1));
+    return {
+      title: name.replace(/\.[^/.]+$/, ''),
+      url: placeholderUrl,
+      thumbUrl: placeholderUrl,
+      tinyUrl: placeholderUrl,
+      aspect: dims.w / dims.h
+    };
+  });
+
+  let photos = [];
+  let currentIndex = 0;
+
+  const grid = document.getElementById('photoGrid');
+  const galleryPage = document.getElementById('galleryPage');
+  const hoverPreview = document.getElementById('hoverPreview');
+  const detailPage = document.getElementById('detailPage');
+  const detailImageWrap = document.getElementById('detailImageWrap');
+  const detailImage = document.getElementById('detailImage');
+  const detailFilmstrip = document.getElementById('detailFilmstrip');
+  const filmstripTrack = document.getElementById('filmstripTrack');
+  const detailNumber = document.getElementById('detailNumber');
+  const detailTitle = document.getElementById('detailTitle');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const backHome = document.getElementById('backHome');
+  const backArrowBtn = document.getElementById('backArrowBtn');
+  const headerRight = document.querySelector('.fixed-header .header-right');
+  const collabMeasure = document.getElementById('collabMeasure');
+  const detailInfo = document.querySelector('.detail-info');
+  const previewLabel = document.getElementById('previewLabel');
+  const previewPage = document.getElementById('previewPage');
+  const previewLeftImg = document.getElementById('previewLeftImg');
+  const previewRightImg = document.getElementById('previewRightImg');
+  const pageClock = document.getElementById('pageClock');
+  const pageClockYear = document.getElementById('pageClockYear');
+  const pageClockMonthDay = document.getElementById('pageClockMonthDay');
+  const pageClockTime = document.getElementById('pageClockTime');
+  const initialLoadOverlay = document.getElementById('initialLoadOverlay');
+
+  const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  const supportsTouch = window.matchMedia('(pointer: coarse)').matches;
+
+  let initialChromeRevealed = false;
+  function hideInitialLoadOverlay(){
+    if(!initialLoadOverlay || initialLoadOverlay._hidden) return;
+    initialLoadOverlay._hidden = true;
+    initialLoadOverlay.classList.add('hide');
+    const finalize = () => { initialLoadOverlay.style.display = 'none'; };
+    initialLoadOverlay.addEventListener('transitionend', finalize, { once:true });
+    setTimeout(finalize, 600);
+  }
+  function revealInitialChrome(){
+    if(initialChromeRevealed) return;
+    initialChromeRevealed = true;
+    document.body.classList.remove('initial-reveal-pending');
+    hideInitialLoadOverlay();
+    if(dvdBounce){
+      dvdBounce.classList.add('dvd-reveal');
+      clearTimeout(dvdBounce._revealPopTimer);
+      dvdBounce._revealPopTimer = setTimeout(() => {
+        dvdBounce.classList.remove('dvd-reveal');
+      }, 650);
+    }
+  }
+  const INITIAL_REVEAL_FALLBACK_MS = 4000;
+
+  let previewReadyForInitialReveal = false;
+  let dvdReadyForInitialReveal = false;
+  let initialRevealGraceTimer = null;
+  const DVD_REVEAL_GRACE_MS = 500;
+  const INITIAL_REVEAL_EXTRA_BUFFER_MS = 450;
+  const INITIAL_REVEAL_MIN_READY_COUNT = 3;
+  const INITIAL_REVEAL_MAX_EXTRA_WAIT_MS = 1400;
+  const INITIAL_REVEAL_POLL_MS = 80;
+  let initialRevealExtraBufferTimer = null;
+  let initialRevealPollStartedAt = null;
+
+  function pollDvdReadyThenReveal(){
+    const elapsed = performance.now() - initialRevealPollStartedAt;
+    const readyCount = dvdEReadyIndices().length;
+    if(readyCount >= INITIAL_REVEAL_MIN_READY_COUNT || elapsed >= INITIAL_REVEAL_MAX_EXTRA_WAIT_MS){
+      const remain = Math.max(0, INITIAL_REVEAL_EXTRA_BUFFER_MS - elapsed);
+      initialRevealExtraBufferTimer = setTimeout(() => {
+        initialRevealExtraBufferTimer = null;
+        initialRevealPollStartedAt = null;
+        revealInitialChrome();
+      }, remain);
+      return;
+    }
+    initialRevealExtraBufferTimer = setTimeout(pollDvdReadyThenReveal, INITIAL_REVEAL_POLL_MS);
+  }
+
+  function attemptInitialReveal(){
+    if(initialChromeRevealed) return;
+    if(previewReadyForInitialReveal && dvdReadyForInitialReveal){
+      clearTimeout(initialRevealGraceTimer);
+      initialRevealGraceTimer = null;
+      if(!initialRevealExtraBufferTimer && initialRevealPollStartedAt === null){
+        initialRevealPollStartedAt = performance.now();
+        pollDvdReadyThenReveal();
+      }
+      return;
+    }
+    if(previewReadyForInitialReveal && !initialRevealGraceTimer){
+      initialRevealGraceTimer = setTimeout(() => {
+        initialRevealGraceTimer = null;
+        revealInitialChrome();
+      }, DVD_REVEAL_GRACE_MS);
+    }
+  }
+
+  function formatPhotoIndex(n){ return String(n); }
+
+  function positionNavArrows(){
+    [prevBtn, nextBtn].forEach(btn => {
+      const h = btn.getBoundingClientRect().height || 64;
+      const top = Math.round((window.innerHeight - h) / 2);
+      btn.style.top = top + 'px';
+      btn.style.transform = 'none';
+    });
+  }
+
+  function positionBackButton(){
+    if(!backArrowBtn) return;
+    if(window.innerWidth > 640){
+      backArrowBtn.style.top = '';
+      backArrowBtn.style.left = '';
+      backArrowBtn.style.right = '';
+      backArrowBtn.style.transform = '';
+      return;
+    }
+    if(positionDetailInfoMobile()) return;
+    backArrowBtn.style.right = 'auto';
+
+    if(detailInfo){
+      const infoRect = detailInfo.getBoundingClientRect();
+      const btnH = backArrowBtn.getBoundingClientRect().height || 64;
+      const infoCenter = infoRect.top + infoRect.height / 2;
+      backArrowBtn.style.top = Math.round(infoCenter - btnH / 2) + 'px';
+    }
+
+    if(previewLabel){
+      const labelRect = previewLabel.getBoundingClientRect();
+      backArrowBtn.style.left = Math.round(labelRect.left - 20) + 'px';
+    }
+    backArrowBtn.style.transform = 'none';
+  }
+
+  function syncDetailInfoAlignment(){
+    if(isDetailMobile() && positionDetailInfoMobile()) return;
+    const rect = headerRight.getBoundingClientRect();
+    document.documentElement.style.setProperty('--detail-info-left', rect.left + 'px');
+
+    if(detailInfo){
+      const infoH = detailInfo.getBoundingClientRect().height || 0;
+      const filmstripClearance = (isDetailMobile() && fsReady) ? (fsZoneHeight + FS_MOBILE_BOTTOM_GAP + 16) : 0;
+      const bottomMargin = 40 + filmstripClearance;
+      const top = window.innerHeight - bottomMargin - infoH;
+      document.documentElement.style.setProperty('--detail-info-top', Math.round(top) + 'px');
+    }
+  }
+
+  const DESKTOP_BREAKPOINT = 1100;
+  function getStableImgRect(img){
+    const wrap = img.parentElement;
+    const w = img.offsetWidth;
+    const h = img.offsetHeight;
+    if(!wrap || !w || !h) return img.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    return {
+      left: wrapRect.left + (wrapRect.width - w) / 2,
+      top: wrapRect.top + (wrapRect.height - h) / 2,
+      width: w,
+      height: h
+    };
+  }
+
+  function syncEdgeAlignment(el, cssVar, targetDataIndex, minGapEl){
+    if(!el || !grid) return;
+    if(document.body.classList.contains('preview-active') && !previewPage.classList.contains('active')) return;
+
+    if(window.innerWidth <= DESKTOP_BREAKPOINT){
+      document.documentElement.style.setProperty(cssVar, '0px');
+      el.classList.add('positioned');
+      return;
+    }
+
+    const targetImg = grid.querySelector(`.grid-item[data-index="${targetDataIndex}"] img`);
+    if(!targetImg) return;
+    const imgRect = getStableImgRect(targetImg);
+    if(!imgRect.width) return;
+
+    const elRect = el.getBoundingClientRect();
+    const currentNudge = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(cssVar)) || 0;
+    const baseLeft = elRect.left - currentNudge;
+
+    let targetLeft = imgRect.left;
+    if(minGapEl){
+      const gapPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap')) || 0;
+      const minLeft = minGapEl.getBoundingClientRect().right + gapPx;
+      targetLeft = Math.max(targetLeft, minLeft);
+    }
+
+    const nudge = Math.round(targetLeft - baseLeft);
+    document.documentElement.style.setProperty(cssVar, nudge + 'px');
+    el.classList.add('positioned');
+  }
+
+  function syncPreviewAlignment(){
+    syncEdgeAlignment(previewLabel, '--preview-nudge', 1, backHome);
+  }
+  function syncHeaderRightAlignment(){
+    syncEdgeAlignment(headerRight, '--header-right-nudge', 3, previewLabel);
+  }
+  function syncHeaderLeftAlignment(){
+    syncEdgeAlignment(backHome, '--header-left-nudge', 0);
+  }
+
+  function syncClockAlignment(){
+    if(!pageClock) return;
+    if(document.body.classList.contains('preview-active') && !previewPage.classList.contains('active')) return;
+
+    if(window.innerWidth <= 640){
+      if(!backHome || !previewLabel) return;
+      const homeRect = backHome.getBoundingClientRect();
+      const previewRect = previewLabel.getBoundingClientRect();
+      if(!homeRect.width || !previewRect.width) return;
+
+      document.documentElement.style.setProperty('--clock-time-left', Math.round(homeRect.left) + 'px');
+      document.documentElement.style.setProperty('--clock-monthday-left', Math.round(previewRect.left) + 'px');
+      pageClock.classList.add('positioned');
+      return;
+    }
+
+    if(!backHome || !previewLabel || !headerRight) return;
+    const homeRect = backHome.getBoundingClientRect();
+    const previewRect = previewLabel.getBoundingClientRect();
+    const collabRect = headerRight.getBoundingClientRect();
+    if(!homeRect.width || !previewRect.width || !collabRect.width) return;
+
+    const gapPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap')) || 0;
+
+    const yearLeft = homeRect.left;
+    document.documentElement.style.setProperty('--clock-year-left', Math.round(yearLeft) + 'px');
+
+    const yearWidth = pageClockYear.getBoundingClientRect().width || 0;
+    const minMonthDayLeft = yearLeft + yearWidth + gapPx;
+    const monthDayLeft = Math.max(previewRect.left, minMonthDayLeft);
+    document.documentElement.style.setProperty('--clock-monthday-left', Math.round(monthDayLeft) + 'px');
+
+    const monthDayWidth = pageClockMonthDay.getBoundingClientRect().width || 0;
+    const minTimeLeft = monthDayLeft + monthDayWidth + gapPx;
+    const timeLeft = Math.max(collabRect.left, minTimeLeft);
+    document.documentElement.style.setProperty('--clock-time-left', Math.round(timeLeft) + 'px');
+
+    pageClock.classList.add('positioned');
+  }
+
+  const CLOCK_MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function updateClockDisplay(){
+    if(!pageClockTime || !pageClockYear || !pageClockMonthDay) return;
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    pageClockTime.textContent = `${hh} ${mm} ${ss}`;
+    pageClockYear.textContent = `${now.getFullYear()}`;
+    pageClockMonthDay.textContent = `${CLOCK_MONTH_ABBR[now.getMonth()]} ${now.getDate()}`;
+  }
+
+  let pageClockTickTimer = null;
+  function scheduleClockTick(){
+    updateClockDisplay();
+    if(pageClockTickTimer) clearTimeout(pageClockTickTimer);
+    const msToNextSecond = 1000 - new Date().getMilliseconds();
+    pageClockTickTimer = setTimeout(scheduleClockTick, msToNextSecond);
+  }
+
+  function positionNavHorizontal(){
+    if(!backHome) return;
+    const rect = backHome.getBoundingClientRect();
+    if(!rect.width && !rect.height) return;
+    const navLeft = Math.round(rect.left - 20);
+    const leftBtns = [prevBtn];
+    leftBtns.forEach(btn => {
+      if(!btn) return;
+      btn.style.left = navLeft + 'px';
+      btn.style.right = 'auto';
+    });
+    if(nextBtn){
+      nextBtn.style.right = navLeft + 'px';
+      nextBtn.style.left = 'auto';
+    }
+  }
+
+  function fitCollabWidth(){
+    if(!headerRight || !backHome || !collabMeasure) return;
+    if(window.innerWidth > 640){
+      headerRight.style.fontSize = '';
+      return;
+    }
+    const naturalWidth = collabMeasure.getBoundingClientRect().width;
+    const targetWidth = backHome.getBoundingClientRect().width;
+    if(!naturalWidth || !targetWidth) return;
+
+    const baseFontSize = parseFloat(getComputedStyle(collabMeasure).fontSize);
+    if(!baseFontSize) return;
+
+    const ratio = targetWidth / naturalWidth;
+    headerRight.style.fontSize = (baseFontSize * ratio) + 'px';
+  }
+
+  function syncFixedChrome(){
+    syncDetailInfoAlignment();
+    positionNavArrows();
+    positionBackButton();
+    syncHeaderLeftAlignment();
+    positionNavHorizontal();
+    syncPreviewAlignment();
+    syncHeaderRightAlignment();
+    fitCollabWidth();
+    syncClockAlignment();
+    resizeAllGridImages();
+    positionAllGridIdx();
+  }
+
+  const RANDOM_ORDER_SALT = 'edenchen-photobook-order-v1';
+  function hashStringToInt(str){
+    let h = 0x811c9dc5;
+    for(let i = 0; i < str.length; i++){
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+
+  function readDriveCache(){
+    try{
+      const raw = sessionStorage.getItem(DRIVE_CACHE_KEY);
+      if(!raw) return null;
+      const parsed = JSON.parse(raw);
+      if(!parsed || !Array.isArray(parsed.photos) || typeof parsed.savedAt !== 'number') return null;
+      if(Date.now() - parsed.savedAt > DRIVE_CACHE_TTL_MS) return null;
+      return parsed.photos;
+    }catch(err){ return null; }
+  }
+  function writeDriveCache(photosList){
+    try{
+      sessionStorage.setItem(DRIVE_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), photos: photosList }));
+    }catch(err){}
+  }
+
+  async function fetchDriveImages(){
+    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
+       !GOOGLE_DRIVE_FOLDER_ID || GOOGLE_DRIVE_FOLDER_ID === 'YOUR_FOLDER_ID'){
+      return demoPhotos;
+    }
+
+    const cached = readDriveCache();
+    if(cached) return cached;
+
+    try{
+      const q = encodeURIComponent(`'${GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
+      const fields = encodeURIComponent('files(id,name,thumbnailLink,imageMediaMetadata(width,height))');
+      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=name&key=${GOOGLE_API_KEY}`;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      let res;
+      try{
+        res = await fetch(url, { signal: controller.signal, priority: 'high' });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if(!res.ok) throw new Error('Drive API request failed: ' + res.status);
+      const data = await res.json();
+
+      if(!data.files || data.files.length === 0) return demoPhotos;
+
+      const result = data.files
+        .sort((a,b) => hashStringToInt(a.id + RANDOM_ORDER_SALT) - hashStringToInt(b.id + RANDOM_ORDER_SALT))
+        .map(file => {
+          const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
+          const meta = file.imageMediaMetadata;
+          const aspect = (meta && meta.width && meta.height) ? (meta.width / meta.height) : 1;
+          return {
+            title: file.name.replace(/\.[^/.]+$/, ''),
+            aspect,
+            url: `https://drive.google.com/uc?export=view&id=${file.id}`,
+            detailUrl: thumbBase ? (thumbBase + '=s2000') : '',
+            detailUrlMobile: (supportsTouch && thumbBase) ? (thumbBase + '=s1200') : '',
+            thumbUrl: thumbBase ? (thumbBase + '=s750') : `https://drive.google.com/uc?export=view&id=${file.id}`,
+            gridUrl: thumbBase ? (thumbBase + '=s380') : `https://drive.google.com/uc?export=view&id=${file.id}`,
+            fallbackUrl: thumbBase ? (thumbBase + '=s1600') : '',
+            tinyUrl: thumbBase ? (thumbBase + '=s450') : `https://drive.google.com/uc?export=view&id=${file.id}`,
+            previewUrl: thumbBase ? (thumbBase + (supportsTouch ? '=s850' : '=s1500')) : ''
+          };
+        });
+
+      writeDriveCache(result);
+      return result;
+    }catch(err){
+      return demoPhotos;
+    }
+  }
+
+  function readDvdECache(){
+    try{
+      const raw = sessionStorage.getItem(EDEN_E_CACHE_KEY);
+      if(!raw) return null;
+      const parsed = JSON.parse(raw);
+      if(!parsed || !Array.isArray(parsed.urls) || typeof parsed.savedAt !== 'number') return null;
+      if(Date.now() - parsed.savedAt > EDEN_E_CACHE_TTL_MS) return null;
+      if(Array.isArray(parsed.ids) && parsed.ids.length === parsed.urls.length){
+        parsed.urls.forEach((url, i) => {
+          const id = parsed.ids[i];
+          if(url && id) dvdEImageUrlToId.set(url, id);
+        });
+      }
+      return parsed.urls;
+    }catch(err){ return null; }
+  }
+  function writeDvdECache(urls, ids){
+    try{
+      sessionStorage.setItem(EDEN_E_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), urls: urls, ids: ids || [] }));
+    }catch(err){}
+  }
+
+  async function fetchDvdEImagesFromManifest(){
+    if(!EDEN_E_MANIFEST_URL || !EDEN_E_IMAGES_BASE_URL) return null;
+    try{
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      let res;
+      try{
+        res = await fetch(EDEN_E_MANIFEST_URL, { signal: controller.signal, priority: 'low' });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if(!res.ok) return null;
+      const manifest = await res.json();
+      const images = Array.isArray(manifest && manifest.images) ? manifest.images : [];
+      if(images.length === 0) return null;
+
+      const ids = [];
+      const urls = images.map(entry => {
+        const fileName = String(entry.file || '').replace(/^e-images\//, '');
+        const url = EDEN_E_IMAGES_BASE_URL + fileName;
+        dvdEImageUrlToId.set(url, entry.id);
+        ids.push(entry.id);
+        return url;
+      });
+
+      writeDvdECache(urls, ids);
+      return urls;
+    }catch(err){
+      return null;
+    }
+  }
+
+  async function fetchDvdEImages(){
+    const cached = readDvdECache();
+    if(cached) return cached;
+
+    const fromManifest = await fetchDvdEImagesFromManifest();
+    if(fromManifest) return fromManifest;
+
+    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
+       !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
+      return [];
+    }
+
+    try{
+      const q = encodeURIComponent(`'${EDEN_E_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
+      const fields = encodeURIComponent('files(id,thumbnailLink)');
+      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=name&key=${GOOGLE_API_KEY}`;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      let res;
+      try{
+        res = await fetch(url, { signal: controller.signal, priority: 'low' });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if(!res.ok) throw new Error('Drive API request failed: ' + res.status);
+      const data = await res.json();
+      if(!data.files || data.files.length === 0) return [];
+
+      const ids = [];
+      const urls = data.files.map(file => {
+        const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
+        const size = '=s1000';
+        const url = thumbBase ? (thumbBase + size) : `https://drive.google.com/uc?export=view&id=${file.id}`;
+        dvdEImageUrlToId.set(url, file.id);
+        ids.push(file.id);
+        return url;
+      });
+
+      writeDvdECache(urls, ids);
+      return urls;
+    }catch(err){
+      return [];
+    }
+  }
+
+  const GRID_EAGER_COUNT = 10;
+  let gridRevealInFlight = false;
+  const gridRevealTargetRectMap = new WeakMap();
+  let resetMagnetScaleForReveal = function(){};
+
+  const GRID_IMG_BOX_RATIO = 0.42;
+  const GRID_IMG_ASPECT_MIN = 0.4;
+  const GRID_IMG_ASPECT_MAX = 2.5;
+
+  function applyGridItemImageSize(item, cellSide){
+    if(!item || !cellSide) return;
+    const thumbWrap = item.querySelector('.thumb-wrap');
+    const img = thumbWrap ? thumbWrap.querySelector('img') : null;
+    if(!thumbWrap || !img) return;
+    const photo = photos[Number(item.dataset.index)];
+    const rawAspect = (photo && photo.aspect) ? photo.aspect : 1;
+    const aspect = Math.min(GRID_IMG_ASPECT_MAX, Math.max(GRID_IMG_ASPECT_MIN, rawAspect));
+    const boxSide = cellSide * GRID_IMG_BOX_RATIO;
+    const targetArea = boxSide * boxSide;
+    const h = Math.sqrt(targetArea / aspect);
+    const w = h * aspect;
+    img.style.width = w + 'px';
+    img.style.height = h + 'px';
+  }
+
+  function sizeGridItemImage(item){
+    if(!item) return;
+    const thumbWrap = item.querySelector('.thumb-wrap');
+    if(!thumbWrap) return;
+    const cellSide = thumbWrap.getBoundingClientRect().width;
+    applyGridItemImageSize(item, cellSide);
+  }
+
+  function resizeAllGridImages(){
+    if(!grid) return;
+    const items = grid.querySelectorAll('.grid-item');
+    if(!items.length) return;
+    const firstWrap = items[0].querySelector('.thumb-wrap');
+    const cellSide = firstWrap ? firstWrap.getBoundingClientRect().width : 0;
+    items.forEach(item => applyGridItemImageSize(item, cellSide));
+  }
+
+  const GRID_IDX_GAP = 14;
+
+  function positionGridIdxItem(item){
+    if(!item || gridRevealInFlight) return;
+    const thumbWrap = item.querySelector('.thumb-wrap');
+    const img = thumbWrap ? thumbWrap.querySelector('img') : null;
+    const idx = item.querySelector('.idx');
+    if(!thumbWrap || !img || !idx || !img.classList.contains('loaded')) return;
+    const wrapRect = thumbWrap.getBoundingClientRect();
+    const imgRect = img.getBoundingClientRect();
+    if(!imgRect.width || !imgRect.height) return;
+    const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
+    const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
+    idx.style.left = left + 'px';
+    idx.style.top = top + 'px';
+  }
+
+  const pendingGridIdxPositionItems = new Set();
+  let pendingGridIdxPositionRAF = null;
+
   // =====================================================================
   // 優化重點 1：FastDOM 讀寫分離機制 (消除 Layout Thrashing)
   // =====================================================================
-
-  // 1.1 批次定位所有縮圖編號（讀寫分離）
-  function positionAllGridIdx() {
-    if (!grid || gridRevealInFlight) return;
-
-    const items = grid.querySelectorAll('.grid-item');
-    const readResults = [];
+  function flushPendingGridIdxPositions(){
+    pendingGridIdxPositionRAF = null;
+    if(gridRevealInFlight){
+      pendingGridIdxPositionRAF = requestAnimationFrame(flushPendingGridIdxPositions);
+      return;
+    }
+    const items = Array.from(pendingGridIdxPositionItems);
+    pendingGridIdxPositionItems.clear();
+    const updates = [];
 
     // 第一階段：純讀取 (Read Phase)
-    // 集中讀取版面尺寸，期間絕不寫入任何 style，避免觸發全頁 Layout Reflow
-    for (let i = 0; i < items.length; i++) {
+    for(let i = 0; i < items.length; i++){
       const item = items[i];
       const thumbWrap = item.querySelector('.thumb-wrap');
       const img = thumbWrap ? thumbWrap.querySelector('img') : null;
       const idx = item.querySelector('.idx');
-
-      if (!thumbWrap || !img || !idx || !img.classList.contains('loaded')) continue;
-
+      if(!thumbWrap || !img || !idx || !img.classList.contains('loaded')) continue;
       const wrapRect = thumbWrap.getBoundingClientRect();
       const imgRect = img.getBoundingClientRect();
-      if (!imgRect.width || !imgRect.height) continue;
-
+      if(!imgRect.width || !imgRect.height) continue;
       const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
       const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
-
-      readResults.push({ idx, left, top });
+      updates.push({ idx, left, top });
     }
 
     // 第二階段：集中寫入 (Write Phase)
-    // 一次性套用 CSS 樣式，瀏覽器只需計算一次 Layout
     requestAnimationFrame(() => {
-      for (let i = 0; i < readResults.length; i++) {
-        const { idx, left, top } = readResults[i];
+      for(let i = 0; i < updates.length; i++){
+        const { idx, left, top } = updates[i];
         idx.style.left = left + 'px';
         idx.style.top = top + 'px';
       }
     });
   }
 
-  // 1.2 滑鼠磁吸引力特效優化 (高效能影格更新)
-  if (supportsHover && grid) {
-    const MAGNET_RADIUS = 600;
-    const MAGNET_MAX_SCALE = 1.35;
-    const MAGNET_RESPONSE_MS = 140;
-    const MAGNET_SETTLE_EPS = 0.0008;
+  function scheduleGridIdxPosition(item){
+    if(!item) return;
+    pendingGridIdxPositionItems.add(item);
+    if(pendingGridIdxPositionRAF !== null) return;
+    pendingGridIdxPositionRAF = requestAnimationFrame(flushPendingGridIdxPositions);
+  }
 
-    let magnetMouseX = 0;
-    let magnetMouseY = 0;
-    let magnetActive = false;
-    let magnetLastFrameTime = null;
-    const magnetScaleState = new WeakMap();
+  function positionAllGridIdx(){
+    if(!grid || gridRevealInFlight) return;
+    const items = grid.querySelectorAll('.grid-item');
+    const updates = [];
 
-    function magnetFrame(now) {
-      requestAnimationFrame(magnetFrame);
+    // [純讀取階段]
+    for(let i = 0; i < items.length; i++){
+      const item = items[i];
+      const thumbWrap = item.querySelector('.thumb-wrap');
+      const img = thumbWrap ? thumbWrap.querySelector('img') : null;
+      const idx = item.querySelector('.idx');
+      if(!thumbWrap || !img || !idx || !img.classList.contains('loaded')) continue;
+      const wrapRect = thumbWrap.getBoundingClientRect();
+      const imgRect = img.getBoundingClientRect();
+      if(!imgRect.width || !imgRect.height) continue;
+      const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
+      const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
+      updates.push({ idx, left, top });
+    }
 
-      // 子頁面/背景隱藏時，完全關閉磁吸運算，避免白白浪費 60 FPS 主執行緒效能
-      if (gridRevealInFlight || photoFallModeActive) {
-        magnetLastFrameTime = now;
-        return;
-      }
-      if (previewPage.classList.contains('active') || detailPage.classList.contains('active')) {
-        magnetLastFrameTime = now;
-        return;
-      }
-
-      if (magnetLastFrameTime == null) magnetLastFrameTime = now;
-      const dt = Math.min(64, now - magnetLastFrameTime);
-      magnetLastFrameTime = now;
-      const smoothFactor = 1 - Math.exp(-dt / MAGNET_RESPONSE_MS);
-
-      const itemsCache = getMagnetItems();
-      const pendingUpdates = [];
-
-      // [階段 A] 純讀取與物理權重計算
-      for (let i = 0; i < itemsCache.length; i++) {
-        const { item, thumbWrap, img, idx } = itemsCache[i];
-        if (!img || !img.classList.contains('loaded')) continue;
-
-        let target = 1;
-        if (magnetActive && thumbWrap) {
-          const wrapRect = thumbWrap.getBoundingClientRect();
-          const cx = wrapRect.left + wrapRect.width / 2;
-          const cy = wrapRect.top + wrapRect.height / 2;
-          const dx = magnetMouseX - cx;
-          const dy = magnetMouseY - cy;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-
-          if (dist < MAGNET_RADIUS) {
-            const t = 1 - (dist / MAGNET_RADIUS);
-            const smooth = t * t * (3 - 2 * t);
-            target = 1 + (MAGNET_MAX_SCALE - 1) * smooth;
-          }
-        }
-
-        let current = magnetScaleState.get(item) || 1;
-        current += (target - current) * smoothFactor;
-
-        const settled = Math.abs(current - target) < MAGNET_SETTLE_EPS && Math.abs(target - 1) < MAGNET_SETTLE_EPS;
-        const hadTransform = !!img.style.transform;
-
-        if (settled && !hadTransform) continue;
-        pendingUpdates.push({ item, thumbWrap, img, idx, current, settled });
-      }
-
-      // [階段 B] 集中寫入圖片 transform 縮放
-      for (let i = 0; i < pendingUpdates.length; i++) {
-        const { item, img, current, settled } = pendingUpdates[i];
-        if (settled) {
-          img.style.transform = '';
-          magnetScaleState.set(item, 1);
-        } else {
-          magnetScaleState.set(item, current);
-          img.style.transform = `scale(${current.toFixed(4)})`;
-        }
-      }
-
-      // [階段 C] 重新計算受影響編號的位置 (讀) 與寫入 (寫)
-      const idxUpdates = [];
-      for (let i = 0; i < pendingUpdates.length; i++) {
-        const { thumbWrap, img, idx } = pendingUpdates[i];
-        if (!thumbWrap || !img || !idx) continue;
-        const wrapRect = thumbWrap.getBoundingClientRect();
-        const imgRect = img.getBoundingClientRect();
-        if (!imgRect.width || !imgRect.height) continue;
-
-        const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
-        const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
-        idxUpdates.push({ idx, left, top });
-      }
-
-      for (let i = 0; i < idxUpdates.length; i++) {
-        const { idx, left, top } = idxUpdates[i];
+    // [集中寫入階段]
+    requestAnimationFrame(() => {
+      for(let i = 0; i < updates.length; i++){
+        const { idx, left, top } = updates[i];
         idx.style.left = left + 'px';
         idx.style.top = top + 'px';
       }
-    }
+    });
   }
-
-  // =====================================================================
-  // 優化重點 2：分批分線程渲染網格 (Chunked DOM Building)
-  // =====================================================================
-  function renderGrid(onComplete) {
-    grid.innerHTML = '';
-    let cursor = 0;
-    let cellSide = null;
-
-    function processChunk(deadline) {
-      const fragment = document.createDocumentFragment();
-      const batchItems = [];
-
-      while (cursor < photos.length) {
-        const item = buildGridItem(photos[cursor], cursor);
-        fragment.appendChild(item);
-        batchItems.push(item);
-        cursor++;
-
-        // 利用 requestIdleCallback 的剩餘時間判斷是否暫停，讓出 Main Thread
-        if (deadline && deadline.timeRemaining() < 3) {
-          break;
-        }
-      }
-
-      grid.appendChild(fragment);
-
-      if (batchItems.length) {
-        if (cellSide === null) {
-          const firstWrap = batchItems[0].querySelector('.thumb-wrap');
-          cellSide = firstWrap ? firstWrap.getBoundingClientRect().width : 0;
-        }
-        for (let i = 0; i < batchItems.length; i++) {
-          applyGridItemImageSize(batchItems[i], cellSide);
-        }
-      }
-
-      if (cursor < photos.length) {
-        scheduleIdle(processChunk, { fallbackDelay: 16 });
-      } else if (typeof onComplete === 'function') {
-        onComplete();
-      }
-    }
-
-    scheduleIdle(processChunk);
-  }
-</script>
