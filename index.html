@@ -11836,14 +11836,43 @@
     // 判斷、重疊比例判斷）都還是正常生效，不會變成「睡死了叫不醒」。
     // 剛落地、真的還在彈跳中的照片，速度忽大忽小、達不到「連續」這個
     // 條件，計數器會一直被重置，不會被提早打斷，彈跳手感不受影響。
+    //
+    // ---------- 這裡是這段邏輯本身的修正：實測後發現「疊住不分開」反而
+    // 變得更常發生 ----------
+    // 成因：Matter.js 修正兩個物體重疊，很多時候不是靠加速度把它們推開，
+    // 是解算器每一步直接微調位置（position correction）——這個過程本身
+    // 的「速度」數值會維持在很低的狀態（因為根本不是用加速度在推），跟
+    // 「已經真的靜止」單看速度數字幾乎沒辦法分辨。上面這段只看速度，會把
+    // 「正在被慢慢推開、但推的當下速度本來就很低」的照片，跟「真的靜止」
+    // 的照片搞混，提早把還沒推開乾淨的照片強制睡著——等於在它們還疊著
+    // 的時候，就叫引擎別再繼續處理這兩顆了，疊住的狀況因此反而變多。
+    // 修法：強制睡著之前，額外檢查一次「這顆物體現在是不是還跟別的東西
+    // 有明顯重疊沒解完」（讀 pfEngine.pairs.list 裡的精確穿透深度，
+    // 沿用跟 PF_STUCK_OVERLAP_DEPTH 一樣的資料來源，門檻拉得比它更嚴格，
+    // 只要重疊還沒收斂到接近 0，就先不強制睡、繼續讓它正常解算，等它真的
+    // 解開乾淨、深度趨近 0 之後，才會被算進「連續低速」的計數——真正因為
+    // 回彈殘留造成的靜止抖動不受影響，一樣會照常被強制睡著。
     const PF_FORCE_SLEEP_SPEED = 0.6; // 世界座標（≈px）／每影格——比 Matter.js 內建睡眠門檻寬鬆，足以蓋過殘留回彈的幅度，但仍遠低於一般移動看得出來的速度
     const PF_FORCE_SLEEP_ANGSPEED = 0.004; // 弧度／每影格
     const PF_FORCE_SLEEP_FRAMES = 20; // 連續幾影格都維持低速，才強制睡著，約 1/3 秒（60fps）
+    const PF_RESOLVE_TOLERANCE = 1; // px，重疊深度超過這個值，代表位置解算還在真的處理中，先不強制睡
     Events.on(pfEngine, 'afterUpdate', () => {
+      // 先掃一次目前這一影格「還在明顯重疊、解算尚未收斂」的物體，記成
+      // 一個集合，等一下逐一檢查每張照片時直接查表，不用每張照片都重新
+      // 掃一次 pairs.list（維持跟原本一樣的效能量級）。
+      const stillResolving = new Set();
+      const pairs = pfEngine.pairs.list;
+      for(let i = 0; i < pairs.length; i++){
+        const pair = pairs[i];
+        if(!pair.isActive || pair.collision.depth <= PF_RESOLVE_TOLERANCE) continue;
+        stillResolving.add(pair.bodyA.parent);
+        stillResolving.add(pair.bodyB.parent);
+      }
       const draggedNow = pfMouseConstraint.body;
       const checkForceSleep = (body) => {
         if(!body || body.isSleeping || body === draggedNow) return;
         if(!body.plugin) body.plugin = {};
+        if(stillResolving.has(body)){ body.plugin.pfLowMotionFrames = 0; return; } // 還在真的被推開，先不計入低速累積
         const v = body.velocity, w = body.angularVelocity;
         const isLow = Math.abs(v.x) < PF_FORCE_SLEEP_SPEED && Math.abs(v.y) < PF_FORCE_SLEEP_SPEED && Math.abs(w) < PF_FORCE_SLEEP_ANGSPEED;
         if(!isLow){ body.plugin.pfLowMotionFrames = 0; return; }
