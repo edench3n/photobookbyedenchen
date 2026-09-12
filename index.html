@@ -7862,6 +7862,28 @@
   // 載入好、這張圖的輪廓數學上分解不了……）一律回傳 null，呼叫端
   // buildFallItemBody() 會自動退回舊版網格矩形法，不會讓功能整個壞掉。
   const PF_POLY_MIN_CHUNK_AREA = 6; // px²，分解出來面積小於這個值的碎片直接丟棄，避免解算器多花力氣處理幾乎沒有物理意義的細小接觸面
+  // ---------- 效能修正：桌機拖曳碰撞卡頓「誇張」的另一個放大因子 ----------
+  // 前面已經確認迭代次數（positionIterations/velocityIterations）是放大
+  // 因子之一，但真正的「本體」是這裡：quickDecomp() 對形狀複雜（凹陷、
+  // 鋸齒多）的照片，可能一路拆出十幾、二十塊凸多邊形碎片——每一塊都是
+  // 一個獨立的 Matter body part，會各自參與碰撞偵測跟接觸點解算。15 張
+  // 照片如果平均每張拆出 15 塊，等於物理世界裡實際要處理的物件數量是
+  // 225 個而不是 15 個，拖曳兩張深度重疊時要同時解算的接觸點數量因此
+  // 遠比「肉眼看到的張數」暗示的還要多，這才是「一堆照片碰撞而已，卻
+  // 消耗這麼大效能」的根本原因（迭代次數只是疊加在這個已經放大的接觸點
+  // 數量上，兩者相乘）。
+  // 修法：對每張照片的碎片數量設一個上限（PF_POLY_MAX_PARTS）——面積由
+  // 大到小排序，只留下最大的那幾塊，捨棄面積最小、對整體外形貢獻最少的
+  // 碎片（通常是鋸齒邊緣、細小的凹凸轉角）。視覺上完全不受影響（碎片只
+  // 是「看不見」的碰撞邊界，不是畫面上顯示的圖案本身），代價是被捨棄的
+  // 那幾個小角落嚴格來說會失去碰撞判定（例如某根羽毛尖端理論上可以被
+  // 穿透一點點），但這種細節在快速墜落、隨機亂疊的動態畫面裡，肉眼幾乎
+  // 不可能察覺。8 這個數字是經驗值：先抓一個「大多數照片形狀都夠用、
+  // 極端複雜形狀也能把最壞情況鎖住上限」的折衷值，可以用網址加 ?pfdebug
+  // 量測 Engine.update() 的平均/最大毫秒數，實際比較調整前後的差異，覺得
+  // 外形被削得太明顯（例如照片邊緣很多鋸齒、被拖曳頂到時常常「陷」進去
+  // 一角）可以再往上調（例如 10~12）。
+  const PF_POLY_MAX_PARTS = 8;
   function buildFallItemPolyParts(Matter, maskEntry, x, y, w, h, partOptions){
     if(!window.decomp || typeof window.decomp.quickDecomp !== 'function') return null;
     try{
@@ -7872,7 +7894,11 @@
       // （遮罩解析度越低），容許誤差跟著放大，避免把化簡跑在比遮罩本身
       // 精細度還細的無意義刻度上。
       const epsilon = Math.max(1, Math.min(w / srcW, h / srcH) * 1.4);
-      const parts = [];
+      // 先把每個候選碎片的頂點跟面積都收集起來，等所有輪廓圈都跑完、
+      // 拿到完整的碎片清單之後，才依總面積統一排序＋裁切上限——不能
+      // 邊跑邊丟，否則「先處理到的那一圈」會不公平地優先保留，即使
+      // 後面某一圈其實有面積更大、更該保留的碎片。
+      const candidates = [];
       for(const loop of loops){
         if(polygonSignedArea(loop) < 0) continue; // 鏤空內圈，不處理（見 traceMaskLoops() 的已知限制說明），只保留實心外圈
         const localPts = loop.map(p => ({ x: (p.x / srcW - 0.5) * w, y: (p.y / srcH - 0.5) * h }));
@@ -7886,11 +7912,20 @@
         for(const chunk of chunks){
           if(chunk.length < 3) continue;
           const chunkVerts = chunk.map(([cx, cy]) => ({ x: cx, y: cy }));
-          if(Math.abs(polygonSignedArea(chunkVerts)) < PF_POLY_MIN_CHUNK_AREA) continue;
-          const centre = Matter.Vertices.centre(chunkVerts);
-          parts.push(Matter.Body.create(Object.assign({}, partOptions, { position: centre, vertices: chunkVerts })));
+          const area = Math.abs(polygonSignedArea(chunkVerts));
+          if(area < PF_POLY_MIN_CHUNK_AREA) continue;
+          candidates.push({ verts: chunkVerts, area });
         }
       }
+      if(!candidates.length) return null;
+      // 超過上限才需要排序裁切；沒超過就維持原本順序，不做多餘的排序運算。
+      const kept = candidates.length > PF_POLY_MAX_PARTS
+        ? candidates.slice().sort((a, b) => b.area - a.area).slice(0, PF_POLY_MAX_PARTS)
+        : candidates;
+      const parts = kept.map(({ verts }) => {
+        const centre = Matter.Vertices.centre(verts);
+        return Matter.Body.create(Object.assign({}, partOptions, { position: centre, vertices: verts }));
+      });
       return parts.length ? parts : null;
     } catch(err){
       return null; // 任何非預期狀況一律優雅退回舊版矩形法
