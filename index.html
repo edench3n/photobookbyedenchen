@@ -10880,6 +10880,39 @@
   let pfLoopLastTime = null;
   let pfAccumulatorMs = 0;
 
+  // ---------- 臨時偵錯量測：只在明確開啟時才啟動，平常完全不影響效能 ----------
+  // 用來實際回答「碰撞到底吃掉多少效能」這個問題——與其憑感覺猜測要調哪個
+  // 參數，直接在使用者自己的機器上量出：(1) 目前總共有幾個碰撞部件
+  // （每張照片被 poly-decomp 拆成的小凸多邊形加總）、(2) 目前有幾組「活躍
+  // 碰撞對」（正在互相接觸、需要解算的組數）、(3) 每次 Engine.update() 實際
+  // 花了幾毫秒（平均／最大）、(4) 有沒有觸發「追趕補步」（steps > 1，代表
+  // 已經跟不上、正在啟動 pfLoopTick() 那個「越慢就補越多步、補越多步就
+  // 更慢」的疊加迴圈）。
+  // 開啟方式：網址加 ?pfdebug，或在 console 執行 window.__PF_DEBUG = true。
+  // 不開啟時，下面這段除了一次性的字串比對之外沒有任何額外開銷，
+  // Engine.update() 呼叫方式、迭代次數、碰撞形狀完全不受影響——純觀察，
+  // 不會干擾要測量的東西本身。
+  const PF_DEBUG_PERF = /[?&]pfdebug\b/i.test(location.search) || window.__PF_DEBUG === true;
+  let pfDebugFrameMs = 0, pfDebugFrameMaxMs = 0, pfDebugFrameCount = 0;
+  let pfDebugSubstepFrames = 0, pfDebugLastLog = 0;
+  function pfDebugLog(){
+    if(!PF_DEBUG_PERF) return;
+    const nowTs = performance.now();
+    if(nowTs - pfDebugLastLog < 1000) return;
+    pfDebugLastLog = nowTs;
+    let totalParts = 0;
+    const allBodies = pfDvdItem ? pfItems.concat([pfDvdItem]) : pfItems;
+    allBodies.forEach(({ body }) => { if(body && body.parts) totalParts += Math.max(1, body.parts.length - 1); });
+    const activeContacts = pfEngine ? pfEngine.pairs.list.filter(p => p.isActive).length : 0;
+    const avgMs = pfDebugFrameCount ? (pfDebugFrameMs / pfDebugFrameCount) : 0;
+    console.log(
+      `[pf-debug] 物件數=${allBodies.length} 碰撞部件總數=${totalParts} 活躍碰撞對=${activeContacts} ` +
+      `Engine.update 平均=${avgMs.toFixed(2)}ms 最大=${pfDebugFrameMaxMs.toFixed(2)}ms ` +
+      `補步影格數=${pfDebugSubstepFrames}/${pfDebugFrameCount}`
+    );
+    pfDebugFrameMs = 0; pfDebugFrameMaxMs = 0; pfDebugFrameCount = 0; pfDebugSubstepFrames = 0;
+  }
+
   function pfLoopTick(now){
     pfLoopRafId = requestAnimationFrame(pfLoopTick);
     if(pfLoopLastTime === null){ pfLoopLastTime = now; return; } // 第一幀還沒有「上一幀」可以算真實經過時間，先跳過，下一幀開始正常累加
@@ -10888,10 +10921,19 @@
     if(frameMs > 250) frameMs = 250; // 分頁切到背景很久才切回來：真實經過時間可能長達數秒甚至數分鐘，夾住上限，避免下面 while 迴圈瞬間跑出天文數字的補步
     pfAccumulatorMs += frameMs;
     let steps = 0;
+    const pfDebugStart = PF_DEBUG_PERF ? performance.now() : 0;
     while(pfAccumulatorMs >= PF_FIXED_STEP_MS && steps < PF_MAX_SUBSTEPS){
       window.Matter.Engine.update(pfEngine, PF_FIXED_STEP_MS);
       pfAccumulatorMs -= PF_FIXED_STEP_MS;
       steps++;
+    }
+    if(PF_DEBUG_PERF && steps > 0){
+      const elapsed = performance.now() - pfDebugStart;
+      pfDebugFrameMs += elapsed;
+      if(elapsed > pfDebugFrameMaxMs) pfDebugFrameMaxMs = elapsed;
+      pfDebugFrameCount++;
+      if(steps > 1) pfDebugSubstepFrames++;
+      pfDebugLog();
     }
     if(steps >= PF_MAX_SUBSTEPS) pfAccumulatorMs = 0; // 真的追不上（例如裝置效能長期跟不上），與其繼續攢著、之後某一幀忽然爆發式補一大串步造成瞬間卡頓，不如直接捨棄多餘的落後量，讓它從這一幀重新開始正常累積
     // DOM 同步移到這裡、迴圈外面，只在這一影格「真的有物理進展」時呼叫一次
@@ -11671,9 +11713,24 @@
     // 彈簧本身沒解準、疊加出額外一層晃動或穿透感。
     const pfMobile = isDetailMobile();
     pfEngine = Engine.create({
-      positionIterations: pfMobile ? 8 : 14,
-      velocityIterations: pfMobile ? 5 : 8,
-      constraintIterations: pfMobile ? 3 : 4,
+      // ---------- 效能優化：桌機迭代次數從 14/8/4 調降到 10/6/3 ----------
+      // 原本為了修「拖曳照片去頂別張照片，會先滑進去才慢慢彈開」的手感，
+      // 把桌機迭代次數從 Matter.js 預設的 6/4/2 一路調到 14/8/4（總計
+      // position+velocity 從預設的 10 拉高到 22，超過 2 倍）。問題是這批
+      // 照片的碰撞形狀是 poly-decomp 拆出來的複合多邊形（見上面
+      // buildFallItemBody() 的完整說明），拖曳造成多張照片同時深度重疊時，
+      // 接觸點數量本來就遠比一般矩形碰撞多，迭代次數又疊加在這個已經放大
+      // 的接觸點數量上，兩者相乘才是桌機拖曳碰撞「誇張」卡頓的根本原因。
+      // 調降到 10/6/3（總計 16，介於預設 10 跟原本 22 之間、更靠近預設）：
+      // 犧牲一點點「立刻擋住不滑進去」的手感精準度，換取拖曳多物件碰撞
+      // 時單一影格的運算量明顯下降。可以用上面新加的 pfdebug 量測工具
+      // （網址加 ?pfdebug）實際比較調整前後 Engine.update() 的平均/最大
+      // 毫秒數，如果手感回滑得太明顯，可以再往上微調（例如 12/7/3）找一個
+      // 兩邊都能接受的平衡點。手機端維持原本的 8/5/3 不變——手機本來就沒有
+      // 明顯卡頓回報，不需要跟著降。
+      positionIterations: pfMobile ? 8 : 10,
+      velocityIterations: pfMobile ? 5 : 6,
+      constraintIterations: pfMobile ? 3 : 3,
       enableSleeping: true,
     });
     pfEngine.gravity.y = PHOTO_FALL_GRAVITY;
