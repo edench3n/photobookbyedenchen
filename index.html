@@ -12420,6 +12420,29 @@
       pfItems.push({ body, el, w: itemW, h: itemH });
     };
 
+    // ---------- 修正：「圖片還在螢幕外（還沒掉下來）就已經重疊」----------
+    // 原本 startX 是每張圖各自獨立抽一次亂數，完全沒檢查跟其他張是否
+    // 重疊；startY 雖然有依 index 往上錯開（PHOTO_FALL_SPAWN_STAGGER_PX），
+    // 但錯開的間距是固定的 130px，跟每張圖實際的高度（itemH，尤其是放大版
+    // 的大圖）完全無關——當某兩張圖剛好抽到差不多的 startX、而它們的
+    // 高度又比 130px 大（或間距被 index 差距拉得不夠開）時，兩張圖在
+    // 「還沒進入螢幕、y 還是負值」的階段，矩形範圍本來就已經疊在一起了。
+    // 等物理引擎開始模擬、它們往下掉、陸續跨過螢幕上緣進入可視範圍時，
+    // 使用者看到的就是「兩張圖一開始就疊著一起掉下來」，而不是各自獨立
+    // 掉落——這正是問題成因。
+    // 修法：這裡改成有「防重疊檢查」的擺放方式——每次算出 startX 之後，
+    // 都拿它跟前面已經擺好的每一張圖的矩形（startX/startY/itemW/itemH
+    // 換算出的 left/right/top/bottom）比對，只要跟任何一張在垂直方向
+    // 有重疊（top/bottom 區間相交）、水平方向也重疊（left/right 區間
+    // 相交），就重新抽一次 startX，最多重試 FS_SPAWN_MAX_ATTEMPTS 次；
+    // 找不到完全不重疊的位置時（極端情況，例如同一批圖片數量太多、螢幕
+    // 太窄擠不下），就用最後一次抽到的位置，不會卡住整個流程。
+    // 這樣所有圖片在還沒掉下來、都還在螢幕外面的階段，彼此的矩形範圍
+    // 保證兩兩不重疊，掉下來的視覺效果自然就是「一張一張各自獨立」。
+    const placedFallSpawnRects = [];
+    const FS_SPAWN_MAX_ATTEMPTS = 40;
+    const FS_SPAWN_MARGIN_PX = 6; // 留一點點間距，不要剛好貼邊擦身而過
+
     for(let i = 0; i < fallCount; i++){
       // 現在掉落的是「漂浮物件圖片庫」（dvdEImages）裡的去背圖，不是
       // 首頁相片——pool 裡每一項是 {src, scale} 物件。
@@ -12445,8 +12468,26 @@
       el.style.width = itemW + 'px';
       el.style.height = itemH + 'px';
 
-      const startX = itemW / 2 + Math.random() * Math.max(1, vw - itemW);
       const startY = -(PHOTO_FALL_SPAWN_BASE_PX + i * PHOTO_FALL_SPAWN_STAGGER_PX + Math.random() * PHOTO_FALL_SPAWN_JITTER_PX);
+      const spawnTop = startY - itemH / 2 - FS_SPAWN_MARGIN_PX;
+      const spawnBottom = startY + itemH / 2 + FS_SPAWN_MARGIN_PX;
+      let startX = itemW / 2 + Math.random() * Math.max(1, vw - itemW);
+      for(let attempt = 0; attempt < FS_SPAWN_MAX_ATTEMPTS; attempt++){
+        const spawnLeft = startX - itemW / 2 - FS_SPAWN_MARGIN_PX;
+        const spawnRight = startX + itemW / 2 + FS_SPAWN_MARGIN_PX;
+        const overlapsExisting = placedFallSpawnRects.some((r) => {
+          if(spawnBottom <= r.top || spawnTop >= r.bottom) return false; // 垂直方向沒交集，不算重疊
+          return !(spawnRight <= r.left || spawnLeft >= r.right); // 水平方向也有交集才算真的重疊
+        });
+        if(!overlapsExisting) break;
+        startX = itemW / 2 + Math.random() * Math.max(1, vw - itemW); // 重疊就重新抽一次，找位置
+      }
+      placedFallSpawnRects.push({
+        left: startX - itemW / 2 - FS_SPAWN_MARGIN_PX,
+        right: startX + itemW / 2 + FS_SPAWN_MARGIN_PX,
+        top: spawnTop,
+        bottom: spawnBottom,
+      });
 
       // 修正「照片掉落中途突然閃動一下」的根本成因：這個 div 平常只有
       // width/height 被設定，transform 完全沒設過——CSS 預設的
