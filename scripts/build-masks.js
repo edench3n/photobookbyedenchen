@@ -10,23 +10,38 @@
  * 依賴 build-e-manifest.js 先跑過、產生 e-manifest.json + e-images/，
  * 這裡直接讀那份本地檔案，不用再打一次 Google Drive API。
  *
- * ---------- 修正：遮罩座標系統跟前端「裁切後的圖」對不上 ----------
- * 前端流程是「先用 trimLoadedImage() 裁掉圖片四周的透明留白，再對裁切
- * 後的那張小圖算遮罩」（見 index.html 的 trimLoadedImage() / 
- * requestAlphaMask() 說明），遮罩的正規化座標（0~1）因此是相對「裁切後
- * 的框」，不是相對「原始、還帶著留白的整張圖」。
- * 這裡如果直接對 e-images/ 裡還沒裁切的原始圖算遮罩，兩邊座標系統會對
- * 不上：同樣是 0~1，一個框是裁切後的小框、一個是還帶著留白的大框，
- * 套到畫面上遮罩範圍就會跑位、往外多凸出一圈，導致碰撞判斷提早重疊
- * （肉眼看到的症狀是「圖案明明還沒真的碰到，就已經疊在一起」）。
- * 修法：算遮罩之前，先做跟前端 trimLoadedImage() 完全同一步「掃描 alpha
- * 找出最小可視範圍、裁掉四周留白」，再對裁切後的圖算遮罩，兩邊座標系統
- * 才會一致。
+ * ---------- 精細度：離線不受即時運算的效能限制，網格解析度大幅拉高 ----------
+ * 前端「即時運算」那組常數（PF_ALPHA_MASK_MAX_DIM=72／FULL_CAP_DIM=560）
+ * 是為了「使用者剛進站、瀏覽器主執行緒還在忙其他事」這個情境妥協出來的
+ * 數字，網格太粗，遇到弧形、斜角輪廓時，格子邊界跟實際去背邊緣之間會有
+ * 明顯落差，畫面上看起來就是「碰撞邊界跟圖案本身之間留了一圈白邊」。
+ * 這裡是離線批次跑、沒有使用者在等、GitHub Actions 的執行時間也綽綽有餘，
+ * 直接把網格解析度拉高到原本的 3 倍見方（約 9 倍格數），弧形/斜角邊緣的
+ * 階梯感會明顯變細，貼合度大幅提升。
  *
- * 演算法（裁切門檻、遮罩兩階段縮圖、格內多數決、輪廓點抽取）都跟
- * index.html 前端 trimLoadedImage() / buildAlphaMaskFromSourceChunked() /
- * finishMask() 完全同一套，確保產出格式、座標系統都跟前端 requestAlphaMask()
- * 讀取 masks.json 時預期的完全吻合。
+ * ---------- 邊緣門檻：同時調高「怎樣算實心」的 alpha 判斷標準 ----------
+ * 圖片邊緣做去背時常會留一圈半透明的反鋸齒像素（alpha 介於 0～255 之間，
+ * 不是非黑即白）。前端沿用的門檻（alpha>10 就算「有畫到東西」）是給裁切
+ * 留白用的，門檻刻意放得很寬鬆，避免把圖案邊緣的反鋸齒淡色像素也一併
+ * 裁掉；但拿同一個寬鬆門檻來決定「遮罩要不要把這一格算進碰撞範圍」，
+ * 就會把那一整圈肉眼看起來偏白、幾乎透明的反鋸齒像素也算進「實心」
+ * 範圍，遮罩因此比視覺上看到的圖案邊緣還要再往外凸出一圈——這正是
+ * 「白邊」的另一個成因（不是只有網格太粗）。
+ * 這裡把「算不算實心」的門檻大幅拉高（PF_ALPHA_MASK_THRESHOLD），只有
+ * 真正視覺上「看起來是圖案本身」的像素才會被算進遮罩，那一圈半透明的
+ * 反鋸齒像素會被視為背景，邊界因此收得更貼近肉眼實際看到的輪廓。
+ * 注意：這個門檻只影響「遮罩要不要把這一格標記為實心」，不影響下面
+ * trimToVisibleCanvas() 用來裁掉四周留白、決定座標系統的那個門檻
+ * （TRIM_ALPHA_THRESHOLD）——那個門檻必須跟 index.html 的 trimLoadedImage()
+ * 完全一致才不會座標系統對不上，這裡沒有動它。
+ *
+ * ---------- 檔案體積：mask 欄位改成「位元打包」的 base64 字串 ----------
+ * 網格解析度拉高到 9 倍，如果還是「每一格存一個 JSON 數字」，masks.json
+ * 體積會跟著等比例膨脹。既然每一格只有 0/1 兩種值，改成 1 個 bit 表示、
+ * 8 格塞進 1 個 byte，再整包轉成 base64 字串存進 JSON——同樣格數，檔案
+ * 大小大約只剩「數字陣列」寫法的 1/20 左右。對應地，index.html 那邊多了
+ * 一個 decodeMaskBits() 把這個字串還原成原本的 0/1 陣列，其餘既有程式碼
+ * 完全不用再改。
  *
  * 用法：
  *   node scripts/build-masks.js
@@ -43,21 +58,27 @@ const OUTPUT_DIR = process.env.OUTPUT_DIR || process.cwd();
 const MANIFEST_PATH = path.join(OUTPUT_DIR, 'e-manifest.json');
 const MASKS_PATH = path.join(OUTPUT_DIR, 'masks.json');
 
-// 跟 index.html 的 trimLoadedImage() 用同一個門檻：alpha 大於這個值才算
-// 「真的有畫到東西」，忽略幾乎透明的雜訊殘留像素。
+// 跟 index.html 的 trimLoadedImage() 用同一個門檻——這個絕對不能跟前端
+// 不一致，否則裁切留白用的座標系統會跟前端對不上（完整理由見上面說明）。
 const TRIM_ALPHA_THRESHOLD = 10;
 // 跟 index.html 的 estimateEdgeBackgroundColor()／DVD_TRIM_BG_COLOR_THRESHOLD
 // 同一組數值：處理「素材本身沒有去背、是純色背景畫布」的備援情況。
 const TRIM_BG_COLOR_THRESHOLD = 26;
 
-// 跟 index.html 裡「高畫質」那組常數完全一致（對應前端非低效能裝置的
-// 那組數值）。離線預算不受裝置效能限制，直接用最高精細度即可——前端
-// 不管使用者是不是低效能裝置，只要查表命中就會直接套用這份現成資料，
-// 不會再自己重算，所以這裡值得用最好的畫質產生一次。
-const PF_ALPHA_MASK_MAX_DIM = 72;
-const PF_ALPHA_MASK_THRESHOLD = 10;
+// ---------- 離線精細度設定（可依需要再調） ----------
+// MAX_DIM：遮罩網格最長邊的格數。72 → 220，約 3 倍見方、9 倍格數。
+// FULL_CAP_DIM：算遮罩之前，圖片本身先縮放到的最長邊像素數，理論上只要
+// 不小於 MAX_DIM 太多就有意義；這裡抓到接近 e-images 實際下載解析度
+// （build-e-manifest.js 預設 IMAGE_SIZE=1000）附近，不用再更高、沒有意義
+// （來源本身就沒那麼多細節可以榨）。
+const PF_ALPHA_MASK_MAX_DIM = 220;
+const PF_ALPHA_MASK_FULL_CAP_DIM = 1200;
+// 邊緣門檻拉高：只有明顯不透明（>140／255）才算實心，把半透明反鋸齒的
+// 描邊像素排除在碰撞範圍外，邊界貼得更緊、白邊更不明顯。可依實測效果
+// 微調：數字越高，碰撞範圍收得越裡面（更保守，寧可貼合本體、犧牲一點點
+// 最邊緣的細毛/羽化細節）；數字越低，越接近原本寬鬆的判斷。
+const PF_ALPHA_MASK_THRESHOLD = 140;
 const PF_ALPHA_MASK_CELL_MAJORITY = 0.5;
-const PF_ALPHA_MASK_FULL_CAP_DIM = 560;
 
 // 從圖片四個邊框取樣顏色，統計出現次數最多的顏色當作背景色估計值——
 // 跟 index.html 的 estimateEdgeBackgroundColor() 同一套邏輯。
@@ -141,6 +162,17 @@ function trimToVisibleCanvas(image, w, h) {
   return outCanvas;
 }
 
+// 把 Uint8Array（每格一個 0/1）打包成「8 格塞 1 byte」的 base64 字串——
+// 對應 index.html 的 decodeMaskBits()，位元順序（LSB-first）兩邊要一致。
+function packMaskBits(mask) {
+  const n = mask.length;
+  const bytes = new Uint8Array(Math.ceil(n / 8));
+  for (let i = 0; i < n; i++) {
+    if (mask[i]) bytes[i >> 3] |= (1 << (i & 7));
+  }
+  return Buffer.from(bytes).toString('base64');
+}
+
 function buildAlphaMask(source, naturalW, naturalH) {
   const fullScale = Math.min(1, PF_ALPHA_MASK_FULL_CAP_DIM / Math.max(naturalW, naturalH));
   const fullW = Math.max(1, Math.round(naturalW * fullScale));
@@ -197,7 +229,7 @@ function buildAlphaMask(source, naturalW, naturalH) {
     ? { u0: pxMinX / fullW, u1: (pxMaxX + 1) / fullW, v0: pxMinY / fullH, v1: (pxMaxY + 1) / fullH }
     : null;
 
-  return { mask: Array.from(mask), w: maskW, h: maskH, boundary: boundaryPts, fullBBox };
+  return { mask: packMaskBits(mask), w: maskW, h: maskH, boundary: boundaryPts, fullBBox };
 }
 
 async function main() {
