@@ -11776,7 +11776,17 @@
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
         if(!pair.isActive) continue;
-        const a = pair.bodyA, b = pair.bodyB;
+        // ---------- 修正：複合物體（compound body）碰撞到的是零件，不是整個物件 ----------
+        // buildFallItemBody() 組出來的每張照片，是「一堆小矩形」拼成的複合
+        // 物體（見該函式的完整說明）。Matter.js 的碰撞偵測是逐一對這些小
+        // 矩形零件（part）做的，pair.bodyA / pair.bodyB 實際上是「碰到的
+        // 那個零件」，不是整張照片本身——零件自己的 isSleeping 從建立之後
+        // 就沒有人維護、永遠是初始值，讀它幾乎等於在賭。真正代表整張照片
+        // 睡眠狀態的，是零件的 .parent（頂層物件；如果本來就不是複合物體、
+        // 是單一矩形，.parent 會指回自己，不受影響）。Matter.js 內建的
+        // Sleeping.afterCollisions() 原始碼也是這樣處理（用
+        // collision.bodyA.parent 而不是直接用 bodyA），這裡照官方的做法補上。
+        const a = pair.bodyA.parent, b = pair.bodyB.parent;
         if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理，不需要介入
         if(pair.collision.depth < PF_STUCK_OVERLAP_DEPTH) continue; // 只是貼著的正常靜止接觸，不是真的卡住，不要叫醒
         if(a.isSleeping) Matter.Sleeping.set(a, false);
@@ -11821,11 +11831,27 @@
     // `if(!a.isSleeping && !b.isSleeping) continue` 那行會直接跳過），完全
     // 靜止、雙雙睡著的堆疊也不會無故被碰到（沒有碰撞關係結束，事件根本
     // 不會觸發）。
+    //
+    // ---------- 這裡是第三次修正、也是真正的根本原因：前兩次的判斷式讀的
+    // 其實是碰撞「零件」的睡眠狀態，不是整張照片的 ----------
+    // 前兩輪修正邏輯方向都是對的（監聽碰撞結束、擴大到鏈式喚醒），但一直
+    // 沒有完全解決，因為判斷式裡讀的 `pair.bodyA.isSleeping` /
+    // `pair.bodyB.isSleeping`，這兩個其實是「碰撞偵測當下實際碰到的那個
+    // 小矩形零件」，不是整張照片本身（原因跟上面 PF_STUCK_OVERLAP_DEPTH
+    // 那段的說明一樣：照片是複合物體，碰撞偵測逐零件進行）。零件自己的
+    // isSleeping 建立之後沒有人維護，讀起來時對時錯——這正是「常常發生」
+    // 卻又「不是每次都發生」的原因：剛好偵測到的那個零件，它的殘留旗標
+    // 湊巧看起來是「醒著」時，這裡的判斷就會誤判成「兩顆都醒著、不用管」
+    // 直接跳過，明明真正的頂層照片其實是睡著的，該被叫醒的那次就這樣被
+    // 漏掉了。
+    // 修法：一律用 .parent 拿到真正的頂層物件（複合物體本身；如果不是
+    // 複合物體，.parent 指回自己，不受影響）再讀/寫 isSleeping，這才是
+    // Matter.js 內建 Sleeping.afterCollisions() 原始碼實際採用的做法。
     Events.on(pfEngine, 'collisionEnd', (event) => {
       const pairs = event.pairs;
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
-        const a = pair.bodyA, b = pair.bodyB;
+        const a = pair.bodyA.parent, b = pair.bodyB.parent;
         if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著／兩顆都睡著，都不是「一動一靜」失去支撐的情況，不用介入
         if(a.isSleeping) Matter.Sleeping.set(a, false);
         if(b.isSleeping) Matter.Sleeping.set(b, false);
@@ -11866,7 +11892,13 @@
       const pairs = event.pairs;
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
-        const other = pair.bodyA === dvdBody ? pair.bodyB : (pair.bodyB === dvdBody ? pair.bodyA : null);
+        // 同樣要用 .parent：飄動的 e 如果是複合物體（多個小矩形拼成，見
+        // buildFallItemBody() 的完整說明），pair.bodyA/bodyB 拿到的是碰撞
+        // 當下那個小矩形零件，直接拿去跟 dvdBody（頂層物件）比較永遠不會
+        // 相等，這個判斷式會整個失效、永遠偵測不到撞牆。理由跟上面
+        // PF_STUCK_OVERLAP_DEPTH／collisionEnd 那兩段完全一樣。
+        const bodyA = pair.bodyA.parent, bodyB = pair.bodyB.parent;
+        const other = bodyA === dvdBody ? bodyB : (bodyB === dvdBody ? bodyA : null);
         if(!other) continue;
         if(other.label !== 'pfLeftWall' && other.label !== 'pfRightWall' && other.label !== 'pfGround') continue;
         const isStackedPreviewLayout = window.innerWidth <= 640; // 對齊 CSS 手機版 preview-col 改成上下堆疊的 breakpoint
