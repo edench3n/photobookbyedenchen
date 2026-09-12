@@ -7859,8 +7859,9 @@
 
   // 把某張圖的 alpha 遮罩，轉換成一批貼合真實輪廓的凸多邊形 part（供
   // Body.create({parts}) 組成複合物體）。任何一步失敗（poly-decomp 還沒
-  // 載入好、這張圖的輪廓數學上分解不了……）一律回傳 null，呼叫端
-  // buildFallItemBody() 會自動退回舊版網格矩形法，不會讓功能整個壞掉。
+  // 載入好、這張圖的輪廓數學上分解不了、碎片數量超出上限……）一律回傳
+  // null，呼叫端 buildFallItemBody() 會自動退回舊版網格矩形法，不會讓
+  // 功能整個壞掉。
   const PF_POLY_MIN_CHUNK_AREA = 6; // px²，分解出來面積小於這個值的碎片直接丟棄，避免解算器多花力氣處理幾乎沒有物理意義的細小接觸面
   // ---------- 效能修正：桌機拖曳碰撞卡頓「誇張」的另一個放大因子 ----------
   // 前面已經確認迭代次數（positionIterations/velocityIterations）是放大
@@ -7872,17 +7873,26 @@
   // 遠比「肉眼看到的張數」暗示的還要多，這才是「一堆照片碰撞而已，卻
   // 消耗這麼大效能」的根本原因（迭代次數只是疊加在這個已經放大的接觸點
   // 數量上，兩者相乘）。
-  // 修法：對每張照片的碎片數量設一個上限（PF_POLY_MAX_PARTS）——面積由
-  // 大到小排序，只留下最大的那幾塊，捨棄面積最小、對整體外形貢獻最少的
-  // 碎片（通常是鋸齒邊緣、細小的凹凸轉角）。視覺上完全不受影響（碎片只
-  // 是「看不見」的碰撞邊界，不是畫面上顯示的圖案本身），代價是被捨棄的
-  // 那幾個小角落嚴格來說會失去碰撞判定（例如某根羽毛尖端理論上可以被
-  // 穿透一點點），但這種細節在快速墜落、隨機亂疊的動態畫面裡，肉眼幾乎
-  // 不可能察覺。8 這個數字是經驗值：先抓一個「大多數照片形狀都夠用、
-  // 極端複雜形狀也能把最壞情況鎖住上限」的折衷值，可以用網址加 ?pfdebug
-  // 量測 Engine.update() 的平均/最大毫秒數，實際比較調整前後的差異，覺得
-  // 外形被削得太明顯（例如照片邊緣很多鋸齒、被拖曳頂到時常常「陷」進去
-  // 一角）可以再往上調（例如 10~12）。
+  // ---------- 修正：上一版做法（超過上限就丟掉面積最小的碎片）造成
+  // 「照片因為重力被緩慢推進另一張照片的邊界裡」----------
+  // 成因：丟掉的那幾塊碎片，雖然面積比其他塊小，但仍然是照片外形真實
+  // 存在的一部分——丟掉之後，複合物體在那個位置就完全沒有碰撞形狀了，
+  // 等於在照片邊界上開了一個「洞」。別的照片被重力持續往下壓、剛好壓到
+  // 這個洞的位置時，因為那裡根本沒有東西可以擋，會直接穿過去、越陷越深
+  // ——肉眼看起來就是「緩慢被推進去」，其實不是解算沒收斂，是真的從
+  // 缺口穿過去了。這跟迭代次數（positionIterations）完全無關，所以光是
+  // 調高迭代次數沒辦法解決。
+  // 修法：碎片數量超過上限時，不再挑著丟——改成整張照片直接放棄
+  // poly-decomp、回傳 null，讓呼叫端 buildFallItemBody() 自動退回下面的
+  // buildFallItemPhysicsRects()（網格矩形近似法）。矩形法是用合併過的
+  // 矩形「完整覆蓋」整張遮罩，形狀精細度較低（比較方正、不貼合鋸齒邊緣），
+  // 但保證不會有洞、不會被穿透。也就是說：形狀簡單的照片繼續享有 poly-
+  // decomp 的精準碰撞跟省下來的效能；只有極少數形狀複雜到會拆出很多碎片
+  // 的照片，才退回精細度較低但保證完整覆蓋的矩形法——用犧牲那幾張照片的
+  // 形狀精準度，換取「絕對不會有碰撞破洞」，而不是像上一版一樣兩者都想要
+  // 卻犧牲了正確性。8 這個數字是經驗值，可以用網址加 ?pfdebug 量測
+  // Engine.update() 的平均/最大毫秒數，看退回矩形法的照片張數／效能差異，
+  // 決定要不要調整。
   const PF_POLY_MAX_PARTS = 8;
   function buildFallItemPolyParts(Matter, maskEntry, x, y, w, h, partOptions){
     if(!window.decomp || typeof window.decomp.quickDecomp !== 'function') return null;
@@ -7894,10 +7904,6 @@
       // （遮罩解析度越低），容許誤差跟著放大，避免把化簡跑在比遮罩本身
       // 精細度還細的無意義刻度上。
       const epsilon = Math.max(1, Math.min(w / srcW, h / srcH) * 1.4);
-      // 先把每個候選碎片的頂點跟面積都收集起來，等所有輪廓圈都跑完、
-      // 拿到完整的碎片清單之後，才依總面積統一排序＋裁切上限——不能
-      // 邊跑邊丟，否則「先處理到的那一圈」會不公平地優先保留，即使
-      // 後面某一圈其實有面積更大、更該保留的碎片。
       const candidates = [];
       for(const loop of loops){
         if(polygonSignedArea(loop) < 0) continue; // 鏤空內圈，不處理（見 traceMaskLoops() 的已知限制說明），只保留實心外圈
@@ -7918,11 +7924,10 @@
         }
       }
       if(!candidates.length) return null;
-      // 超過上限才需要排序裁切；沒超過就維持原本順序，不做多餘的排序運算。
-      const kept = candidates.length > PF_POLY_MAX_PARTS
-        ? candidates.slice().sort((a, b) => b.area - a.area).slice(0, PF_POLY_MAX_PARTS)
-        : candidates;
-      const parts = kept.map(({ verts }) => {
+      // 超過上限：整批放棄，回傳 null 交給呼叫端退回矩形法（見上方完整
+      // 說明），不再挑著丟碎片、不再製造碰撞破洞。
+      if(candidates.length > PF_POLY_MAX_PARTS) return null;
+      const parts = candidates.map(({ verts }) => {
         const centre = Matter.Vertices.centre(verts);
         return Matter.Body.create(Object.assign({}, partOptions, { position: centre, vertices: verts }));
       });
