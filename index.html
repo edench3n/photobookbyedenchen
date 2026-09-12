@@ -7213,9 +7213,38 @@
   // 量明顯減少，換來的精細度差異在撞牆判斷這個用途上肉眼感覺不出來。
   // 桌機、或原本就有真正 requestIdleCallback 且核心數足夠的裝置，維持
   // 原本數值不變，畫質/精細度完全不受影響。
-  const PF_ALPHA_MASK_MAX_DIM = DVD_LOW_POWER_DEVICE ? 48 : 72; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能
+  // ---------- 修正：沒被 masks.json 收錄的照片（新加進 Drive 資料夾、
+  // 還沒重跑 build-masks.js 那批），碰撞外形會明顯縮水 ----------
+  // 這裡原本是 48/72，遠低於 buildFallItemPhysicsRects() 用來拆碰撞矩形的
+  // PF_BODY_GRID_MAX（70/140，見該常數）——只要一張照片查不到離線預算好的
+  // masks.json 資料，requestAlphaMask() 就會靜靜退回這裡即時算的粗遮罩，
+  // 而 buildFallItemPhysicsRects() 的 scaleFactor = round(遮罩邊長 /
+  // PF_BODY_GRID_MAX) 在遮罩邊長本來就小於 PF_BODY_GRID_MAX 時永遠算出 1，
+  // 等於完全被這裡的解析度瓶頸卡死，碰撞外形因此比其他「有離線資料」的
+  // 照片明顯縮水一大截——這正是「同一批堆疊照片，某幾張特別容易疊在一起
+  // 不會撞開」的根本成因，且只發生在沒被 masks.json 收錄的那幾張，跟遮罩
+  // 精細度、格子合併演算法怎麼調都無關。
+  // 修法：把這裡直接調高到跟 PF_BODY_GRID_MAX 相等（70/140），讓即時退回
+  // 路徑也能撐滿 buildFallItemPhysicsRects() 原本就準備好的精細度，不再
+  // 被這個更早、更嚴格的上限攔在前面。PF_ALPHA_MASK_FULL_CAP_DIM（中繼
+  // 解析度 360/560）本來就遠大於這裡的新數值，撞牆判斷用的每影格取樣
+  // （sampleAlphaMaskSolid()）也是 O(1) 陣列查表、不受總解析度影響，只有
+  // 「建立遮罩」這個一次性、已經包在 requestIdleCallback 分批裡的運算量
+  // 會等比例變高，可接受。
+  const PF_ALPHA_MASK_MAX_DIM = DVD_LOW_POWER_DEVICE ? 70 : 140; // 遮罩取樣格數上限（長邊），數字越大判斷越精細但越吃效能；跟 PF_BODY_GRID_MAX 保持一致，見上面完整說明
   const PF_ALPHA_MASK_THRESHOLD = 10; // 跟 DVD_TRIM_ALPHA_THRESHOLD 用同一個容忍值，判斷是否為「有畫到東西」
-  const PF_ALPHA_MASK_CELL_MAJORITY = 0.5; // 縮小成遮罩格子時，這一格裡「有畫到東西」的像素要佔多少比例才算整格實心——見下面 buildAlphaMaskFromSourceChunked() 內的完整說明，避免只沾到一點顏色的邊緣格被整格補滿，讓遮罩邊界比原圖實際邊緣多凸出一圈
+  // ---------- 修正：細長突起（蝴蝶觸角、瓢蟲的腳、番茄藤蔓）沿整條邊緣
+  // 被系統性侵蝕掉，碰撞外形往內縮一圈 ----------
+  // 「過半才算實心」這個門檻對本來就細（單一格覆蓋率天生就低）的部位很
+  // 不友善：不是邊緣某幾格運氣不好被判掉，而是整條細長區域從頭到尾覆蓋率
+  // 都在門檻以下，於是整條都被判定成「不實心」，讓碰撞外形沿著這些細長
+  // 部位整條往內縮，跟其他照片實際碰不到——這跟下面 hasSolidCell 那個
+  // 「整張圖都不合格才整批退回寬鬆門檻」的保險是兩回事：這裡是「圖案大部分
+  // 區域合格、只有細長部位不合格」，不會觸發那個整批退回機制。
+  // 從 0.5 調低到 0.2：門檻降低會讓遮罩邊界略微往外凸出一點（原本這個
+  // 門檻存在的目的），但換來細長部位不再被整條抹除，對這批多半是異形去背
+  // 昆蟲/植物素材來說，後者的影響遠大於前者。
+  const PF_ALPHA_MASK_CELL_MAJORITY = 0.2; // 縮小成遮罩格子時，這一格裡「有畫到東西」的像素要佔多少比例才算整格實心——見上面完整說明
 
   // src -> {mask:Uint8Array(0/1), w, h}｜null（讀取失敗，永久視為沒有遮罩可用）。
   // 沒有這個 key 代表「還沒開始建立」；建立中的狀態另外用 Set 追蹤，避免
@@ -7670,7 +7699,10 @@
   // 進行，格數越多、列數越多，複合物體的 part 數量大致跟列數成正比）；
   // 效能較弱裝置比照 PF_ALPHA_MASK_MAX_DIM 的做法同步調降。
   const PF_BODY_GRID_MAX = DVD_LOW_POWER_DEVICE ? 70 : 140;
-  const PF_BODY_GRID_CELL_MAJORITY = 0.5; // 跟 PF_ALPHA_MASK_CELL_MAJORITY 同樣的道理：降到粗網格時，這一格要「多數」原始像素都有畫到東西才算整格實心，避免只沾到一點顏色的邊緣格被整格補滿
+  // 跟上面 PF_ALPHA_MASK_CELL_MAJORITY 同一個理由（見該常數的完整說明）：
+  // 「過半才算實心」對蝴蝶觸角、瓢蟲的腳、番茄藤蔓這類細長部位太嚴格，會
+  // 讓碰撞外形沿著整條細長邊緣往內縮，這裡也一併調低。
+  const PF_BODY_GRID_CELL_MAJORITY = 0.2; // 跟 PF_ALPHA_MASK_CELL_MAJORITY 同樣的道理：降到粗網格時，這一格裡有畫到東西的像素要佔多少比例才算整格實心，避免細長部位被整條抹除
 
   // 把 maskEntry（見 finishMask() 的 {mask,w,h} 格式）降到粗網格、按列合併
   // 出一批矩形，每個矩形都是「以整張圖 w×h 為範圍、原點在中心」的區域座標
