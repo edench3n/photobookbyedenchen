@@ -11705,6 +11705,17 @@
     // 是直接覆寫位置，不受彈簧硬度或碰撞解算精細度影響，物理上等同
     // 「這裡真的有一堵絕對過不去的牆」。只处理拖曳中的物體，其餘掉落／
     // 堆疊中的照片完全不受影響，撞牆手感、彈開效果都維持原樣不變。
+    // ---------- 補充修正：上邊界不應該擋——照片本來就是從畫面上方掉下來
+    // 的，跟真正需要擋住的左右／下邊界性質不一樣 ----------
+    // 下面這段原本把上下左右四個邊界都一視同仁地夾住，導致使用者把照片
+    // 往上拖，拖到接近螢幕頂端就會被這裡強制拉回來，感覺像頭上卡著一片
+    // 看不見的天花板——但整個物理世界從頭到尾都沒有真的建立「天花板」
+    // 這個物體（上面 Composite.add() 只加了地板／左牆／右牆三個），純粹
+    // 是這段防呆邏輯自己把上邊界也夾住了。
+    // 修法：只保留左右／下邊界的夾限（跟左牆／右牆／地板的碰撞手感一致），
+    // 上邊界完全不夾——使用者可以自由把照片往上拖出畫面外，放手後這顆
+    // body 上方沒有任何東西擋著，跟一般掉落中的照片一樣單純受重力往下
+    // 掉回來，不會有任何新的行為或看起來卡住的狀況。
     Events.on(pfEngine, 'afterUpdate', () => {
       const draggedBody = pfMouseConstraint.body;
       if(!draggedBody) return;
@@ -11713,10 +11724,10 @@
       const halfW = (draggedBody.bounds.max.x - draggedBody.bounds.min.x) / 2;
       const halfH = (draggedBody.bounds.max.y - draggedBody.bounds.min.y) / 2;
       const minX = halfW, maxX = Math.max(halfW, viewportW - halfW);
-      const minY = halfH, maxY = Math.max(halfH, viewportH - halfH);
+      const maxY = Math.max(halfH, viewportH - halfH);
       const pos = draggedBody.position;
       const clampedX = Math.min(Math.max(pos.x, minX), maxX);
-      const clampedY = Math.min(Math.max(pos.y, minY), maxY);
+      const clampedY = Math.min(pos.y, maxY); // 只擋下邊界，不設上邊界下限
       if(clampedX !== pos.x || clampedY !== pos.y){
         Matter.Body.setPosition(draggedBody, { x: clampedX, y: clampedY });
         const vel = draggedBody.velocity;
