@@ -7748,6 +7748,155 @@
     return rects.length ? rects : null;
   }
 
+  // ---------- poly-decomp 路徑：把 alpha 遮罩描成輪廓線、化簡、分解成
+  // 幾塊貼合真實輪廓的凸多邊形 ----------
+
+  // 多邊形有號面積（shoelace 公式）。在這裡的座標系（y 向下）底下，
+  // 下面 traceMaskLoops() 描出來的「實心外圈」固定是正值、「鏤空內圈」
+  // 固定是負值，靠正負號就能分辨兩者，不用另外記狀態。
+  function polygonSignedArea(pts){
+    let sum = 0;
+    for(let i = 0; i < pts.length; i++){
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      sum += a.x * b.y - b.x * a.y;
+    }
+    return sum / 2;
+  }
+
+  // 把 alpha 遮罩的網格（0/1 實心格）描成一圈圈封閉輪廓線：對每一個實心
+  // 格的四個邊，只要「隔壁那一格不是實心」（或已經出界），這一邊就是
+  // 輪廓線的一段，方向固定成「實心區域永遠在邊的右手邊」（上緣往右、右緣
+  // 往下、下緣往左、左緣往上）——這樣同一個輪廓頂點恰好只會有一條「出邊」，
+  // 只要照著出邊一路接下去，就能自動串成一圈圈封閉迴圈，不需要额外的
+  // 連通元件分析：一張圖有好幾塊不相連的實心區域（少見但可能發生），
+  // 這裡會自然分別描出好幾圈輪廓，呼叫端不用特別處理。
+  // 已知限制：極少數「兩個實心格只用一個角相接」（棋盤狀對角相連）的
+  // 邊界情況，理論上會讓同一個頂點同時有兩條出邊，屬於點陣圖轉輪廓線
+  // 這個技巧本身常見的已知邊界情況（marching squares 的 saddle point
+  // 問題）——這裡選擇不特別處理，靠下面 buildFallItemPolyParts() 整段
+  // try/catch＋任何一圈描壞就整批退回舊版矩形法的保險機制接住，不會讓
+  // 掉落照片這個功能整個壞掉，只是那一張圖那一次退回精細度較舊。真實
+  // 照片去背後的遮罩幾乎不會出現這種人工棋盤圖案，實務上遇到的機率
+  // 極低。
+  function traceMaskLoops(maskEntry){
+    const mask = maskEntry.mask, w = maskEntry.w, h = maskEntry.h;
+    const isSolid = (x, y) => x >= 0 && x < w && y >= 0 && y < h && mask[y * w + x] === 1;
+    const edgeMap = new Map();
+    const keyOf = (x, y) => x + ',' + y;
+    for(let y = 0; y < h; y++){
+      for(let x = 0; x < w; x++){
+        if(!isSolid(x, y)) continue;
+        if(!isSolid(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y: y });
+        if(!isSolid(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });
+        if(!isSolid(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x: x, y: y + 1 });
+        if(!isSolid(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x: x, y: y });
+      }
+    }
+    const loops = [];
+    const visited = new Set();
+    for(const startKey of edgeMap.keys()){
+      if(visited.has(startKey)) continue;
+      const pts = [];
+      let curKey = startKey;
+      let guard = 0;
+      const guardMax = edgeMap.size + 4;
+      while(true){
+        if(visited.has(curKey)) break;
+        visited.add(curKey);
+        const comma = curKey.indexOf(',');
+        pts.push({ x: Number(curKey.slice(0, comma)), y: Number(curKey.slice(comma + 1)) });
+        const next = edgeMap.get(curKey);
+        if(!next) break; // 理論上每個輪廓頂點都恰有一條出邊，走到這裡代表描壞了，交給呼叫端整批放棄
+        const nextKey = keyOf(next.x, next.y);
+        if(nextKey === startKey) break; // 繞回起點，這一圈收工
+        curKey = nextKey;
+        if(++guard > guardMax) break; // 極端保險：任何未預期狀況都不會無窮迴圈卡死主執行緒
+      }
+      if(pts.length >= 3) loops.push(pts);
+    }
+    return loops;
+  }
+
+  // 點到線段的最短距離，供下面 Ramer-Douglas-Peucker 化簡使用。
+  function pfPointToSegDist(p, a, b){
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    if(lenSq < 1e-9) return Math.hypot(p.x - a.x, p.y - a.y);
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+  }
+  function pfRdpSimplify(pts, epsilon){
+    if(pts.length < 3) return pts.slice();
+    let maxDist = -1, idx = 0;
+    const first = pts[0], last = pts[pts.length - 1];
+    for(let i = 1; i < pts.length - 1; i++){
+      const d = pfPointToSegDist(pts[i], first, last);
+      if(d > maxDist){ maxDist = d; idx = i; }
+    }
+    if(maxDist > epsilon){
+      const left = pfRdpSimplify(pts.slice(0, idx + 1), epsilon);
+      const right = pfRdpSimplify(pts.slice(idx), epsilon);
+      return left.slice(0, -1).concat(right);
+    }
+    return [first, last];
+  }
+  // 描出來的輪廓線是沿著網格格線走的階梯狀折線，頂點數等於邊界格數，
+  // 直接拿去分解會產生一堆對應階梯轉角的多餘凸多邊形碎片。用 RDP 化簡
+  // 磨掉階梯本身的鋸齒，保留真正的形狀特徵（例如蝴蝶翅膀中間的 V 形
+  // 缺口這種「真的凹進去」的轉折，只要凹陷幅度超過化簡容許誤差，就
+  // 一定會被保留下來，不會被磨平）。輸入/輸出都是「不重複頭尾點」的
+  // 封閉多邊形格式：先接上第一個點湊成「首尾相同」的開放折線去跑標準
+  // 開放版 RDP（讓起點也有機會被化簡掉、不會被迫當成永遠保留的端點），
+  // 結束後再把重複的尾點拿掉。
+  function pfSimplifyPolygon(pts, epsilon){
+    if(pts.length <= 3) return pts;
+    const closed = pts.concat([pts[0]]);
+    const simplified = pfRdpSimplify(closed, epsilon);
+    if(simplified.length > 1) simplified.pop();
+    return simplified;
+  }
+
+  // 把某張圖的 alpha 遮罩，轉換成一批貼合真實輪廓的凸多邊形 part（供
+  // Body.create({parts}) 組成複合物體）。任何一步失敗（poly-decomp 還沒
+  // 載入好、這張圖的輪廓數學上分解不了……）一律回傳 null，呼叫端
+  // buildFallItemBody() 會自動退回舊版網格矩形法，不會讓功能整個壞掉。
+  const PF_POLY_MIN_CHUNK_AREA = 6; // px²，分解出來面積小於這個值的碎片直接丟棄，避免解算器多花力氣處理幾乎沒有物理意義的細小接觸面
+  function buildFallItemPolyParts(Matter, maskEntry, x, y, w, h, partOptions){
+    if(!window.decomp || typeof window.decomp.quickDecomp !== 'function') return null;
+    try{
+      const loops = traceMaskLoops(maskEntry);
+      if(!loops.length) return null;
+      const srcW = maskEntry.w, srcH = maskEntry.h;
+      // 化簡容許誤差跟著「一格網格對應多少實際像素」等比例抓，格子越粗
+      // （遮罩解析度越低），容許誤差跟著放大，避免把化簡跑在比遮罩本身
+      // 精細度還細的無意義刻度上。
+      const epsilon = Math.max(1, Math.min(w / srcW, h / srcH) * 1.4);
+      const parts = [];
+      for(const loop of loops){
+        if(polygonSignedArea(loop) < 0) continue; // 鏤空內圈，不處理（見 traceMaskLoops() 的已知限制說明），只保留實心外圈
+        const localPts = loop.map(p => ({ x: (p.x / srcW - 0.5) * w, y: (p.y / srcH - 0.5) * h }));
+        const simplified = pfSimplifyPolygon(localPts, epsilon);
+        if(simplified.length < 3) continue;
+        const worldPts = simplified.map(p => [p.x + x, p.y + y]);
+        window.decomp.makeCCW(worldPts);
+        if(typeof window.decomp.removeCollinearPoints === 'function') window.decomp.removeCollinearPoints(worldPts, 0.02);
+        if(typeof window.decomp.isSimple === 'function' && !window.decomp.isSimple(worldPts)) continue; // 化簡後仍有自我相交，這一圈放棄，不勉強塞給分解器
+        const chunks = window.decomp.quickDecomp(worldPts);
+        for(const chunk of chunks){
+          if(chunk.length < 3) continue;
+          const chunkVerts = chunk.map(([cx, cy]) => ({ x: cx, y: cy }));
+          if(Math.abs(polygonSignedArea(chunkVerts)) < PF_POLY_MIN_CHUNK_AREA) continue;
+          const centre = Matter.Vertices.centre(chunkVerts);
+          parts.push(Matter.Body.create(Object.assign({}, partOptions, { position: centre, vertices: chunkVerts })));
+        }
+      }
+      return parts.length ? parts : null;
+    } catch(err){
+      return null; // 任何非預期狀況一律優雅退回舊版矩形法
+    }
+  }
+
   // 建立最終要加進物理世界的 body：優先用上面「多矩形逼近實際形狀」的
   // 做法（回傳複合物體），遮罩還沒就緒時退回原本的矩形（+ 圓角）。
   // options 裡的 angle 刻意不直接傳給每一個小矩形——那樣會變成每個小矩形
@@ -7762,95 +7911,70 @@
     const angle = options.angle;
     const partOptions = {};
     for(const key in options){ if(key !== 'angle') partOptions[key] = options[key]; }
-    // Matter.js 每個 body 預設允許 0.05（世界座標，這裡跟畫面像素 1:1）的
-    // 「容許重疊量」(slop)：只要重疊沒超過這個值，引擎會直接視為已解決、
-    // 不再花力氣繼續修正，這是為了避免解算在浮點誤差邊緣無限微調、抖動
-    // 不收斂的正常機制，但代價是永遠會留一絲絲允許的重疊。這裡用不到那
-    // 麼多容忍空間（不需要顧慮浮點雜訊造成的抖動，複合物體本來就是離散
-    // 小矩形拼出來的），調低到 0.01，讓引擎盡量把重疊收斂到肉眼看不出來
-    // 的程度，而不是提早在還有明顯重疊時就放棄。若呼叫端自己有指定 slop
-    // 則尊重呼叫端的設定，不覆寫。
-    // ---------- 修正「照片疊在一起時會一直瘋狂抖動、停不下來」 ----------
-    // 根本成因：上面把每張照片拆成貼合真實輪廓的一整排小矩形（複合物體），
-    // 精細度越高、沿邊緣切出的小矩形越多，每一小塊都是直角。兩張這樣的
-    // 複合物體疊在一起時，實際接觸點往往不是落在「視覺上看起來平滑」的
-    // 那條邊，而是卡在某一小塊矩形的直角上——這個接觸點（法線方向）每一
-    // 影格都可能因為極些微的位置變化，在相鄰兩個小矩形的邊角之間跳來跳去，
-    // 解算出來的推開方向也跟著每一影格變來變去，肉眼看起來就是「疊在一起
-    // 的照片一直小幅度抖動、停不下來」——因為抖動本身讓 body 的動量
-    // （motion）一直沒辦法低於 Matter.js 判斷「可以睡眠」的門檻，於是永遠
-    // 不會被引擎跳過計算，變成真的「一直」抖不停，不是抖一下就停。
-    // 修法一：幫每一小塊矩形都加一點點圓角（chamfer）——半徑刻意抓得很小
-    // （最多 3px，且不超過這塊矩形本身寬/高的一半），肉眼幾乎看不出跟直角
-    // 差異，但足以把「兩塊矩形交界處那個銳利直角」磨掉一點，讓相鄰兩張
-    // 照片實際接觸到的法線方向不會因為卡在直角上而每影格亂跳，大幅減少
-    // 這種「假接觸點」造成的抖動。
-    // 修法二：slop（容許重疊量）原本被調到 0.01（世界座標≈像素），比
-    // Matter.js 內建預設 0.05 還緊很多倍——這裡的精細度已經是整排小矩形
-    // 組成的複合物體，兩兩相疊時同時存在的接觸點數量遠比一般單一矩形碰撞
-    // 多出好幾倍，即使把 position/velocity 迭代次數都調高，每一步能真正
-    // 收斂到「小於 0.01」這麼緊的重疊量，對這麼多接觸點來說還是勉強，容易
-    // 在幾種收斂不完全的接觸點之間來回拉扯、解算結果每影格略有不同，也是
-    // 抖動的一部分成因。這裡放寬回比 Matter 預設略寬的 0.06——0.01 跟 0.06
-    // 的差距換算成實際重疊量，兩者都遠小於 1 個像素，肉眼完全分辨不出來
-    // （不會重新出現「看得到縫隙／交疊」那個舊問題，那個問題的根本原因是
-    // 遮罩精細度不夠、不是 slop），但給解算器多一點點容許空間，可以讓它在
-    // 「已經幾乎重合、剩下的重疊量根本不影響觀感」時就直接放手收工，不用
-    // 再繼續為了逼近 0.01 這麼極端的目標而每影格微調、抖個不停。
-    if(partOptions.slop === undefined) partOptions.slop = 0.06;
-    const rects = buildFallItemPhysicsRects(maskEntry, w, h);
-    if(rects){
-      const parts = rects.map(r => {
-        const chamferR = Math.max(0, Math.min(3, r.w / 2 - 0.2, r.h / 2 - 0.2));
-        const rectOptions = chamferR >= 0.4
-          ? Object.assign({}, partOptions, { chamfer: { radius: chamferR } })
-          : partOptions;
-        return Bodies.rectangle(x + r.cx, y + r.cy, r.w, r.h, rectOptions);
-      });
+
+    // 把「Body.create({parts}) 之後把質心寫回 pfCenterOffset、再依 angle
+    // 設定角度」這段收尾動作抽成共用函式：poly-decomp 路徑（下面優先嘗試）
+    // 跟舊版網格矩形路徑（分解失敗時的備援）組出來的都是「一批 part →
+    // 組成複合物體」，收尾邏輯完全一樣，只差 part 陣列從哪裡來。完整原理
+    // 見下面 pfBoxCenter() 之前的說明：Body.create({parts}) 會把
+    // body.position 強制改寫成所有 part 依面積加權算出來的質心，不是我們
+    // 要的「外框矩形正中心」，這裡先記住兩者的固定偏移量，之後畫面同步
+    // 一律透過 pfBoxCenter() 換算回外框正中心，不直接用 body.position。
+    function finalizeBody(parts){
       const body = Body.create({ parts });
-      // ---------- 真正修好「複合碰撞體仍會跟視覺畫面對不齊」的根本成因 ----------
-      // Body.create({parts}) 底層是呼叫 Matter 的 Body.setParts()，它會把
-      // body.position 強制改寫成「所有小矩形（也就是實際有畫到東西的
-      // alpha 像素）依面積加權算出來的質心」，而不是我們原本想要的「整張
-      // 去背圖外框矩形的正中心」（w/2, h/2）。上面兩者只有形狀完全對稱、
-      // 顏色平均分佈在外框正中央時才會剛好重合；但這裡多半是異形去背圖
-      // （例如蕨類捲起的一端比較密、蝴蝶翅膀左右不對稱、香蕉一整串偏向
-      // 一側），質心天生就會偏離外框正中心。下面 pfSyncHandler／飛入詳細頁
-      // 動畫等每個地方，全部都是直接拿 body.position 當「外框矩形正中心」
-      // 去反推 DOM 該畫在哪裡（translate(body.position.x - w/2, ...)）——
-      // 這個假設一旦不成立，畫出來的整張圖（含外框內的透明留白）就會
-      // 整個偏移，偏移量剛好等於「質心到外框中心」這段距離。碰撞判斷本身
-      // （質心 vs 質心）其實是準的，兩張圖的碰撞體真的沒有互相穿透；但
-      // 畫面上看到的，是兩張「因為偏移而被畫錯位置」的完整外框圖片在打架，
-      // 這才是不管怎麼調網格解析度、肉眼看起來還是會交疊的真正原因。
-      // 修法：在 Body.create 把 position 改寫成質心「當下」（角度還是 0，
-      // 因為下面 Body.setAngle 還沒呼叫），先把「質心 → 外框正中心」這段
-      // 向量算出來記住（body-local 座標系下的固定偏移量，不會再變），存進
-      // Matter 官方保留給外掛自訂資料用的 body.plugin 裡。之後無論這顆
-      // body 怎麼被物理引擎轉動、位移，只要在畫面同步時把這段固定的本地
-      // 偏移量依照 body 目前的 angle 重新旋轉一次、加回 body.position，
-      // 就能還原出「外框正中心」目前真正該在的世界座標——這才是畫面元素
-      // 真正該對齊的點（見下面共用的 pfBoxCenter()）。
       body.plugin = body.plugin || {};
       body.plugin.pfCenterOffset = { x: x - body.position.x, y: y - body.position.y };
       if(typeof angle === 'number') Body.setAngle(body, angle);
       return body;
     }
-    // ---------- 擴大偵錯修正：「永遠不要用外框矩形頂替」延伸到這裡 ----------
-    // 走到這裡代表 buildFallItemPhysicsRects() 沒能拆出任何矩形。原本不分
-    // 青紅皂白，一律退回一個貼齊整張外框的矩形 body——這個退回路徑原本是
-    // 設計給「遮罩根本還沒建好」(maskEntry 是 null/undefined) 這種暫時性
-    // 情況用的保險；但現在所有呼叫端都已經改成「先等遮罩真的就緒才呼叫
-    // 這支函式」，maskEntry 幾乎不可能真的是空的。真正會走到這裡的，反而
-    // 是「遮罩確實建好了（就算套用完上面的寬鬆門檻），這張圖去背後還是
-    // 完全沒有任何顏色」這種圖片本身有問題的極端情況——這時退回滿版矩形，
-    // 等於摔下去一個使用者幾乎看不見、卻用整個外框在撞人的「隱形空氣
-    // 物件」，正是這次要徹底避免的狀況。
-    // 修法：只有「遮罩根本不存在」才用矩形頂替（維持原本對「還沒就緒」
-    // 這種暫時狀態的容忍）；遮罩確實存在但真的一格都拆不出來，直接回傳
-    // null，交給呼叫端（spawnFallingPhotos() 的 dropItem()／
+
+    // ---------- 優先路徑：poly-decomp 凹多邊形分解 ----------
+    // 把 alpha 遮罩描成輪廓線、化簡、交給 poly-decomp 分解成幾塊貼合真實
+    // 輪廓的凸多邊形（完整原理見 buildFallItemPolyParts()／traceMaskLoops()
+    // 上方的說明）。跟舊版網格矩形法比，part 數量少一個數量級、沒有網格
+    // 造成的假直角接觸點，重疊、抖動、拖曳吃效能這三個問題的根本成因
+    // （見這個檔案最上面 loadMatterJS() 旁的架構說明）都在這裡一次解決，
+    // 不需要再靠 chamfer／極端 slop 這類針對症狀的補丁。
+    // slop 這裡直接沿用 Matter.js 內建預設（不覆寫），因為凸多邊形彼此
+    // 接觸時的接觸點數量遠比一排小矩形少，不需要再靠调紧 slop 换取貼合度，
+    // 預設值本身就已經夠用；若呼叫端自己有指定 slop，一樣尊重呼叫端設定。
+    if(maskEntry){
+      const polyParts = buildFallItemPolyParts(Matter, maskEntry, x, y, w, h, partOptions);
+      if(polyParts) return finalizeBody(polyParts);
+    }
+
+    // ---------- 備援路徑：poly-decomp 沒載入好／這張圖輪廓分解失敗時，
+    // 退回舊版網格矩形逼近法 ----------
+    // 只有走到這裡（maskEntry 存在，但 buildFallItemPolyParts() 回傳
+    // null）才會用到，正常情況下幾乎不會被觸發——poly-decomp 跟 Matter.js
+    // 並行載入（見 loadMatterJS()），也已經確認過視窗雙擊當下才會建立
+    // body；真正會走到這裡的只剩「這張圖的遮罩輪廓數學上分解不了」這種
+    // 極端邊界情況（見 traceMaskLoops() 的已知限制說明），保留這條路徑
+    // 純粹是多一層安全網，不讓那極少數情況直接整張圖建不出 body。
+    // chamfer／slop 0.06 這兩個數字是網格矩形法專屬的補丁（磨掉网格直角、
+    // 放寬重疊容忍度換取不抖動，完整理由見這條路徑原本的說明），只在真的
+    // 走到這條備援路徑時才套用，不影響上面已經穩定的 poly-decomp 路徑。
+    const rectPartOptions = partOptions.slop === undefined ? Object.assign({}, partOptions, { slop: 0.06 }) : partOptions;
+    const rects = buildFallItemPhysicsRects(maskEntry, w, h);
+    if(rects){
+      const parts = rects.map(r => {
+        const chamferR = Math.max(0, Math.min(3, r.w / 2 - 0.2, r.h / 2 - 0.2));
+        const rectOptions = chamferR >= 0.4
+          ? Object.assign({}, rectPartOptions, { chamfer: { radius: chamferR } })
+          : rectPartOptions;
+        return Bodies.rectangle(x + r.cx, y + r.cy, r.w, r.h, rectOptions);
+      });
+      return finalizeBody(parts);
+    }
+    // ---------- 「永遠不要用外框矩形頂替」的例外：遮罩根本不存在 ----------
+    // 走到這裡代表 poly-decomp 路徑跟網格矩形路徑都沒能拆出任何形狀。
+    // 只有「遮罩根本不存在」（例如剛好在還沒暖機完成那一刻就被呼叫）才
+    // 用矩形頂替，這是對「還沒就緒」這種暫時狀態的容忍；遮罩確實存在但
+    // 兩條路徑都真的拆不出東西（這張圖去背後完全沒有任何顏色的極端情況），
+    // 直接回傳 null，交給呼叫端（spawnFallingPhotos() 的 dropItem()／
     // promoteBatchPhotoToDvd()）把這張圖當「不能用」跳過，不建立任何
-    // body，不將就頂替上場。
+    // body，不將就頂替上場，避免摔下去一個使用者幾乎看不見、卻用整個
+    // 外框在撞人的「隱形空氣物件」。
     if(!maskEntry){
       const body = Bodies.rectangle(x, y, w, h, Object.assign({}, options, { slop: 0.01, chamfer: { radius: 3 } }));
       // 退回單一矩形 body 時，body.position 本來就等於外框正中心，偏移量是
@@ -10658,15 +10782,49 @@
   // 很長，正常情況下這個時限完全不會被觸發到。
   const PHOTO_FALL_MASK_ULTIMATE_TIMEOUT_MS = 8000;
 
+  // ---------- 改用真正的凹多邊形分解（poly-decomp）取代網格矩形逼近 ----------
+  // 原本 buildFallItemBody() 是把去背 PNG 的 alpha 遮罩，降解析度成網格、
+  // 逐列合併成一整排小矩形拼成複合物體（見 buildFallItemPhysicsRects() 原本
+  // 的完整說明）。這個做法沒有真的分解凹陷形狀，只是用很多個直角小矩形去
+  // 逼近，天生有兩個互相拉扯、參數怎麼調都只能二選一的問題：矩形之間的
+  // 直角接觸點在物體疊在一起時會讓解算出來的推開方向每影格亂跳（抖動），
+  // 而想讓輪廓貼合更精準又得繼續加密網格、進一步增加接觸點數量（更抖、
+  // 也更吃效能，拖曳時尤其明顯）。
+  // 改用 poly-decomp（Matter.js 官方支援、業界處理「凹多邊形碰撞體」的
+  // 標準函式庫）：把 alpha 遮罩的邊界描成一條輪廓線，化簡成幾十個頂點，
+  // 交給 poly-decomp 分解成「幾塊」貼合真實輪廓的凸多邊形（不是幾十個直角
+  // 小矩形）。part 數量少一個數量級、沒有網格造成的假直角接觸點，同時
+  // 解決重疊、抖動、拖曳吃效能這三個問題的根本成因，而不是再疊加一層新的
+  // 參數補丁。詳細分解流程見下面 buildFallItemPolyParts()／traceMaskLoops()
+  // 的說明。
+  // poly-decomp 是獨立的小函式庫（UMD build，載入後會建立全域 window.decomp），
+  // 跟 Matter.js 本身沒有相依綁定關係，這裡讓它跟 Matter.js 並行下載，兩者
+  // 都下載完成才 resolve——buildFallItemPolyParts() 執行時需要 window.decomp
+  // 已經存在才能用新路徑，若這裡任何一個載入失敗，也不整個卡住：Matter.js
+  // 若失敗才真的整個掉落模式沒辦法用（走原本 reject 邏輯）；poly-decomp
+  // 若失敗，buildFallItemPolyParts() 內部會自己偵測 window.decomp 不存在，
+  // 優雅退回舊版網格矩形法（見該函式最上面那行 if(!window.decomp) return null;），
+  // 不影響整體功能可用性，只是那次退回精細度較舊。
   let matterLoadPromise = null;
+  function loadPolyDecompJS(){
+    if(window.decomp) return Promise.resolve();
+    return new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/poly-decomp/0.3.0/decomp.min.js';
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => resolve(); // 失敗不 reject，交給呼叫端的優雅退回機制處理，不影響 Matter.js 本身能不能用
+      document.head.appendChild(s);
+    });
+  }
   function loadMatterJS(){
-    if(window.Matter) return Promise.resolve();
+    if(window.Matter) return loadPolyDecompJS();
     if(matterLoadPromise) return matterLoadPromise;
     matterLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
       s.src = 'https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js';
       s.async = true;
-      s.onload = () => resolve();
+      s.onload = () => { loadPolyDecompJS().then(resolve); };
       s.onerror = () => { matterLoadPromise = null; reject(new Error('Matter.js load failed')); };
       document.head.appendChild(s);
     });
