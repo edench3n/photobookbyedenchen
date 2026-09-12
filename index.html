@@ -11735,6 +11735,40 @@
       }
     });
 
+    // ---------- 修正：「抓起下面那張照片移走，上面原本靠著的照片沒有掉下來，
+    // 卡在半空中」----------
+    // 成因：Matter.js 的 isSleeping 是「這顆 body 完全跳過這一步的物理運算」
+    // ——不只跳過碰撞解算，連重力積分（往下掉的加速度）都一併跳過（見上面
+    // 「加開 enableSleeping」那段的完整說明）。堆疊穩定一陣子之後，上面
+    // 那張因為速度趨近零而睡著；使用者用 MouseConstraint 把下面那張抓起來
+    // 移走時，MouseConstraint 只會自動叫醒「被抓的那顆」，不會連帶叫醒
+    // 「原本靠在它上面、現在失去支撐」的鄰居——那張鄰居仍然是 isSleeping，
+    // 重力對它來說形同不存在，於是就這樣定格在原本的高度，變成浮在半空中，
+    // 不管等多久都不會自己掉下來（不是碰撞判斷錯，是它根本沒有在運算）。
+    // 上面那段 PF_STUCK_OVERLAP_DEPTH 的邏輯解決不了這個情況：那段只處理
+    // 「兩顆都還疊在一起、卡住沒分開」，這裡剛好相反——是「原本貼著、現在
+    // 正要分開」，分開的瞬間反而完全沒人去檢查「另一顆是不是該重新醒來」。
+    // 修法：掛 collisionEnd（碰撞關係結束那一瞬間觸發一次，不是每影格）。
+    // 只要這次結束的碰撞其中一方是目前正被滑鼠／手指抓著的物體
+    // （pfMouseConstraint.body——沒有人在拖曳時這裡是 null，不影響一般
+    // 掉落／堆疊過程中所有其他物體正常分離、正常睡著的行為），另一方又
+    // 是睡著的，代表「原本靠著被拖走的這顆，現在支撐消失了」，直接把它
+    // 叫醒，讓重力重新對它生效、正常掉下來。只鎖定「跟被拖曳物體分離」
+    // 這個情境，跟上面的深度門檻各自負責不同情況，不會互相干擾，也不會
+    // 重新引入「堆疊靜止後持續抖動」那個已經修過的問題（那段每一步都在
+    // 全域比對，這裡只在真的有碰撞關係結束時才觸發一次）。
+    Events.on(pfEngine, 'collisionEnd', (event) => {
+      const draggedBody = pfMouseConstraint.body;
+      if(!draggedBody) return;
+      const pairs = event.pairs;
+      for(let i = 0; i < pairs.length; i++){
+        const pair = pairs[i];
+        const other = pair.bodyA === draggedBody ? pair.bodyB : (pair.bodyB === draggedBody ? pair.bodyA : null);
+        if(!other) continue;
+        if(other.isSleeping) Matter.Sleeping.set(other, false);
+      }
+    });
+
     // ---------- 修正：「從堆疊頁面按 Preview 進來後，飄動的 e 撞擊邊界
     // 不會換照片」----------
     // 成因：平常「飄動的 e 撞到螢幕邊界，就切換 preview 側邊照片」這個
