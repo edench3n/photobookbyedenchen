@@ -11780,24 +11780,38 @@
     // 上面那段 PF_STUCK_OVERLAP_DEPTH 的邏輯解決不了這個情況：那段只處理
     // 「兩顆都還疊在一起、卡住沒分開」，這裡剛好相反——是「原本貼著、現在
     // 正要分開」，分開的瞬間反而完全沒人去檢查「另一顆是不是該重新醒來」。
-    // 修法：掛 collisionEnd（碰撞關係結束那一瞬間觸發一次，不是每影格）。
-    // 只要這次結束的碰撞其中一方是目前正被滑鼠／手指抓著的物體
-    // （pfMouseConstraint.body——沒有人在拖曳時這裡是 null，不影響一般
-    // 掉落／堆疊過程中所有其他物體正常分離、正常睡著的行為），另一方又
-    // 是睡著的，代表「原本靠著被拖走的這顆，現在支撐消失了」，直接把它
-    // 叫醒，讓重力重新對它生效、正常掉下來。只鎖定「跟被拖曳物體分離」
-    // 這個情境，跟上面的深度門檻各自負責不同情況，不會互相干擾，也不會
-    // 重新引入「堆疊靜止後持續抖動」那個已經修過的問題（那段每一步都在
-    // 全域比對，這裡只在真的有碰撞關係結束時才觸發一次）。
+    //
+    // ---------- 這裡是第二次修正：範圍原本鎖太窄，三層(含)以上的堆疊只有
+    // 「直接貼著被拖走那張」的那一層會醒，再上面那幾層還是浮在半空中 ----------
+    // 原本的寫法只檢查「這次結束的碰撞，其中一方是不是目前正被拖著的那顆
+    // (pfMouseConstraint.body)」——如果堆疊是 A(被拖走)／B(疊在 A 上)／
+    // C(疊在 B 上) 三層，A 移走時 A-B 之間的碰撞結束，B 會被這段邏輯正確
+    // 叫醒；但 B-C 之間的碰撞是等 B 真的開始往下掉、跟 C 分開之後才會結束
+    // ——那時候「被拖著的物體」還是 A，不是 B，B 並不等於 pfMouseConstraint.body，
+    // 判斷式直接把這個 pair 排除掉，C 因此永遠不會被這段邏輯碰到，繼續睡著、
+    // 繼續浮在半空中。這正是「蠻常發生」、且感覺上「修了但沒完全修好」的
+    // 成因：只有堆疊剛好只有兩層時看起來像是修好了，三層以上就會漏掉上面
+    // 幾層。
+    // 修法：不再限定「其中一方一定要是目前被拖曳的物體」，改成只要這次
+    // 結束的碰撞是「一顆醒著、一顆睡著」（不管醒著的那顆是不是正被使用者
+    // 拖曳，只要它正在動，例如上面這段邏輯剛叫醒、開始掉落中的 B），就把
+    // 睡著的那顆也叫醒。這樣 A 移走喚醒 B、B 掉落又跟 C 分開喚醒 C，會沿著
+    // 堆疊往上正確連鎖下去，不管疊幾層都能正常掉落。
+    // 不會重新引入「堆疊靜止後持續抖動」那個已經修過的問題：那個問題的
+    // 成因是每一影格都在對所有物件兩兩做粗略的 AABB 相交比對，這裡完全
+    // 不是——只在 Matter.js 自己判斷「這對碰撞關係真的結束了」的那一瞬間
+    // 觸發一次，兩顆都還醒著、正常互動中的物體本來就不會經過這裡（下面
+    // `if(!a.isSleeping && !b.isSleeping) continue` 那行會直接跳過），完全
+    // 靜止、雙雙睡著的堆疊也不會無故被碰到（沒有碰撞關係結束，事件根本
+    // 不會觸發）。
     Events.on(pfEngine, 'collisionEnd', (event) => {
-      const draggedBody = pfMouseConstraint.body;
-      if(!draggedBody) return;
       const pairs = event.pairs;
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
-        const other = pair.bodyA === draggedBody ? pair.bodyB : (pair.bodyB === draggedBody ? pair.bodyA : null);
-        if(!other) continue;
-        if(other.isSleeping) Matter.Sleeping.set(other, false);
+        const a = pair.bodyA, b = pair.bodyB;
+        if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著／兩顆都睡著，都不是「一動一靜」失去支撐的情況，不用介入
+        if(a.isSleeping) Matter.Sleeping.set(a, false);
+        if(b.isSleeping) Matter.Sleeping.set(b, false);
       }
     });
 
