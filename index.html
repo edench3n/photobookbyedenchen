@@ -10399,6 +10399,28 @@
   ];
   const PHOTO_FALL_BG_WHITE = PHOTO_FALL_BG_COLORS[0].value; // 白色現在就是陣列本身第一項的 value，這裡直接引用同一份，不用維護兩份重複的色碼
   let pfBgColorIndex = 0; // 0 代表目前正停在陣列第一項（白色）；點一次背景，index 往後推進一格，超過陣列長度就從頭循環（見 advancePhotoFallBackgroundColor()）
+  // ---------- 修正：「這三張背景圖切換起來特別慢」 ----------
+  // 原本這三張圖只有使用者真的點擊循環切到它們（見下面
+  // advancePhotoFallBackgroundColor()）那一刻，才靠 CSS backgroundImage
+  // 第一次觸發瀏覽器下載——純色背景切換是瞬間生效（不用下載任何東西），
+  // 這三張背景圖卻是「點下去才臨時發出網路請求」，圖片本身又是全螢幕
+  // 尺寸的 16:9 大圖，下載＋解碼需要的時間才是使用者感受到「特別慢」的
+  // 真正成因，不是程式邏輯本身的問題。
+  // 修法：比照全站既有「背景閒置時間預先暖機」的慣例（見下面
+  // prefetchAllInBackground()／warmMatterJS() 同一種手法），在瀏覽器真的
+  // 閒下來、不影響首屏渲染的時候，提前把這三張圖都下載＋解碼一次，瀏覽器
+  // 自己就會把它們快取起來——使用者之後真正點擊切到這幾張背景時，直接
+  // 命中快取，不用臨時等網路，明顯感受到的延遲會消失或大幅縮短。
+  // fetchPriority 設成 low，避免搶當下畫面實際需要的首頁縮圖／照片這些
+  // 更優先的資源。
+  function prefetchPhotoFallBackgroundImages(){
+    PHOTO_FALL_BG_COLORS.forEach(entry => {
+      if(entry.type !== 'image') return;
+      const img = new Image();
+      try { img.fetchPriority = 'low'; } catch(e){} // 純背景暖機用，失敗也不影響任何既有功能
+      img.src = entry.value;
+    });
+  }
   // 真正把某一項背景（不管是純色還是圖片）套用到 photoFallStage 上：
   // 抽成共用函式，advance／reset 兩處都呼叫這個，不用各自重複一份
   // if(type==='image') 的判斷邏輯。每次切換都要把「另一種」的樣式清乾淨
@@ -15587,6 +15609,12 @@
     // 路徑，這裡只是「能先準備就先準備」的加分項，不是必要條件。
     const warmMatterJS = () => { loadMatterJS().catch(() => {}); };
     scheduleIdle(warmMatterJS, { timeout: 4000, fallbackDelay: 2000 });
+
+    // 三張堆疊背景圖也一起提前暖機（完整成因見 prefetchPhotoFallBackgroundImages()
+    // 上方的說明），時機、優先順序都跟上面 Matter.js 暖機一樣（真的閒下來
+    // 才做，不搶首屏渲染），放在同一個地方一起排程，之後要再調整時機也
+    // 只需要動這一處。
+    scheduleIdle(prefetchPhotoFallBackgroundImages, { timeout: 4000, fallbackDelay: 2000 });
 
     // ---------- 進站預設先看到 preview 頁，點一下才到首頁 ----------
     // 原本只有網址是 #preview 時才會自動開 preview；現在改成不管網址有沒有
