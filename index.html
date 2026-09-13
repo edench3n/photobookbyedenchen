@@ -1598,8 +1598,34 @@
      掉落中的照片／飄動的 e 都是之後才 append 進來，天然疊在它上面）。
      object-fit:cover 讓圖片維持原始比例、滿版鋪滿整個容器，比例對不上的
      方向直接裁掉，跟原本 CSS background-size:cover 想要的視覺效果一致。
-     預設 display:none，只有真的顯示這張圖時（見 showPhotoFallBackgroundImageEl()）
-     才會被 JS 切成 block。 */
+     ---------- 進一步修正：「點下去還是會 lag 一下才變」 ----------
+     decode() 只解決「把壓縮過的圖檔位元組，解成可以畫的原始像素資料」這一
+     層——瀏覽器要真的把這包像素資料「畫」進畫面上（rasterize／上傳成 GPU
+     材質、合成進畫面），是另外、更晚的一個步驟，只有在這個元素真的進入
+     「會被畫出來」的渲染樹時才會發生。原本用 display:none／block 切換：
+     display:none 的元素完全被排除在渲染樹外，就算背後的圖片資料早就
+     decode() 完成，瀏覽器也完全不會提早幫它做這一步——所以每次「第一次」
+     把某張圖從 none 切成 block 的那一刻，這個「畫出來」的成本（尤其是
+     解析度較大的照片，光是把整張像素資料鋪上 GPU 材質就需要看得見的時間）
+     都會全部發生在使用者點下去的當下，這才是即使 decode() 早就做完，體感
+     還是「lag 一下才變」的真正原因，而純色背景完全沒有這個問題——改變
+     background-color 從來不需要「鋪一整張点陣圖上 GPU」這種工作，永遠是
+     瞬間生效。
+     真正修法：不要再用 display 這種「整個進出渲染樹」的開關，改用
+     opacity 開關——opacity:0 的元素雖然肉眼看不見，但它仍然完整留在渲染
+     樹裡，瀏覽器一樣要（也一樣會）把它畫出來、鋪上 GPU 材質，只是最後合成
+     時用透明度 0 蓋掉，不會被使用者看到。這代表只要這張圖提早（趁使用者
+     還在點前面幾個純色背景的空檔）被插進 DOM、設成 opacity:0，瀏覽器就有
+     機會利用這幾次點擊之間、看似很短暫但確實存在的「兩次繪製之間」空檔，
+     把這張圖提早「畫」進一個獨立的合成圖層，真正需要顯示的那一刻只需要
+     把 opacity 從 0 調到 1——這是純粹的合成器（compositor）操作，不需要
+     重新排版、重新繪製，效果應該要跟純色背景的切換一樣快。
+     transform:translateZ(0) + will-change:opacity 是明確告訴瀏覽器「這個
+     元素之後會頻繁只改 opacity」，強制它一開始就升成獨立的合成圖層，而不
+     是等第一次真的改變 opacity 時才臨時升層（臨時升層那一次一樣會卡）。
+     實際插入時機、pre-warm 的呼叫點見 JS prewarmPhotoFallBackgroundLayers()
+     的完整說明；插入之後這個元素就永久留在 DOM 裡（不再移除），下一次
+     循環到同一張圖只需要切換 opacity，不用重新插入。 */
   .photo-fall-stage .pf-bg-img{
     position:absolute;
     inset:0;
@@ -1607,9 +1633,13 @@
     height:100%;
     object-fit:cover;
     object-position:center;
-    display:none;
+    opacity:0;
     pointer-events:none;
+    transform:translateZ(0);
+    will-change:opacity;
+    transition: opacity .16s ease;
   }
+  .photo-fall-stage .pf-bg-img.pf-bg-img-visible{ opacity:1; }
 
   /* ---------- 堆疊頁面初次進場的規則說明圖（桌機／平板／手機都會顯示；見 JS
      showPfRulesOverlay()/hidePfRulesOverlay() 完整說明） ----------
@@ -10428,18 +10458,28 @@
   // 三張圖片各自獨立一個項目、各自一個檔名，彼此互不影響，循環到哪一張
   // 就照那一張的路徑去抓圖，之後要換某一張圖也只需要換掉那個檔名對應的
   // 檔案，不會動到其他兩張。
+  // ---------- 調整：三張背景圖平均錯落穿插在純色中間，不再全部擠在最後面 ----------
+  // 原本 9 個純色排在前面、3 張圖片全部擠在陣列最後三格，代表使用者要連續
+  // 點滿 9 下純色之後才會第一次看到背景圖，前面很長一段都是純色。這裡把
+  // 白色以外的 8 個純色盡量平分成三段（3 個、3 個、2 個），每段結束後
+  // 插入一張背景圖，讓「點幾下純色、跳出一張圖、再點幾下純色、再跳出
+  // 下一張圖」平均錯落分布在整個循環裡，不會出現「圖片全部集中在後段」
+  // 的落差感。白色固定留在陣列第一項
+  // （index 0）不動——它同時是 PHOTO_FALL_BG_WHITE 的來源、也是離開堆疊
+  // 頁面時 resetPhotoFallBackgroundColor() 重設回去的起點，兩處都直接寫死
+  // 引用 PHOTO_FALL_BG_COLORS[0]，這個位置不能被其他項目取代。
   const PHOTO_FALL_BG_COLORS = [
     { type: 'color', value: '#ffffff' },
     { type: 'color', value: '#000000' },
     { type: 'color', value: '#b6f1ff' },
     { type: 'color', value: '#f93d3d' },
+    { type: 'image', value: '/pf-bg-photo-1.jpg' }, // 使用者提供的第 1 張 16:9 背景圖
     { type: 'color', value: '#f7f746' },
     { type: 'color', value: '#c1c1c1' },
     { type: 'color', value: '#3640ff' },
+    { type: 'image', value: '/pf-bg-photo-2.jpg', darkText: true }, // 第 2 張：畫面偏暗，跟純黑背景一樣要讓上排文字變白色，見 darkText 用法
     { type: 'color', value: '#12ff5a' },
     { type: 'color', value: '#efe6c7' },
-    { type: 'image', value: '/pf-bg-photo-1.jpg' }, // 使用者提供的第 1 張 16:9 背景圖
-    { type: 'image', value: '/pf-bg-photo-2.jpg', darkText: true }, // 第 2 張：畫面偏暗，跟純黑背景一樣要讓上排文字變白色，見 darkText 用法
     { type: 'image', value: '/pf-bg-photo-3.jpg', darkText: true }  // 第 3 張：同上，也要讓上排文字變白色
   ];
   const PHOTO_FALL_BG_WHITE = PHOTO_FALL_BG_COLORS[0].value; // 白色現在就是陣列本身第一項的 value，這裡直接引用同一份，不用維護兩份重複的色碼
@@ -10506,25 +10546,71 @@
   // 同一個元素，來自上面 pfBgImageReady 那份快取，不會重複建立）；換成
   // 純色或换成另一張圖片時，先把它藏起來，不用整個移除重建。
   let pfCurrentBgImgEl = null;
-  function showPhotoFallBackgroundImageEl(img){
-    if(pfCurrentBgImgEl && pfCurrentBgImgEl !== img){
-      pfCurrentBgImgEl.style.display = 'none';
-    }
-    img.className = 'pf-bg-img'; // 樣式全部交給這個 class（見上面 CSS .photo-fall-stage .pf-bg-img 的說明），這裡只負責掛上去
-    // 一律搬到 photoFallStage 的第一個子節點：掉落中的照片／飄動的 e
-    // 都是之後才 appendChild 進來的，只要背景圖永遠排在最前面，就會自然
-    // 疊在所有掉落物件的下面，不會蓋住它們。
+  // ---------- 修正：讓多張背景圖之間、跟「插入 DOM 但保持隱藏」這個 pre-warm
+  // 動作共用同一套排序邏輯 ----------
+  // 這幾張背景圖 <img> 一律要疊在 photoFallStage 最前面（DOM 順序最早）：
+  // 掉落中的照片／飄動的 e 都是之後才 appendChild 進來的，只要背景圖們
+  // 全部排在它們前面，自然會被畫在下面，不會蓋住它們。目前的循環順序
+  // （見 PHOTO_FALL_BG_COLORS）保證任兩張背景圖之間一定隔著至少一個純色，
+  // 不會發生「兩張背景圖同時淡入淡出、彼此重疊」這種需要講究彼此上下順序
+  // 的情境，所以 3 張背景圖互相之間的先後順序不重要，只要都排在最前面即可。
+  // 已經在正確位置（本來就是第一個子節點）就直接跳過、不做任何 DOM 搬動
+  // ——挪動節點在部分瀏覽器上可能連帶讓它已經畫好的合成圖層被標記成需要
+  // 重新合成一次，沒事就不要動它，把「維持已經暖好的狀態」的效益留住。
+  function placePfBgImgAtStageFront(img){
     if(photoFallStage.firstChild !== img){
       photoFallStage.insertBefore(img, photoFallStage.firstChild);
     }
-    img.style.display = 'block';
+  }
+  function showPhotoFallBackgroundImageEl(img){
+    placePfBgImgAtStageFront(img);
+    img.classList.add('pf-bg-img'); // 樣式全部交給這個 class（見上面 CSS .photo-fall-stage .pf-bg-img 的說明），這裡只負責掛上去；用 add 而非整個覆蓋 className，保留萬一已經有的其他 class
+    if(pfCurrentBgImgEl && pfCurrentBgImgEl !== img){
+      pfCurrentBgImgEl.classList.remove('pf-bg-img-visible');
+    }
+    // ---------- 修正：「點下去還是會 lag 一下才變」 ----------
+    // 完整成因、修法見上面 CSS .photo-fall-stage .pf-bg-img 的說明：原本
+    // 這裡是切 img.style.display = 'block'，display:none→block 的元素在
+    // 「切過去的那一刻」才第一次真正進入渲染樹、被畫出來（鋪上 GPU 材質），
+    // 就算 decode() 早就做完，這一步的耗時還是會全部發生在使用者點下去的
+    // 當下。改成只切 class（opacity 0→1），只要這個元素之前已經被
+    // prewarmPhotoFallBackgroundLayers() 提早插進 DOM（見該函式），瀏覽器
+    // 早就趁隱藏的時候把它畫進獨立合成圖層了，這裡真正需要做的只剩「把
+    // 合成器裡已經有的這個圖層透明度調到 1」，是純合成器操作，效果應該要
+    // 跟純色背景切換一樣快、沒有肉眼可見的延遲。
+    img.classList.add('pf-bg-img-visible');
     pfCurrentBgImgEl = img;
   }
   function hidePhotoFallBackgroundImageEl(){
     if(pfCurrentBgImgEl){
-      pfCurrentBgImgEl.style.display = 'none';
+      // 只拿掉「顯示中」這個標記（opacity 淡回 0），元素本身留在 DOM 裡
+      // 不移除——這樣它已經被瀏覽器畫好的那個合成圖層可以繼續保留、
+      // 下次循環回到同一張圖片時不用重新來一次「第一次顯示」的成本。
+      pfCurrentBgImgEl.classList.remove('pf-bg-img-visible');
       pfCurrentBgImgEl = null;
     }
+  }
+  // ---------- 新增：進場後趁使用者還在點前面幾個純色背景的空檔，提早把
+  // 3 張背景圖都插進 DOM（opacity:0，不影響任何視覺），完整原因見上面 CSS
+  // .photo-fall-stage .pf-bg-img 的說明 ----------
+  // 只需要每個分頁執行一次：一旦某張圖被插入過，之後只靠切換
+  // pf-bg-img-visible 這個 class 顯示/隱藏，元素本身不會被移除，所以不用
+  // 每次進場都重跑一次。呼叫時機見 enterPhotoFallMode() 內對這個函式的
+  // 呼叫點——特地排到該函式最後面才呼叫，而且用 scheduleIdle 稍微延後，
+  // 不跟「e 開始掉落」這個使用者進場當下最先感覺到的動畫搶主執行緒。
+  let pfBgLayersPrewarmed = false;
+  function prewarmPhotoFallBackgroundLayers(){
+    if(pfBgLayersPrewarmed || !photoFallStage) return;
+    pfBgLayersPrewarmed = true;
+    PHOTO_FALL_BG_COLORS.forEach(entry => {
+      if(entry.type !== 'image') return;
+      ensurePhotoFallBackgroundImageReady(entry.value).then((result) => {
+        if(!result.ok) return; // 下載失敗，之後真的循環到這張時 applyPhotoFallBackground() 自己會處理退回白色
+        if(result.img === pfCurrentBgImgEl) return; // 剛好就是目前正顯示的這張（理論上不會，pre-warm 一律晚於初次進場），不用碰
+        placePfBgImgAtStageFront(result.img);
+        result.img.classList.add('pf-bg-img'); // 只加上基礎 class（opacity:0），不加 pf-bg-img-visible，維持隱藏
+      });
+    });
   }
   // 每次呼叫 applyPhotoFallBackground() 就遞增一次：圖片型背景要等
   // Promise resolve 之後才真的套用（見下方說明），這段等待期間使用者
@@ -11348,6 +11434,14 @@
     // 判斷用（見上面 pfEnterGeneration 宣告處的完整說明）。
     pfEnterGeneration++;
     document.body.classList.add('photo-fall-active');
+    // 進場當下就排入這個 pre-warm（完整原因見 prewarmPhotoFallBackgroundLayers()
+    // 上方的說明）：越早排進去，使用者點過前面幾個純色背景、真正循環到某張
+    // 背景圖之前，瀏覽器能拿來提早畫好那幾個隱藏圖層的空檔就越長。用
+    // scheduleIdle 而不是直接同步呼叫，是不想讓「建立/插入 3 個 <img>」
+    // 這件事跟下面 e 開始掉落、規則圖淡入這些使用者進場當下第一眼會看到的
+    // 動畫搶同一影格的主執行緒——反正只需要「盡快、但排在這幾個更優先的
+    // 動畫之後」，不需要真的立刻同步做完。
+    scheduleIdle(prewarmPhotoFallBackgroundLayers, { timeout: 300, fallbackDelay: 50 });
     // ---------- 修正：「規則圖出現之前，先點底下剛掉下來的堆疊照片就能
     // 觸發換一批」（手機版回報）----------
     // 成因：原本「滿版透明遮罩提早站上去擋點擊」這件事，是掛在
