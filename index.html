@@ -11851,6 +11851,24 @@
       pfItems.push({ body, el, w: itemW, h: itemH });
     };
 
+    // ---------- 修正：「還沒落入畫面之前，在畫面上緣以外就已經疊在一起」 ----------
+    // 原本 startX 是在整個視窗寬度內完全隨機抽一個點，跟 startY（靠 index
+    // 依序疊加 PHOTO_FALL_SPAWN_STAGGER_PX 往上錯開）是兩件完全獨立的事。
+    // 問題是 Y 的錯開量只有 130px，常常比照片本身的高度（itemH，可能
+    // 兩三百 px 甚至更高）還小很多——X 卻完全可能剛好抽到很接近、甚至
+    // 重疊的位置。兩張照片只要 X 夠接近、Y 的間距又不夠大，就會在畫面
+    // 上緣以外、使用者還看不到的地方就已經疊在一起，等它們一起落入可視
+    // 範圍時，看起來就是「一整疊圖同時掉下來」而不是分散、有前後次序的
+    // 瀑布感——這正是使用者回報的成因，只調 Y 的錯開量沒用，因為真正
+    // 抽籤抽近的是 X。
+    // 修法：把整個畫面寬度切成跟這一批掉落張數（fallCount）一樣多條「水平
+    // 車道」（lane），洗牌後依序分給每一張照片各自專屬一條車道，車道內
+    // 再疊加一點隨機偏移（避免看起來像整齊的網格）。這樣任兩張照片的
+    // startX 保證至少相差一條車道寬，不會再靠運氣抽到彼此重疊的位置，
+    // Y 原本的錯開＋這裡新增的 X 錯開兩者疊加，才是「真的分開」。
+    const laneWidth = vw / fallCount;
+    const laneOrder = shuffled(Array.from({ length: fallCount }, (_, idx) => idx));
+
     for(let i = 0; i < fallCount; i++){
       // 現在掉落的是「漂浮物件圖片庫」（dvdEImages）裡的去背圖，不是
       // 首頁相片——pool 裡每一項是 {src, scale} 物件。
@@ -11876,7 +11894,17 @@
       el.style.width = itemW + 'px';
       el.style.height = itemH + 'px';
 
-      const startX = itemW / 2 + Math.random() * Math.max(1, vw - itemW);
+      // 這張照片專屬的車道中心點，再加上車道內的小幅隨機偏移：車道寬度
+      // 扣掉照片本身寬度後剩下的空間才拿來抖動，抖多了會抖出車道範圍、
+      // 反而又跟隔壁車道疊回去；車道比照片本身還窄（fallCount 很多、
+      // 這張又剛好被抽中放大）時，slack 會是 0 或負值，這裡夾在 0 以上，
+      // 等於直接退回車道正中央，不再額外抖動。最後仍然整體夾在
+      // [itemW/2, vw - itemW/2] 之內，行為跟原本一樣、保證不超出畫面。
+      const lane = laneOrder[i];
+      const laneCenter = lane * laneWidth + laneWidth / 2;
+      const laneSlack = Math.max(0, laneWidth - itemW);
+      const rawStartX = laneCenter + (Math.random() - 0.5) * laneSlack;
+      const startX = Math.min(vw - itemW / 2, Math.max(itemW / 2, rawStartX));
       const startY = -(PHOTO_FALL_SPAWN_BASE_PX + i * PHOTO_FALL_SPAWN_STAGGER_PX + Math.random() * PHOTO_FALL_SPAWN_JITTER_PX);
 
       // 修正「照片掉落中途突然閃動一下」的根本成因：這個 div 平常只有
