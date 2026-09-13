@@ -2052,26 +2052,6 @@
   // key 本身不綁定資料夾，同一把 key 可以查詢任何一個公開分享的資料夾）。
   const EDEN_E_FOLDER_ID = '1QXgbx5t6KC5q07gyhGL6tXqo_YUKzpKH';
 
-  // ---------- 「e」圖片庫的靜態備援來源（GitHub Actions 離線產生） ----------
-  // build-e-manifest.js 這支離線腳本會把 EDEN_E_FOLDER_ID 這個 Drive 資料夾
-  // 的圖片，下載進 repo 的 e-images/ 資料夾、並產生 e-manifest.json（key 沿用
-  // 原始 Drive file id，跟 masks.json 的對照表完全相容）。有了這份靜態檔案
-  // 之後，fetchDvdEImages() 會優先讀這裡，讀不到才退回下面原本「進站現查
-  // Drive API」那段（當成備援，一行都不用改）。
-  // 選 raw.githubusercontent.com 而不是 jsdelivr：jsdelivr 對 default branch
-  // 的內容會 CDN 快取到數小時甚至到七天（除非手動 purge），之後想換圖/换
-  // 遮罩時會多一道手動 purge 才會生效；raw.githubusercontent.com 的快取窗口
-  // 短很多（約 5 分鐘等級），跟上面 og-image 現在用的方式一致，行為好預測。
-  // 之後真的覺得慢，要退可以再換 jsdelivr。
-  const EDEN_E_MANIFEST_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-manifest.json';
-  const EDEN_E_IMAGES_BASE_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/e-images/';
-  // build-masks.js（GitHub Actions 離線產生）輸出的靜態碰撞遮罩檔案。
-  // 跟下面 precomputedEMasksPromise 一起看：這裡改成優先直接 fetch 這個
-  // 固定網址，一次要到內容；原本「先查 Drive 檔名拿 file id、再用 id
-  // 另外抓一次內容」那兩趟 API 往返，降級成單純的備援路徑，不再是預設
-  // 行為。理由、效益完整說明見 precomputedEMasksPromise 內。
-  const EDEN_E_MASKS_URL = 'https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/masks.json';
-
   // ---------- 預算好的碰撞遮罩（離線用 Puppeteer 算好，放在同一個 Drive 資料夾） ----------
   // dvdEImageUrlToId：這次頁面載入真的打了 Drive API 查詢時，記錄「這張圖片
   // 的網址 → Drive file id」，供下面 recordDvdEMaskMapping() 用來把「裁切完
@@ -2095,72 +2075,7 @@
   // 不等 init()。找不到檔案、解析失敗、或任何一步出錯，都直接回傳 null，
   // 下面 requestAlphaMask() 查不到就會照舊退回即時算，不影響網站運作。
   let precomputedEMasks = null;
-
-  // ---------- 精細度提升：masks.json 的 mask 欄位改成「位元打包」的 base64
-  // 字串，不是逐格 0/1 數字陣列 ----------
-  // 既然是離線算好、只要正確抓回來就不用再現算，網格解析度可以拉得比原本
-  // 「即時運算」那組數值精細很多（見 build-masks.js 內完整說明），但解析度
-  // 拉高、格數是原本的 8~9 倍，如果還是每一格存一個 JSON 數字（逗號、換行
-  // 都要算進檔案大小），masks.json 體積會跟著等比例膨脹。這裡改成每一格只
-  // 用 1 個 bit 表示（8 格塞進 1 個 byte），再整包轉成 base64 字串存進 JSON
-  // ——同樣的格數，檔案大小大約只剩原本「數字陣列」寫法的 1/20 左右。
-  // 下面把 base64 字串還原成跟以前一樣的「每格一個 0/1」陣列（Uint8Array），
-  // 只在這裡解一次，後面 requestAlphaMask() 等既有程式碼完全不用改，讀到的
-  // pre.mask 用法跟以前一模一樣。
-  function decodeMaskBits(base64, w, h){
-    if(typeof base64 !== 'string') return base64; // 舊格式（還沒改版的 masks.json）：本來就是陣列，原樣送回去，不強制要求一定要是新格式
-    const binary = atob(base64);
-    const total = w * h;
-    const out = new Uint8Array(total);
-    for(let i = 0; i < total; i++){
-      const byte = binary.charCodeAt(i >> 3);
-      out[i] = (byte >> (i & 7)) & 1;
-    }
-    return out;
-  }
-  function decodePrecomputedMasksJson(json){
-    const map = new Map();
-    Object.keys(json).forEach(id => {
-      const entry = json[id];
-      if(entry && entry.mask && entry.w && entry.h){
-        entry.mask = decodeMaskBits(entry.mask, entry.w, entry.h);
-      }
-      map.set(id, entry);
-    });
-    return map;
-  }
-  // ---------- 修正：masks.json 明明已經離線算好放雲端，抓起來還是很花時間 ----------
-  // 原本這裡一律進站現查 Drive API，而且是「先查檔名拿 file id、再用 id
-  // 另外抓一次內容」依序兩趟網路往返，兩次都刻意標成 priority:'low'，會被
-  // 瀏覽器排在照片下載之後才處理——手機網路 RTT 本來就比桌機高，兩趟
-  // 往返疊起來、又排在低優先權，延遲格外有感。
-  // 改成優先直接 fetch 上面 EDEN_E_MASKS_URL 這個固定網址（build-masks.js
-  // 離線產生、由 GitHub Actions push 上去的靜態檔案，做法跟 e-manifest.json
-  // 完全對應）：一次請求直接拿到完整內容，不用先問「在哪」。抓不到（檔案
-  // 還沒 build、暫時性網路問題）才退回下面原本「進站現查 Drive API」那段
-  // 當備援，行為不會壞掉，只是那種情況下延遲退回原本的舊行為。
   const precomputedEMasksPromise = (async () => {
-    try{
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-      let res;
-      try{
-        res = await fetch(EDEN_E_MASKS_URL, { signal: controller.signal });
-      } finally {
-        clearTimeout(timeoutId);
-      }
-      if(res.ok){
-        const json = await res.json();
-        const map = decodePrecomputedMasksJson(json);
-        precomputedEMasks = map;
-        return map;
-      }
-    }catch(err){
-      // 靜態檔案抓不到（離線、還沒 build 過、暫時性網路問題），往下走
-      // 備援路徑，不在這裡直接放棄。
-    }
-
-    // ---------- 備援：進站現查 Drive API（原本的行為，一字不動） ----------
     if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
        !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
       return null;
@@ -2178,7 +2093,8 @@
       const contentRes = await fetch(contentUrl, { priority: 'low' });
       if(!contentRes.ok) return null;
       const json = await contentRes.json();
-      const map = decodePrecomputedMasksJson(json);
+      const map = new Map();
+      Object.keys(json).forEach(id => map.set(id, json[id]));
       precomputedEMasks = map;
       return map;
     }catch(err){
@@ -2392,54 +2308,17 @@
   // 遮罩本身還在畫面上擋著，這段等待使用者感覺不到「卡住」，只會覺得
   // 是遮罩淡出前的正常載入時間。
   const INITIAL_REVEAL_EXTRA_BUFFER_MS = 450;
-  // ---------- 修正：「手機版前幾次撞擊常常不會換照片，載入還是不夠快」----------
-  // 成因：上面 INITIAL_REVEAL_EXTRA_BUFFER_MS 原本是「固定多等 450ms」就
-  // 放行遮罩，不管背景那批快速預載（DVD_E_QUICK_PRELOAD_COUNT 張，見
-  // init() 內對應段落）當下實際已經準備好幾張。cycleDvdEImage() 要換到
-  //「不一樣的一張」，前提是已就緒池至少要有 2 張以上候選（見
-  // pickNextDvdEImageIndex() n<=1 的分支）——網路快的裝置 450ms 綽綽有
-  // 餘，但手機網路稍慢一點，這個固定時間常常不夠讓候選池湊到 2 張以
-  // 上，遮罩一放行、使用者能撞牆了，池子卻還只有 1 張，撞了也不會換圖，
-  // 這正是「前幾次撞擊常常都不會換照片」的成因：問題不在載入本身不夠
-  // 快，而是「放行的時間點」跟「候選池實際準備好的時間點」用同一個猜測
-  // 出來的固定數字對不上拍。
-  // 修法：不再用單一固定時間猜，改成「輪詢已就緒候選數，湊到門檻張數
-  // 就放行，但最多不會無限等」——網路快的裝置很快就湊到門檻，幾乎跟原
-  // 本一樣快放行；網路慢的裝置會多等一點，但最多只會等到
-  // INITIAL_REVEAL_MAX_EXTRA_WAIT_MS 這個上限，不會讓使用者對著全白遮罩
-  // 等太久（原本的 INITIAL_REVEAL_FALLBACK_MS 4 秒保底逾時依然在，兩層
-  // 保底互不影響）。INITIAL_REVEAL_EXTRA_BUFFER_MS 保留當作下限：就算候
-  // 選池一瞬間就湊滿門檻，也至少維持原本這段緩衝，不會比修正前更早放
-  // 行、削弱其他部分依賴這段緩衝時間的行為。
-  const INITIAL_REVEAL_MIN_READY_COUNT = 3; // 至少要湊到這麼多張候選，撞牆才有機會真的隨機換到不同張
-  const INITIAL_REVEAL_MAX_EXTRA_WAIT_MS = 1400; // 湊不滿門檻時，最多願意多等這麼久（手機慢網路的上限）
-  const INITIAL_REVEAL_POLL_MS = 80; // 輪詢間隔，夠密才不會讓「湊到門檻」跟「實際放行」之間多出明顯的空檔
   let initialRevealExtraBufferTimer = null;
-  let initialRevealPollStartedAt = null;
-  function pollDvdReadyThenReveal(){
-    const elapsed = performance.now() - initialRevealPollStartedAt;
-    const readyCount = dvdEReadyIndices().length;
-    if(readyCount >= INITIAL_REVEAL_MIN_READY_COUNT || elapsed >= INITIAL_REVEAL_MAX_EXTRA_WAIT_MS){
-      // 已經達標（或已經等到上限），但至少維持 INITIAL_REVEAL_EXTRA_BUFFER_MS
-      // 這個下限，理由見上面完整說明。
-      const remain = Math.max(0, INITIAL_REVEAL_EXTRA_BUFFER_MS - elapsed);
-      initialRevealExtraBufferTimer = setTimeout(() => {
-        initialRevealExtraBufferTimer = null;
-        initialRevealPollStartedAt = null;
-        revealInitialChrome();
-      }, remain);
-      return;
-    }
-    initialRevealExtraBufferTimer = setTimeout(pollDvdReadyThenReveal, INITIAL_REVEAL_POLL_MS);
-  }
   function attemptInitialReveal(){
     if(initialChromeRevealed) return;
     if(previewReadyForInitialReveal && dvdReadyForInitialReveal){
       clearTimeout(initialRevealGraceTimer);
       initialRevealGraceTimer = null;
-      if(!initialRevealExtraBufferTimer && initialRevealPollStartedAt === null){
-        initialRevealPollStartedAt = performance.now();
-        pollDvdReadyThenReveal();
+      if(!initialRevealExtraBufferTimer){
+        initialRevealExtraBufferTimer = setTimeout(() => {
+          initialRevealExtraBufferTimer = null;
+          revealInitialChrome();
+        }, INITIAL_REVEAL_EXTRA_BUFFER_MS);
       }
       return;
     }
@@ -3129,51 +3008,6 @@
     }catch(err){ /* 私密瀏覽模式等情況，忽略即可 */ }
   }
 
-  // 讀 build-e-manifest.js 產生、由 GitHub Actions push 上去的 e-manifest.json，
-  // 回傳一組可以直接拿來當 <img src> 用的靜態網址陣列。manifest 的 key 沿用
-  // 原始 Drive file id（跟 masks.json 對照表相容），這裡連同 id 一起還原回
-  // dvdEImageUrlToId，讓 recordDvdEMaskMapping()／requestAlphaMask() 照樣能
-  // 查表命中預算好的遮罩，不會因為改走靜態檔案就少了這個優化。
-  // manifest 抓不到、格式不對、或是空的，一律回傳 null——呼叫端
-  // （fetchDvdEImages()）看到 null 就會退回原本「進站現查 Drive API」那段，
-  // 當成備援，不會讓整個網站因為這個額外功能而壞掉。
-  async function fetchDvdEImagesFromManifest(){
-    if(!EDEN_E_MANIFEST_URL || !EDEN_E_IMAGES_BASE_URL) return null;
-    try{
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-      let res;
-      try{
-        res = await fetch(EDEN_E_MANIFEST_URL, { signal: controller.signal, priority: 'low' });
-      } finally {
-        clearTimeout(timeoutId);
-      }
-      if(!res.ok) return null;
-      const manifest = await res.json();
-      // build-e-manifest.js 產生的是巢狀格式：{generatedAt, folderId, images:[{id,file,contentType}]}，
-      // 不是「id → 檔名」的扁平物件，這裡要對應讀 manifest.images 這個陣列。
-      const images = Array.isArray(manifest && manifest.images) ? manifest.images : [];
-      if(images.length === 0) return null;
-
-      const ids = [];
-      const urls = images.map(entry => {
-        // entry.file 本身已經是 "e-images/<id>.<ext>"（含資料夾前綴），
-        // EDEN_E_IMAGES_BASE_URL 尾端也是 "e-images/"，兩者直接相加會重複
-        // 一層 "e-images/e-images/"，所以這裡只取檔名本身再拼接。
-        const fileName = String(entry.file || '').replace(/^e-images\//, '');
-        const url = EDEN_E_IMAGES_BASE_URL + fileName;
-        dvdEImageUrlToId.set(url, entry.id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
-        ids.push(entry.id);
-        return url;
-      });
-
-      writeDvdECache(urls, ids); // 把 file id 一起存進 session 快取，讀取路徑跟 Drive 現查那段共用
-      return urls;
-    }catch(err){
-      return null;
-    }
-  }
-
   // 抓「e」圖片庫資料夾內所有 PNG／圖片檔案，回傳一組可以直接拿來當
   // <img src> 用的網址陣列。刻意跟上面照片牆的 fetchDriveImages() 分開
   // 寫成兩個獨立函式：這裡只需要「網址」，不需要標題、長寬比這些照片牆
@@ -3183,19 +3017,13 @@
   // 回傳空陣列——呼叫端（cycleDvdEImage）看到空陣列就會直接放棄換圖，
   // 維持原本內建的那張圖片，不會讓整個網站因為這個額外功能而壞掉。
   async function fetchDvdEImages(){
-    const cached = readDvdECache();
-    if(cached) return cached;
-
-    // 優先吃靜態 manifest（GitHub Actions 離線產生），抓得到就直接用、
-    // 不再進站現查 Drive API；抓不到（manifest 還沒 build、暫時性網路
-    // 問題等）才退回下面原本的 Drive API 現查那段，行為完全不變。
-    const fromManifest = await fetchDvdEImagesFromManifest();
-    if(fromManifest) return fromManifest;
-
     if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
        !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
       return [];
     }
+
+    const cached = readDvdECache();
+    if(cached) return cached;
 
     try{
       const q = encodeURIComponent(`'${EDEN_E_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
@@ -7652,24 +7480,7 @@
   // 每列還是只會拆出個位數的小矩形，效能較弱裝置一樣維持用比較低的
   // PF_ALPHA_MASK_MAX_DIM（因此這裡也跟著等比例調低），維持原有的效能
   // 折衷分寸不變。
-  // ---------- 修正：拆解精細度被鎖死在舊的低解析度，離線遮罩拉高的精細度
-  // 完全沒發揮作用，堆疊頁面還是常常看到照片重疊 ----------
-  // 這個常數原本直接等於 PF_ALPHA_MASK_MAX_DIM（見上面那行），當時的假設
-  // 是「遮罩解析度不管哪裡來的，反正都是同一套即時運算常數（72/48）」；但
-  // 後來把離線 build-masks.js 的網格解析度拉高到 220（見該檔案的完整
-  // 說明——弧形/斜角輪廓貼合度需要遠高於即時運算能負擔的解析度），前端
-  // 抓到的 maskEntry.w/h 因此變成 220，可是下面 buildFallItemPhysicsRects()
-  // 裡的 scaleFactor = round(遮罩邊長 / PF_BODY_GRID_MAX) 只要 PF_BODY_GRID_MAX
-  // 還是沿用 PF_ALPHA_MASK_MAX_DIM（72），就會把 220 硬縮回大約 72 格再拆
-  // 矩形——等於離線那次精細度提升，被這裡的舊常數直接砍掉一大半，物理
-  // 碰撞體的形狀精細度完全沒有變化，「堆疊時圖案重疊」的視覺落差自然沒
-  // 改善。
-  // 修法：拆解精細度改成獨立常數，不再假設等於遮罩解析度，直接抓高一點
-  // （利用離線遮罩多出來的細節），同時仍然遠低於離線遮罩本身的 220，
-  // 避免拆出的小矩形數量暴增拖垮 Matter.js 效能（run-length 合併是逐列
-  // 進行，格數越多、列數越多，複合物體的 part 數量大致跟列數成正比）；
-  // 效能較弱裝置比照 PF_ALPHA_MASK_MAX_DIM 的做法同步調降。
-  const PF_BODY_GRID_MAX = DVD_LOW_POWER_DEVICE ? 70 : 140;
+  const PF_BODY_GRID_MAX = PF_ALPHA_MASK_MAX_DIM; // 拆解精細度上限（沿長邊的格數），直接等於遮罩本身的解析度——見上方說明，這是目前這套做法所能達到的最高精細度
   const PF_BODY_GRID_CELL_MAJORITY = 0.5; // 跟 PF_ALPHA_MASK_CELL_MAJORITY 同樣的道理：降到粗網格時，這一格要「多數」原始像素都有畫到東西才算整格實心，避免只沾到一點顏色的邊緣格被整格補滿
 
   // 把 maskEntry（見 finishMask() 的 {mask,w,h} 格式）降到粗網格、按列合併
@@ -7748,190 +7559,6 @@
     return rects.length ? rects : null;
   }
 
-  // ---------- poly-decomp 路徑：把 alpha 遮罩描成輪廓線、化簡、分解成
-  // 幾塊貼合真實輪廓的凸多邊形 ----------
-
-  // 多邊形有號面積（shoelace 公式）。在這裡的座標系（y 向下）底下，
-  // 下面 traceMaskLoops() 描出來的「實心外圈」固定是正值、「鏤空內圈」
-  // 固定是負值，靠正負號就能分辨兩者，不用另外記狀態。
-  function polygonSignedArea(pts){
-    let sum = 0;
-    for(let i = 0; i < pts.length; i++){
-      const a = pts[i], b = pts[(i + 1) % pts.length];
-      sum += a.x * b.y - b.x * a.y;
-    }
-    return sum / 2;
-  }
-
-  // 把 alpha 遮罩的網格（0/1 實心格）描成一圈圈封閉輪廓線：對每一個實心
-  // 格的四個邊，只要「隔壁那一格不是實心」（或已經出界），這一邊就是
-  // 輪廓線的一段，方向固定成「實心區域永遠在邊的右手邊」（上緣往右、右緣
-  // 往下、下緣往左、左緣往上）——這樣同一個輪廓頂點恰好只會有一條「出邊」，
-  // 只要照著出邊一路接下去，就能自動串成一圈圈封閉迴圈，不需要额外的
-  // 連通元件分析：一張圖有好幾塊不相連的實心區域（少見但可能發生），
-  // 這裡會自然分別描出好幾圈輪廓，呼叫端不用特別處理。
-  // 已知限制：極少數「兩個實心格只用一個角相接」（棋盤狀對角相連）的
-  // 邊界情況，理論上會讓同一個頂點同時有兩條出邊，屬於點陣圖轉輪廓線
-  // 這個技巧本身常見的已知邊界情況（marching squares 的 saddle point
-  // 問題）——這裡選擇不特別處理，靠下面 buildFallItemPolyParts() 整段
-  // try/catch＋任何一圈描壞就整批退回舊版矩形法的保險機制接住，不會讓
-  // 掉落照片這個功能整個壞掉，只是那一張圖那一次退回精細度較舊。真實
-  // 照片去背後的遮罩幾乎不會出現這種人工棋盤圖案，實務上遇到的機率
-  // 極低。
-  function traceMaskLoops(maskEntry){
-    const mask = maskEntry.mask, w = maskEntry.w, h = maskEntry.h;
-    const isSolid = (x, y) => x >= 0 && x < w && y >= 0 && y < h && mask[y * w + x] === 1;
-    const edgeMap = new Map();
-    const keyOf = (x, y) => x + ',' + y;
-    for(let y = 0; y < h; y++){
-      for(let x = 0; x < w; x++){
-        if(!isSolid(x, y)) continue;
-        if(!isSolid(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y: y });
-        if(!isSolid(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });
-        if(!isSolid(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x: x, y: y + 1 });
-        if(!isSolid(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x: x, y: y });
-      }
-    }
-    const loops = [];
-    const visited = new Set();
-    for(const startKey of edgeMap.keys()){
-      if(visited.has(startKey)) continue;
-      const pts = [];
-      let curKey = startKey;
-      let guard = 0;
-      const guardMax = edgeMap.size + 4;
-      while(true){
-        if(visited.has(curKey)) break;
-        visited.add(curKey);
-        const comma = curKey.indexOf(',');
-        pts.push({ x: Number(curKey.slice(0, comma)), y: Number(curKey.slice(comma + 1)) });
-        const next = edgeMap.get(curKey);
-        if(!next) break; // 理論上每個輪廓頂點都恰有一條出邊，走到這裡代表描壞了，交給呼叫端整批放棄
-        const nextKey = keyOf(next.x, next.y);
-        if(nextKey === startKey) break; // 繞回起點，這一圈收工
-        curKey = nextKey;
-        if(++guard > guardMax) break; // 極端保險：任何未預期狀況都不會無窮迴圈卡死主執行緒
-      }
-      if(pts.length >= 3) loops.push(pts);
-    }
-    return loops;
-  }
-
-  // 點到線段的最短距離，供下面 Ramer-Douglas-Peucker 化簡使用。
-  function pfPointToSegDist(p, a, b){
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const lenSq = dx * dx + dy * dy;
-    if(lenSq < 1e-9) return Math.hypot(p.x - a.x, p.y - a.y);
-    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
-    t = Math.max(0, Math.min(1, t));
-    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
-  }
-  function pfRdpSimplify(pts, epsilon){
-    if(pts.length < 3) return pts.slice();
-    let maxDist = -1, idx = 0;
-    const first = pts[0], last = pts[pts.length - 1];
-    for(let i = 1; i < pts.length - 1; i++){
-      const d = pfPointToSegDist(pts[i], first, last);
-      if(d > maxDist){ maxDist = d; idx = i; }
-    }
-    if(maxDist > epsilon){
-      const left = pfRdpSimplify(pts.slice(0, idx + 1), epsilon);
-      const right = pfRdpSimplify(pts.slice(idx), epsilon);
-      return left.slice(0, -1).concat(right);
-    }
-    return [first, last];
-  }
-  // 描出來的輪廓線是沿著網格格線走的階梯狀折線，頂點數等於邊界格數，
-  // 直接拿去分解會產生一堆對應階梯轉角的多餘凸多邊形碎片。用 RDP 化簡
-  // 磨掉階梯本身的鋸齒，保留真正的形狀特徵（例如蝴蝶翅膀中間的 V 形
-  // 缺口這種「真的凹進去」的轉折，只要凹陷幅度超過化簡容許誤差，就
-  // 一定會被保留下來，不會被磨平）。輸入/輸出都是「不重複頭尾點」的
-  // 封閉多邊形格式：先接上第一個點湊成「首尾相同」的開放折線去跑標準
-  // 開放版 RDP（讓起點也有機會被化簡掉、不會被迫當成永遠保留的端點），
-  // 結束後再把重複的尾點拿掉。
-  function pfSimplifyPolygon(pts, epsilon){
-    if(pts.length <= 3) return pts;
-    const closed = pts.concat([pts[0]]);
-    const simplified = pfRdpSimplify(closed, epsilon);
-    if(simplified.length > 1) simplified.pop();
-    return simplified;
-  }
-
-  // 把某張圖的 alpha 遮罩，轉換成一批貼合真實輪廓的凸多邊形 part（供
-  // Body.create({parts}) 組成複合物體）。任何一步失敗（poly-decomp 還沒
-  // 載入好、這張圖的輪廓數學上分解不了、碎片數量超出上限……）一律回傳
-  // null，呼叫端 buildFallItemBody() 會自動退回舊版網格矩形法，不會讓
-  // 功能整個壞掉。
-  const PF_POLY_MIN_CHUNK_AREA = 6; // px²，分解出來面積小於這個值的碎片直接丟棄，避免解算器多花力氣處理幾乎沒有物理意義的細小接觸面
-  // ---------- 效能修正：碎片數量爆炸的真正成因，是化簡沒做夠 ----------
-  // quickDecomp() 對形狀複雜（分岔、鋸齒多）的照片，可能一路拆出十幾、
-  // 二十塊凸多邊形碎片——每一塊都是一個獨立的 Matter body part，會各自
-  // 參與碰撞偵測跟接觸點解算，物理世界裡實際要處理的物件數量因此遠比
-  // 「肉眼看到的張數」暗示的還要多。
-  // 一開始的做法是「超過上限就丟掉面積最小的碎片」，後來發現這會在照片
-  // 邊界上開洞、造成穿透（完整成因見對話紀錄）；改成「超過上限整批放棄、
-  // 退回矩形近似法」雖然不會有洞，但複雜形狀（剛好常常是最需要精準碰撞
-  // 的分岔／細瘦形狀，例如樹枝、叉子）會變成方正的矩形拼接，犧牲了最不
-  // 該犧牲的地方的精細度。
-  // 真正該修的：碎片數量爆炸的源頭，往往不是形狀「真的」很複雜，是遮罩
-  // 本身逐像素描邊產生的鋸齒雜訊，被整段直接送進 quickDecomp()——一堆
-  // 只有 1、2 像素高低差的鋸齒轉角，數學上都算「凹陷」，會被分解器當成
-  // 真正的凹陷各自拆出一小塊碎片，但這種次像素級的鋸齒細節，畫面上跟
-  // 拖曳互動時根本看不出來，純粹是白白增加碎片數量。
-  // 修法：在送進分解器「之前」，用更寬鬆一點的化簡容許誤差（epsilon）
-  // 把這些雜訊先撫平掉，讓分解器只需要處理形狀真正的分岔／凹陷（叉子的
-  // 齒縫、樹枝的分岔角度、捲鬚的彎曲弧線——這些跨越的像素範圍夠大，不會
-  // 被化簡誤刪），碎片數量自然大幅降低，而且是「形狀本身變簡潔」帶來的
-  // 降低，不是靠事後丟碎片或整批降級犧牲精細度換來的。
-  const PF_POLY_MAX_PARTS = 16; // 碎片數量的安全上限，正常情況下化簡後幾乎不會碰到，只用來保護極端邊界情況（例如去背雜訊特別多的圖）不要真的失控
-  function buildFallItemPolyParts(Matter, maskEntry, x, y, w, h, partOptions){
-    if(!window.decomp || typeof window.decomp.quickDecomp !== 'function') return null;
-    try{
-      const loops = traceMaskLoops(maskEntry);
-      if(!loops.length) return null;
-      const srcW = maskEntry.w, srcH = maskEntry.h;
-      // 化簡容許誤差跟著「一格網格對應多少實際像素」等比例抓，格子越粗
-      // （遮罩解析度越低），容許誤差跟著放大，避免把化簡跑在比遮罩本身
-      // 精細度還細的無意義刻度上。倍率從 1.4 調高到 2.4：撫平掉逐像素
-      // 描邊產生的鋸齒雜訊（見上方完整說明），同時仍保留形狀真正的分岔／
-      // 凹陷特徵——這些特徵跨越的像素範圍遠大於這個容許誤差，不會被誤刪，
-      // 肉眼看去背輪廓完全看不出差異，但送進 quickDecomp() 的多邊形頂點
-      // 數量會明顯減少，拆出來的碎片數量也跟著自然降低。
-      const epsilon = Math.max(1, Math.min(w / srcW, h / srcH) * 2.4);
-      const candidates = [];
-      for(const loop of loops){
-        if(polygonSignedArea(loop) < 0) continue; // 鏤空內圈，不處理（見 traceMaskLoops() 的已知限制說明），只保留實心外圈
-        const localPts = loop.map(p => ({ x: (p.x / srcW - 0.5) * w, y: (p.y / srcH - 0.5) * h }));
-        const simplified = pfSimplifyPolygon(localPts, epsilon);
-        if(simplified.length < 3) continue;
-        const worldPts = simplified.map(p => [p.x + x, p.y + y]);
-        window.decomp.makeCCW(worldPts);
-        if(typeof window.decomp.removeCollinearPoints === 'function') window.decomp.removeCollinearPoints(worldPts, 0.02);
-        if(typeof window.decomp.isSimple === 'function' && !window.decomp.isSimple(worldPts)) continue; // 化簡後仍有自我相交，這一圈放棄，不勉強塞給分解器
-        const chunks = window.decomp.quickDecomp(worldPts);
-        for(const chunk of chunks){
-          if(chunk.length < 3) continue;
-          const chunkVerts = chunk.map(([cx, cy]) => ({ x: cx, y: cy }));
-          const area = Math.abs(polygonSignedArea(chunkVerts));
-          if(area < PF_POLY_MIN_CHUNK_AREA) continue;
-          candidates.push({ verts: chunkVerts, area });
-        }
-      }
-      if(!candidates.length) return null;
-      // 超過上限：整批放棄，回傳 null 交給呼叫端退回矩形法（見上方完整
-      // 說明），不再挑著丟碎片、不再製造碰撞破洞。化簡加強之後，這裡
-      // 預期只會在極端情況才觸發。
-      if(candidates.length > PF_POLY_MAX_PARTS) return null;
-      const parts = candidates.map(({ verts }) => {
-        const centre = Matter.Vertices.centre(verts);
-        return Matter.Body.create(Object.assign({}, partOptions, { position: centre, vertices: verts }));
-      });
-      return parts.length ? parts : null;
-    } catch(err){
-      return null; // 任何非預期狀況一律優雅退回舊版矩形法
-    }
-  }
-
   // 建立最終要加進物理世界的 body：優先用上面「多矩形逼近實際形狀」的
   // 做法（回傳複合物體），遮罩還沒就緒時退回原本的矩形（+ 圓角）。
   // options 裡的 angle 刻意不直接傳給每一個小矩形——那樣會變成每個小矩形
@@ -7946,74 +7573,100 @@
     const angle = options.angle;
     const partOptions = {};
     for(const key in options){ if(key !== 'angle') partOptions[key] = options[key]; }
-
-    // 把「Body.create({parts}) 之後把質心寫回 pfCenterOffset、再依 angle
-    // 設定角度」這段收尾動作抽成共用函式：poly-decomp 路徑（下面優先嘗試）
-    // 跟舊版網格矩形路徑（分解失敗時的備援）組出來的都是「一批 part →
-    // 組成複合物體」，收尾邏輯完全一樣，只差 part 陣列從哪裡來。完整原理
-    // 見下面 pfBoxCenter() 之前的說明：Body.create({parts}) 會把
-    // body.position 強制改寫成所有 part 依面積加權算出來的質心，不是我們
-    // 要的「外框矩形正中心」，這裡先記住兩者的固定偏移量，之後畫面同步
-    // 一律透過 pfBoxCenter() 換算回外框正中心，不直接用 body.position。
-    // ---------- 改版：碰撞形狀改回精準貼合去背輪廓（poly-decomp），
-    // 不再用外接矩形 ----------
-    // 這批照片有不少是樹枝、叉子、捲鬚這種細瘦分岔的形狀，外接矩形會把
-    // 中間一大片透明區域也當成實心去撞其他照片，等於物件之間隔著一層
-    // 看不見、卻真的會擋人的「透明隔離層」，跟畫面上看到的去背輪廓完全
-    // 對不起來——矩形對這類形狀來說是錯誤的取捨方向，改回精準碰撞。
-    // 上一輪「精準碰撞太吃效能」的根本原因不是「精準」這件事本身，是
-    // 化簡（simplify）沒做夠、遮罩本身的鋸齒像素邊緣被整段送進
-    // quickDecomp()，一堆本來只是雜訊的細碎鋸齒轉角，也被當成真正的
-    // 凹陷去拆解，拆出一堆瑣碎到肉眼看不出差異的小碎片。真正該做的修正
-    // 是在分解「之前」就把這些雜訊化簡掉（見下面 buildFallItemPolyParts()
-    // 裡加大的 epsilon 倍率），讓分解器只需要處理形狀真正的分岔／凹陷
-    // （叉子的齒縫、樹枝的分岔、捲鬚的彎曲），碎片數量自然就會降下來，
-    // 而不是像上一版那樣：形狀本身該有的細節先完整拆出來，再依面積
-    // 「丟掉」其中幾塊、留下破洞。
-    if(maskEntry){
-      const polyParts = buildFallItemPolyParts(Matter, maskEntry, x, y, w, h, partOptions);
-      if(polyParts){
-        const body = Body.create({ parts: polyParts });
-        body.plugin = body.plugin || {};
-        body.plugin.pfCenterOffset = { x: x - body.position.x, y: y - body.position.y };
-        if(typeof angle === 'number') Body.setAngle(body, angle);
-        return body;
-      }
-    }
-
-    // ---------- 備援路徑：poly-decomp 沒載入好／這張圖輪廓分解失敗
-    // （或極端複雜到連化簡後都超過安全上限）時，退回網格矩形逼近法 ----------
-    // 一樣是「一批小矩形拼出貼近輪廓的形狀」，精細度比 poly-decomp 略低
-    // （矩形邊緣會有一點鋸齒感，不是平滑的斜線），但仍然遠比單一外接
-    // 矩形貼合真實輪廓，不會有「一大片透明區域被當實心」的問題，只在
-    // 真的走到這條備援路徑時才會用到，正常情況下幾乎不會被觸發。
-    const rectPartOptions = partOptions.slop === undefined ? Object.assign({}, partOptions, { slop: 0.06 }) : partOptions;
+    // Matter.js 每個 body 預設允許 0.05（世界座標，這裡跟畫面像素 1:1）的
+    // 「容許重疊量」(slop)：只要重疊沒超過這個值，引擎會直接視為已解決、
+    // 不再花力氣繼續修正，這是為了避免解算在浮點誤差邊緣無限微調、抖動
+    // 不收斂的正常機制，但代價是永遠會留一絲絲允許的重疊。這裡用不到那
+    // 麼多容忍空間（不需要顧慮浮點雜訊造成的抖動，複合物體本來就是離散
+    // 小矩形拼出來的），調低到 0.01，讓引擎盡量把重疊收斂到肉眼看不出來
+    // 的程度，而不是提早在還有明顯重疊時就放棄。若呼叫端自己有指定 slop
+    // 則尊重呼叫端的設定，不覆寫。
+    // ---------- 修正「照片疊在一起時會一直瘋狂抖動、停不下來」 ----------
+    // 根本成因：上面把每張照片拆成貼合真實輪廓的一整排小矩形（複合物體），
+    // 精細度越高、沿邊緣切出的小矩形越多，每一小塊都是直角。兩張這樣的
+    // 複合物體疊在一起時，實際接觸點往往不是落在「視覺上看起來平滑」的
+    // 那條邊，而是卡在某一小塊矩形的直角上——這個接觸點（法線方向）每一
+    // 影格都可能因為極些微的位置變化，在相鄰兩個小矩形的邊角之間跳來跳去，
+    // 解算出來的推開方向也跟著每一影格變來變去，肉眼看起來就是「疊在一起
+    // 的照片一直小幅度抖動、停不下來」——因為抖動本身讓 body 的動量
+    // （motion）一直沒辦法低於 Matter.js 判斷「可以睡眠」的門檻，於是永遠
+    // 不會被引擎跳過計算，變成真的「一直」抖不停，不是抖一下就停。
+    // 修法一：幫每一小塊矩形都加一點點圓角（chamfer）——半徑刻意抓得很小
+    // （最多 3px，且不超過這塊矩形本身寬/高的一半），肉眼幾乎看不出跟直角
+    // 差異，但足以把「兩塊矩形交界處那個銳利直角」磨掉一點，讓相鄰兩張
+    // 照片實際接觸到的法線方向不會因為卡在直角上而每影格亂跳，大幅減少
+    // 這種「假接觸點」造成的抖動。
+    // 修法二：slop（容許重疊量）原本被調到 0.01（世界座標≈像素），比
+    // Matter.js 內建預設 0.05 還緊很多倍——這裡的精細度已經是整排小矩形
+    // 組成的複合物體，兩兩相疊時同時存在的接觸點數量遠比一般單一矩形碰撞
+    // 多出好幾倍，即使把 position/velocity 迭代次數都調高，每一步能真正
+    // 收斂到「小於 0.01」這麼緊的重疊量，對這麼多接觸點來說還是勉強，容易
+    // 在幾種收斂不完全的接觸點之間來回拉扯、解算結果每影格略有不同，也是
+    // 抖動的一部分成因。這裡放寬回比 Matter 預設略寬的 0.06——0.01 跟 0.06
+    // 的差距換算成實際重疊量，兩者都遠小於 1 個像素，肉眼完全分辨不出來
+    // （不會重新出現「看得到縫隙／交疊」那個舊問題，那個問題的根本原因是
+    // 遮罩精細度不夠、不是 slop），但給解算器多一點點容許空間，可以讓它在
+    // 「已經幾乎重合、剩下的重疊量根本不影響觀感」時就直接放手收工，不用
+    // 再繼續為了逼近 0.01 這麼極端的目標而每影格微調、抖個不停。
+    if(partOptions.slop === undefined) partOptions.slop = 0.06;
     const rects = buildFallItemPhysicsRects(maskEntry, w, h);
     if(rects){
       const parts = rects.map(r => {
         const chamferR = Math.max(0, Math.min(3, r.w / 2 - 0.2, r.h / 2 - 0.2));
         const rectOptions = chamferR >= 0.4
-          ? Object.assign({}, rectPartOptions, { chamfer: { radius: chamferR } })
-          : rectPartOptions;
+          ? Object.assign({}, partOptions, { chamfer: { radius: chamferR } })
+          : partOptions;
         return Bodies.rectangle(x + r.cx, y + r.cy, r.w, r.h, rectOptions);
       });
       const body = Body.create({ parts });
+      // ---------- 真正修好「複合碰撞體仍會跟視覺畫面對不齊」的根本成因 ----------
+      // Body.create({parts}) 底層是呼叫 Matter 的 Body.setParts()，它會把
+      // body.position 強制改寫成「所有小矩形（也就是實際有畫到東西的
+      // alpha 像素）依面積加權算出來的質心」，而不是我們原本想要的「整張
+      // 去背圖外框矩形的正中心」（w/2, h/2）。上面兩者只有形狀完全對稱、
+      // 顏色平均分佈在外框正中央時才會剛好重合；但這裡多半是異形去背圖
+      // （例如蕨類捲起的一端比較密、蝴蝶翅膀左右不對稱、香蕉一整串偏向
+      // 一側），質心天生就會偏離外框正中心。下面 pfSyncHandler／飛入詳細頁
+      // 動畫等每個地方，全部都是直接拿 body.position 當「外框矩形正中心」
+      // 去反推 DOM 該畫在哪裡（translate(body.position.x - w/2, ...)）——
+      // 這個假設一旦不成立，畫出來的整張圖（含外框內的透明留白）就會
+      // 整個偏移，偏移量剛好等於「質心到外框中心」這段距離。碰撞判斷本身
+      // （質心 vs 質心）其實是準的，兩張圖的碰撞體真的沒有互相穿透；但
+      // 畫面上看到的，是兩張「因為偏移而被畫錯位置」的完整外框圖片在打架，
+      // 這才是不管怎麼調網格解析度、肉眼看起來還是會交疊的真正原因。
+      // 修法：在 Body.create 把 position 改寫成質心「當下」（角度還是 0，
+      // 因為下面 Body.setAngle 還沒呼叫），先把「質心 → 外框正中心」這段
+      // 向量算出來記住（body-local 座標系下的固定偏移量，不會再變），存進
+      // Matter 官方保留給外掛自訂資料用的 body.plugin 裡。之後無論這顆
+      // body 怎麼被物理引擎轉動、位移，只要在畫面同步時把這段固定的本地
+      // 偏移量依照 body 目前的 angle 重新旋轉一次、加回 body.position，
+      // 就能還原出「外框正中心」目前真正該在的世界座標——這才是畫面元素
+      // 真正該對齊的點（見下面共用的 pfBoxCenter()）。
       body.plugin = body.plugin || {};
       body.plugin.pfCenterOffset = { x: x - body.position.x, y: y - body.position.y };
       if(typeof angle === 'number') Body.setAngle(body, angle);
       return body;
     }
-
-    // ---------- 「永遠不要用外框矩形頂替」的例外：遮罩根本不存在 ----------
-    // 走到這裡代表 poly-decomp 路徑跟網格矩形路徑都沒能拆出任何形狀。
-    // 只有「遮罩根本不存在」（例如剛好在還沒暖機完成那一刻就被呼叫）才
-    // 用矩形頂替，這是對「還沒就緒」這種暫時狀態的容忍；遮罩確實存在但
-    // 兩條路徑都真的拆不出東西（這張圖去背後完全沒有任何顏色的極端情況），
-    // 直接回傳 null，交給呼叫端把這張圖當「不能用」跳過，不建立任何
-    // body，不將就頂替上場，避免摔下去一個使用者幾乎看不見、卻用整個
-    // 外框在撞人的「隱形空氣物件」。
+    // ---------- 擴大偵錯修正：「永遠不要用外框矩形頂替」延伸到這裡 ----------
+    // 走到這裡代表 buildFallItemPhysicsRects() 沒能拆出任何矩形。原本不分
+    // 青紅皂白，一律退回一個貼齊整張外框的矩形 body——這個退回路徑原本是
+    // 設計給「遮罩根本還沒建好」(maskEntry 是 null/undefined) 這種暫時性
+    // 情況用的保險；但現在所有呼叫端都已經改成「先等遮罩真的就緒才呼叫
+    // 這支函式」，maskEntry 幾乎不可能真的是空的。真正會走到這裡的，反而
+    // 是「遮罩確實建好了（就算套用完上面的寬鬆門檻），這張圖去背後還是
+    // 完全沒有任何顏色」這種圖片本身有問題的極端情況——這時退回滿版矩形，
+    // 等於摔下去一個使用者幾乎看不見、卻用整個外框在撞人的「隱形空氣
+    // 物件」，正是這次要徹底避免的狀況。
+    // 修法：只有「遮罩根本不存在」才用矩形頂替（維持原本對「還沒就緒」
+    // 這種暫時狀態的容忍）；遮罩確實存在但真的一格都拆不出來，直接回傳
+    // null，交給呼叫端（spawnFallingPhotos() 的 dropItem()／
+    // promoteBatchPhotoToDvd()）把這張圖當「不能用」跳過，不建立任何
+    // body，不將就頂替上場。
     if(!maskEntry){
       const body = Bodies.rectangle(x, y, w, h, Object.assign({}, options, { slop: 0.01, chamfer: { radius: 3 } }));
+      // 退回單一矩形 body 時，body.position 本來就等於外框正中心，偏移量是
+      // 零向量——跟上面複合物體共用同一套 pfBoxCenter() 讀取邏輯，不用另外
+      // 特判「這顆是不是複合物體」。
       body.plugin = body.plugin || {};
       body.plugin.pfCenterOffset = { x: 0, y: 0 };
       return body;
@@ -10816,49 +10469,15 @@
   // 很長，正常情況下這個時限完全不會被觸發到。
   const PHOTO_FALL_MASK_ULTIMATE_TIMEOUT_MS = 8000;
 
-  // ---------- 改用真正的凹多邊形分解（poly-decomp）取代網格矩形逼近 ----------
-  // 原本 buildFallItemBody() 是把去背 PNG 的 alpha 遮罩，降解析度成網格、
-  // 逐列合併成一整排小矩形拼成複合物體（見 buildFallItemPhysicsRects() 原本
-  // 的完整說明）。這個做法沒有真的分解凹陷形狀，只是用很多個直角小矩形去
-  // 逼近，天生有兩個互相拉扯、參數怎麼調都只能二選一的問題：矩形之間的
-  // 直角接觸點在物體疊在一起時會讓解算出來的推開方向每影格亂跳（抖動），
-  // 而想讓輪廓貼合更精準又得繼續加密網格、進一步增加接觸點數量（更抖、
-  // 也更吃效能，拖曳時尤其明顯）。
-  // 改用 poly-decomp（Matter.js 官方支援、業界處理「凹多邊形碰撞體」的
-  // 標準函式庫）：把 alpha 遮罩的邊界描成一條輪廓線，化簡成幾十個頂點，
-  // 交給 poly-decomp 分解成「幾塊」貼合真實輪廓的凸多邊形（不是幾十個直角
-  // 小矩形）。part 數量少一個數量級、沒有網格造成的假直角接觸點，同時
-  // 解決重疊、抖動、拖曳吃效能這三個問題的根本成因，而不是再疊加一層新的
-  // 參數補丁。詳細分解流程見下面 buildFallItemPolyParts()／traceMaskLoops()
-  // 的說明。
-  // poly-decomp 是獨立的小函式庫（UMD build，載入後會建立全域 window.decomp），
-  // 跟 Matter.js 本身沒有相依綁定關係，這裡讓它跟 Matter.js 並行下載，兩者
-  // 都下載完成才 resolve——buildFallItemPolyParts() 執行時需要 window.decomp
-  // 已經存在才能用新路徑，若這裡任何一個載入失敗，也不整個卡住：Matter.js
-  // 若失敗才真的整個掉落模式沒辦法用（走原本 reject 邏輯）；poly-decomp
-  // 若失敗，buildFallItemPolyParts() 內部會自己偵測 window.decomp 不存在，
-  // 優雅退回舊版網格矩形法（見該函式最上面那行 if(!window.decomp) return null;），
-  // 不影響整體功能可用性，只是那次退回精細度較舊。
   let matterLoadPromise = null;
-  function loadPolyDecompJS(){
-    if(window.decomp) return Promise.resolve();
-    return new Promise((resolve) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/poly-decomp/0.3.0/decomp.min.js';
-      s.async = true;
-      s.onload = () => resolve();
-      s.onerror = () => resolve(); // 失敗不 reject，交給呼叫端的優雅退回機制處理，不影響 Matter.js 本身能不能用
-      document.head.appendChild(s);
-    });
-  }
   function loadMatterJS(){
-    if(window.Matter) return loadPolyDecompJS();
+    if(window.Matter) return Promise.resolve();
     if(matterLoadPromise) return matterLoadPromise;
     matterLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
       s.src = 'https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js';
       s.async = true;
-      s.onload = () => { loadPolyDecompJS().then(resolve); };
+      s.onload = () => resolve();
       s.onerror = () => { matterLoadPromise = null; reject(new Error('Matter.js load failed')); };
       document.head.appendChild(s);
     });
@@ -10914,39 +10533,6 @@
   let pfLoopLastTime = null;
   let pfAccumulatorMs = 0;
 
-  // ---------- 臨時偵錯量測：只在明確開啟時才啟動，平常完全不影響效能 ----------
-  // 用來實際回答「碰撞到底吃掉多少效能」這個問題——與其憑感覺猜測要調哪個
-  // 參數，直接在使用者自己的機器上量出：(1) 目前總共有幾個碰撞部件
-  // （每張照片被 poly-decomp 拆成的小凸多邊形加總）、(2) 目前有幾組「活躍
-  // 碰撞對」（正在互相接觸、需要解算的組數）、(3) 每次 Engine.update() 實際
-  // 花了幾毫秒（平均／最大）、(4) 有沒有觸發「追趕補步」（steps > 1，代表
-  // 已經跟不上、正在啟動 pfLoopTick() 那個「越慢就補越多步、補越多步就
-  // 更慢」的疊加迴圈）。
-  // 開啟方式：網址加 ?pfdebug，或在 console 執行 window.__PF_DEBUG = true。
-  // 不開啟時，下面這段除了一次性的字串比對之外沒有任何額外開銷，
-  // Engine.update() 呼叫方式、迭代次數、碰撞形狀完全不受影響——純觀察，
-  // 不會干擾要測量的東西本身。
-  const PF_DEBUG_PERF = /[?&]pfdebug\b/i.test(location.search) || window.__PF_DEBUG === true;
-  let pfDebugFrameMs = 0, pfDebugFrameMaxMs = 0, pfDebugFrameCount = 0;
-  let pfDebugSubstepFrames = 0, pfDebugLastLog = 0;
-  function pfDebugLog(){
-    if(!PF_DEBUG_PERF) return;
-    const nowTs = performance.now();
-    if(nowTs - pfDebugLastLog < 1000) return;
-    pfDebugLastLog = nowTs;
-    let totalParts = 0;
-    const allBodies = pfDvdItem ? pfItems.concat([pfDvdItem]) : pfItems;
-    allBodies.forEach(({ body }) => { if(body && body.parts) totalParts += Math.max(1, body.parts.length - 1); });
-    const activeContacts = pfEngine ? pfEngine.pairs.list.filter(p => p.isActive).length : 0;
-    const avgMs = pfDebugFrameCount ? (pfDebugFrameMs / pfDebugFrameCount) : 0;
-    console.log(
-      `[pf-debug] 物件數=${allBodies.length} 碰撞部件總數=${totalParts} 活躍碰撞對=${activeContacts} ` +
-      `Engine.update 平均=${avgMs.toFixed(2)}ms 最大=${pfDebugFrameMaxMs.toFixed(2)}ms ` +
-      `補步影格數=${pfDebugSubstepFrames}/${pfDebugFrameCount}`
-    );
-    pfDebugFrameMs = 0; pfDebugFrameMaxMs = 0; pfDebugFrameCount = 0; pfDebugSubstepFrames = 0;
-  }
-
   function pfLoopTick(now){
     pfLoopRafId = requestAnimationFrame(pfLoopTick);
     if(pfLoopLastTime === null){ pfLoopLastTime = now; return; } // 第一幀還沒有「上一幀」可以算真實經過時間，先跳過，下一幀開始正常累加
@@ -10955,19 +10541,10 @@
     if(frameMs > 250) frameMs = 250; // 分頁切到背景很久才切回來：真實經過時間可能長達數秒甚至數分鐘，夾住上限，避免下面 while 迴圈瞬間跑出天文數字的補步
     pfAccumulatorMs += frameMs;
     let steps = 0;
-    const pfDebugStart = PF_DEBUG_PERF ? performance.now() : 0;
     while(pfAccumulatorMs >= PF_FIXED_STEP_MS && steps < PF_MAX_SUBSTEPS){
       window.Matter.Engine.update(pfEngine, PF_FIXED_STEP_MS);
       pfAccumulatorMs -= PF_FIXED_STEP_MS;
       steps++;
-    }
-    if(PF_DEBUG_PERF && steps > 0){
-      const elapsed = performance.now() - pfDebugStart;
-      pfDebugFrameMs += elapsed;
-      if(elapsed > pfDebugFrameMaxMs) pfDebugFrameMaxMs = elapsed;
-      pfDebugFrameCount++;
-      if(steps > 1) pfDebugSubstepFrames++;
-      pfDebugLog();
     }
     if(steps >= PF_MAX_SUBSTEPS) pfAccumulatorMs = 0; // 真的追不上（例如裝置效能長期跟不上），與其繼續攢著、之後某一幀忽然爆發式補一大串步造成瞬間卡頓，不如直接捨棄多餘的落後量，讓它從這一幀重新開始正常累積
     // DOM 同步移到這裡、迴圈外面，只在這一影格「真的有物理進展」時呼叫一次
@@ -11745,27 +11322,11 @@
     // 2）：這個數字管的是拖曳用的 MouseConstraint 這條「彈簧」本身解算得
     // 多準，調高可以讓抓著的照片更緊跟著滑鼠／手指本身的位置，減少因為
     // 彈簧本身沒解準、疊加出額外一層晃動或穿透感。
-    const pfMobile = isDetailMobile(); // 目前手機/桌機都套用同一組迭代次數，這裡先保留判斷式，之後如果需要重新拉開兩邊數字時不用再重查一次裝置類型。
+    const pfMobile = isDetailMobile();
     pfEngine = Engine.create({
-      // ---------- 迭代次數沿革（濃縮版，完整每一步的推導過程保留在對話
-      // 紀錄裡，這裡只留下最後定案的理由）----------
-      // 這幾個數字之前一路從 Matter.js 預設的 6/4/2，因為「碰撞形狀是
-      // poly-decomp／網格矩形拆出來的複合物體，零件數量一多，重疊、抖動、
-      // 效能三個問題互相拉扯」，被迫一路調到 16/5/3 去硬撐精準去背碰撞的
-      // 穩定度。中間試過改成單一外接矩形（8/4/3），效能跟穩定度都很好，
-      // 但矩形對這批照片裡不少細瘦分岔的形狀（樹枝、叉子、捲鬚）來說，
-      // 外接矩形中間一大片透明區域會被當成實心去撞人，違反「要精準貼合
-      // 去背輪廓」的核心需求，所以改回 poly-decomp——但這次從根本修正了
-      // 碎片爆炸的成因（化簡容許誤差加大，撫平逐像素鋸齒雜訊，見
-      // buildFallItemPolyParts() 的完整說明），碎片數量預期會比最早那版
-      // 少很多，不需要再衝到 16 那麼高的迭代次數才能收斂。10/5/3：比單純
-      // 矩形場景的 8/4/3 留多一點裕度給複合物體多零件的情境，但遠低於
-      // 最早硬撐精準度時的 16/5/3。可以用網址加 ?pfdebug 量測
-      // Engine.update() 耗時，如果還是偏卡可以往下調，如果重疊/抖動還在
-      // 可以往上調，兩邊拉鋸找平衡點。
-      positionIterations: 10,
-      velocityIterations: 5,
-      constraintIterations: 3,
+      positionIterations: pfMobile ? 8 : 14,
+      velocityIterations: pfMobile ? 5 : 8,
+      constraintIterations: pfMobile ? 3 : 4,
       enableSleeping: true,
     });
     pfEngine.gravity.y = PHOTO_FALL_GRAVITY;
@@ -11955,17 +11516,6 @@
     // 是直接覆寫位置，不受彈簧硬度或碰撞解算精細度影響，物理上等同
     // 「這裡真的有一堵絕對過不去的牆」。只处理拖曳中的物體，其餘掉落／
     // 堆疊中的照片完全不受影響，撞牆手感、彈開效果都維持原樣不變。
-    // ---------- 補充修正：上邊界不應該擋——照片本來就是從畫面上方掉下來
-    // 的，跟真正需要擋住的左右／下邊界性質不一樣 ----------
-    // 下面這段原本把上下左右四個邊界都一視同仁地夾住，導致使用者把照片
-    // 往上拖，拖到接近螢幕頂端就會被這裡強制拉回來，感覺像頭上卡著一片
-    // 看不見的天花板——但整個物理世界從頭到尾都沒有真的建立「天花板」
-    // 這個物體（上面 Composite.add() 只加了地板／左牆／右牆三個），純粹
-    // 是這段防呆邏輯自己把上邊界也夾住了。
-    // 修法：只保留左右／下邊界的夾限（跟左牆／右牆／地板的碰撞手感一致），
-    // 上邊界完全不夾——使用者可以自由把照片往上拖出畫面外，放手後這顆
-    // body 上方沒有任何東西擋著，跟一般掉落中的照片一樣單純受重力往下
-    // 掉回來，不會有任何新的行為或看起來卡住的狀況。
     Events.on(pfEngine, 'afterUpdate', () => {
       const draggedBody = pfMouseConstraint.body;
       if(!draggedBody) return;
@@ -11974,10 +11524,10 @@
       const halfW = (draggedBody.bounds.max.x - draggedBody.bounds.min.x) / 2;
       const halfH = (draggedBody.bounds.max.y - draggedBody.bounds.min.y) / 2;
       const minX = halfW, maxX = Math.max(halfW, viewportW - halfW);
-      const maxY = Math.max(halfH, viewportH - halfH);
+      const minY = halfH, maxY = Math.max(halfH, viewportH - halfH);
       const pos = draggedBody.position;
       const clampedX = Math.min(Math.max(pos.x, minX), maxX);
-      const clampedY = Math.min(pos.y, maxY); // 只擋下邊界，不設上邊界下限
+      const clampedY = Math.min(Math.max(pos.y, minY), maxY);
       if(clampedX !== pos.x || clampedY !== pos.y){
         Matter.Body.setPosition(draggedBody, { x: clampedX, y: clampedY });
         const vel = draggedBody.velocity;
@@ -12031,247 +11581,15 @@
     // 要防的「PNG 疊在一起永遠黏住不會彈開」的情況一樣會被抓到、正常喚醒
     // 分開。用引擎本來就會算好的 pairs.list，比原本兩兩 AABB 迴圈更準也
     // 更省——不用自己重新跑一輪比對。
-    //
-    // ---------- 再修正：「還是會有一些圖片慢慢滲透疊合到其他圖片」----------
-    // 成因：門檻原本設 4px，是為了保守避免重新踩到最早那版 AABB 抖動的坑
-    // （見上面完整說明），但這裡讀的是 SAT 算出來的精確深度，不是粗略的
-    // AABB，正常靜止接觸的深度其實遠低於 1px，4px 這個門檻放得太寬鬆——
-    // 代表深度落在 0～4px 之間的重疊，即使 Matter.js「自己」（不是這裡這段
-    // 邏輯，是引擎內建、純看速度、完全不看重疊深度的原生判斷）已經把其中
-    // 一顆判成睡著，這段邏輯也不會覺得「這樣算卡住」，不會出手叫醒——這
-    // 顆已經睡著的照片，重疊會直接凍結在那個看得出來的深度，不會再繼續
-    // 收斂。堆疊過程中一層層新照片壓上來，每次都可能在還沒完全下沉到
-    // 0px、只到 1～3px 左右就被原生睡眠機制搶先凍結，一次一次疊加起來，
-    // 肉眼看到的就是「慢慢滲透」。
-    // 修法：把門檻從 4 降到 1.5——SAT 深度夠精確，不會像 AABB 一樣把單純
-    // 貼合誤判成卡住，可以放心調緊；同時因為這裡跟下面 PF_RESOLVE_TOLERANCE
-    // 讀的是同一份 pairs.list 精確深度，也一併調緊那邊的門檻，兩處標準
-    // 一致，不會出現「這裡覺得該叫醒、那裡卻已經放行讓它睡了」的落差。
-    // ---------- 再修正：門檻調緊之後「整台電腦更卡，尤其物件在動/拖曳
-    // 碰撞時」----------
-    // 成因：1.5px 對當時的複合多邊形碰撞形狀來說是合理的緊門檻，但複合
-    // 物體零件多、彼此貼合時天生就會有一點點難以完全收斂到 0 的殘留深度
-    // （零件邊界本來就不是連續曲面），拖曳中物體一多，門檻設這麼緊，
-    // 等於一堆其實只是「正常貼合、深度略高於 1.5px」的接觸不斷被判定
-    // 「卡住」而反覆叫醒——這正是最早那版 AABB 抖動迴圈的同一種成因
-    // （見上面完整說明），只是這次是門檻太緊、不是判斷方式太粗，殊途
-    // 同歸,一樣造成「醒來又睡、睡了又醒」的迴圈，睡眠機制原本最大的
-    // 省效能效果因此形同失效，物件越多、動得越頻繁，這個迴圈觸發得
-    // 越密集，就是「電腦越來越卡」的直接原因。
-    // 現在碰撞形狀已經改回單一矩形（見 buildFallItemBody() 最新版），
-    // 矩形對矩形的 SAT 深度在正常貼合時會收斂到非常接近 0、沒有複合物體
-    // 零件邊界那種殘留誤差，門檻不需要壓得這麼緊也能準確分辨「正常貼合」
-    // 跟「真的卡住」，這裡放寬回 3px：比原本 4px 略緊（矩形碰撞本身已經
-    // 比複合物體穩定，不需要跟最早那版一樣寬鬆），但遠比 1.5px 寬鬆，
-    // 大幅降低反覆叫醒的機率，讓 enableSleeping 真正發揮省效能的效果。
-    const PF_STUCK_OVERLAP_DEPTH = 3; // px，超過這個穿透深度才視為「真的卡住疊在一起」，正常貼合的靜止接觸深度遠低於這個門檻，不容易誤判成卡住；數字不要調得太緊（例如先前試過的 1.5），太緊會讓物體反覆被誤判「卡住」而不斷醒來又睡著，整體效能反而更差（完整成因見對話紀錄）
+    const PF_STUCK_OVERLAP_DEPTH = 4; // px，超過這個穿透深度才視為「真的卡住疊在一起」，一般貼合的靜止接觸深度趨近 0，遠低於這個門檻
     Events.on(pfEngine, 'afterUpdate', () => {
       const pairs = pfEngine.pairs.list;
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
         if(!pair.isActive) continue;
-        // ---------- 修正：複合物體（compound body）碰撞到的是零件，不是整個物件 ----------
-        // buildFallItemBody() 組出來的每張照片，是「一堆小矩形」拼成的複合
-        // 物體（見該函式的完整說明）。Matter.js 的碰撞偵測是逐一對這些小
-        // 矩形零件（part）做的，pair.bodyA / pair.bodyB 實際上是「碰到的
-        // 那個零件」，不是整張照片本身——零件自己的 isSleeping 從建立之後
-        // 就沒有人維護、永遠是初始值，讀它幾乎等於在賭。真正代表整張照片
-        // 睡眠狀態的，是零件的 .parent（頂層物件；如果本來就不是複合物體、
-        // 是單一矩形，.parent 會指回自己，不受影響）。Matter.js 內建的
-        // Sleeping.afterCollisions() 原始碼也是這樣處理（用
-        // collision.bodyA.parent 而不是直接用 bodyA），這裡照官方的做法補上。
-        const a = pair.bodyA.parent, b = pair.bodyB.parent;
+        const a = pair.bodyA, b = pair.bodyB;
         if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理，不需要介入
         if(pair.collision.depth < PF_STUCK_OVERLAP_DEPTH) continue; // 只是貼著的正常靜止接觸，不是真的卡住，不要叫醒
-        if(a.isSleeping) Matter.Sleeping.set(a, false);
-        if(b.isSleeping) Matter.Sleeping.set(b, false);
-      }
-    });
-
-    // ---------- 新增修正：極少數「疊超深」沒被上面深度判斷抓到、以及靜止前
-    // 那一兩秒偶爾還有極細微殘留抖動 ----------
-    // 上面 PF_STUCK_OVERLAP_DEPTH 依賴 Matter.js 算出來的精確穿透深度
-    // （SAT 演算法）。SAT 在「兩個物體重疊得非常深」（例如剛好整張疊在
-    // 另一張正上方，不是一般貼合）的極端狀況下，本身有個已知限制：算出
-    // 來的穿透深度可能反而失真、被算成一個偏小的數字，導致上面那道
-    // 门檻判斷誤以為「沒有真的卡住」而放行，同時也可能讓物體在快睡著的
-    // 臨界點附近，因為深度數字本身有一點點浮動誤差，連續好幾影格在
-    // 「差一點達標／被吵醒一點點」之間來回，肉眼看起來就是靜止前有一點
-    // 殘留抖動。
-    // 這裡加兩道保險，兩道都刻意做得保守（門檻拉高、低頻率），避免像
-    // 最早那版 AABB 判斷一樣，反而變成新的抖動來源：
-    //
-    // 保險一：原本這裡的門檻（PF_SETTLE_SPEED_EPS）抓得太保守，導致實測後
-    // 還是會持續抖動——真正成因不是浮點數尾數殘留這麼單純，是碰撞回彈
-    // 係數（restitution，上面設定的 0.3）本身的特性：重力每一步都會再
-    // 加一點點速度回去，回彈係數又會把這點速度的一部分「彈」回來，兩者
-    // 對「已經趴平、不會再繼續掉落」的照片來說，會形成一個幾乎沒完沒了
-    // 的極小回彈迴圈——單獨每一步的幅度小到肉眼幾乎看不出來，但因為
-    // 永遠沒辦法完全收斂到 0，也就永遠達不到 Matter.js 內建判斷「可以
-    // 睡覺」所需要的那個更嚴格的門檻，導致理論上早該定住的照片，實際上
-    // 永遠不會真正入睡，一直在原地做極小幅度的殘留彈跳，看起來就是
-    // 「靜止時還在抖」。
-    // 修法：不再只看「這一影格夠不夠慢」，改成自己追蹤「已經連續多少
-    // 影格，速度都維持在很小的範圍內」——只有真的已經穩定趴著超過一段
-    // 時間（約 1/3 秒）的物體，才由我們自己強制叫它睡覺，不用再等
-    // Matter.js 自己那個永遠達不到的門檻。強制睡著之後效果跟 Matter.js
-    // 自己判斷睡著完全相同，上面所有喚醒機制（拖曳、新照片撞上來、深度
-    // 判斷、重疊比例判斷）都還是正常生效，不會變成「睡死了叫不醒」。
-    // 剛落地、真的還在彈跳中的照片，速度忽大忽小、達不到「連續」這個
-    // 條件，計數器會一直被重置，不會被提早打斷，彈跳手感不受影響。
-    //
-    // ---------- 這裡是這段邏輯本身的修正：實測後發現「疊住不分開」反而
-    // 變得更常發生 ----------
-    // 成因：Matter.js 修正兩個物體重疊，很多時候不是靠加速度把它們推開，
-    // 是解算器每一步直接微調位置（position correction）——這個過程本身
-    // 的「速度」數值會維持在很低的狀態（因為根本不是用加速度在推），跟
-    // 「已經真的靜止」單看速度數字幾乎沒辦法分辨。上面這段只看速度，會把
-    // 「正在被慢慢推開、但推的當下速度本來就很低」的照片，跟「真的靜止」
-    // 的照片搞混，提早把還沒推開乾淨的照片強制睡著——等於在它們還疊著
-    // 的時候，就叫引擎別再繼續處理這兩顆了，疊住的狀況因此反而變多。
-    // 修法：強制睡著之前，額外檢查一次「這顆物體現在是不是還跟別的東西
-    // 有明顯重疊沒解完」（讀 pfEngine.pairs.list 裡的精確穿透深度，
-    // 沿用跟 PF_STUCK_OVERLAP_DEPTH 一樣的資料來源，門檻拉得比它更嚴格，
-    // 只要重疊還沒收斂到接近 0，就先不強制睡、繼續讓它正常解算，等它真的
-    // 解開乾淨、深度趨近 0 之後，才會被算進「連續低速」的計數——真正因為
-    // 回彈殘留造成的靜止抖動不受影響，一樣會照常被強制睡著。
-    // ---------- 再修正：跟上面 PF_STUCK_OVERLAP_DEPTH 同一批修正，門檻
-    // 一併放寬 ----------
-    // 碰撞形狀改回單一矩形之後，理由跟上面 PF_STUCK_OVERLAP_DEPTH 一樣：
-    // 正常貼合的深度會收斂得更乾淨，不需要壓在 0.5 這麼緊的門檻才能分辨
-    // 「真的還在解算」跟「已經收斂完」。調回 1——跟新的 PF_STUCK_OVERLAP_
-    // DEPTH(3) 之間留出清楚級距，確保「我們自己主動放這顆睡」一定比
-    // 「發現卡住才叫醒」的門檻更嚴格，不會出現自相矛盾的中間地帶。
-    const PF_FORCE_SLEEP_SPEED = 0.6; // 世界座標（≈px）／每影格——比 Matter.js 內建睡眠門檻寬鬆，足以蓋過殘留回彈的幅度，但仍遠低於一般移動看得出來的速度
-    const PF_FORCE_SLEEP_ANGSPEED = 0.004; // 弧度／每影格
-    const PF_FORCE_SLEEP_FRAMES = 20; // 連續幾影格都維持低速，才強制睡著，約 1/3 秒（60fps）
-    const PF_RESOLVE_TOLERANCE = 1; // px，重疊深度超過這個值，代表位置解算還在真的處理中，先不強制睡
-    Events.on(pfEngine, 'afterUpdate', () => {
-      // 先掃一次目前這一影格「還在明顯重疊、解算尚未收斂」的物體，記成
-      // 一個集合，等一下逐一檢查每張照片時直接查表，不用每張照片都重新
-      // 掃一次 pairs.list（維持跟原本一樣的效能量級）。
-      const stillResolving = new Set();
-      const pairs = pfEngine.pairs.list;
-      for(let i = 0; i < pairs.length; i++){
-        const pair = pairs[i];
-        if(!pair.isActive || pair.collision.depth <= PF_RESOLVE_TOLERANCE) continue;
-        stillResolving.add(pair.bodyA.parent);
-        stillResolving.add(pair.bodyB.parent);
-      }
-      const draggedNow = pfMouseConstraint.body;
-      const checkForceSleep = (body) => {
-        if(!body || body.isSleeping || body === draggedNow) return;
-        if(!body.plugin) body.plugin = {};
-        if(stillResolving.has(body)){ body.plugin.pfLowMotionFrames = 0; return; } // 還在真的被推開，先不計入低速累積
-        const v = body.velocity, w = body.angularVelocity;
-        const isLow = Math.abs(v.x) < PF_FORCE_SLEEP_SPEED && Math.abs(v.y) < PF_FORCE_SLEEP_SPEED && Math.abs(w) < PF_FORCE_SLEEP_ANGSPEED;
-        if(!isLow){ body.plugin.pfLowMotionFrames = 0; return; }
-        body.plugin.pfLowMotionFrames = (body.plugin.pfLowMotionFrames || 0) + 1;
-        if(body.plugin.pfLowMotionFrames >= PF_FORCE_SLEEP_FRAMES){
-          Matter.Body.setVelocity(body, { x: 0, y: 0 });
-          Matter.Body.setAngularVelocity(body, 0);
-          Matter.Sleeping.set(body, true);
-          body.plugin.pfLowMotionFrames = 0;
-        }
-      };
-      pfItems.forEach(({ body }) => checkForceSleep(body));
-      if(pfDvdItem) checkForceSleep(pfDvdItem.body);
-    });
-    //
-    // 保險二：每隔一段時間（刻意不是每影格，這是唯一一段兩兩互相比對的
-    // O(n^2) 邏輯，拉開頻率能把成本壓到幾乎量不到）用外接矩形（bounds，
-    // Matter.js 每影格都會算好、不用自己重算）粗略掃一次「有沒有睡著的
-    // 物體，重疊比例高到不正常」。門檻刻意設在「重疊面積佔較小那顆一半
-    // 以上」——一般斜著貼在一起的照片，因為外接矩形本來就比實際歪斜的
-    // 圖形範圍大一圈，重疊比例通常遠低於這個門檻，不會被誤判成卡住，
-    // 也就不會重新踩到最早那版「AABB 一相交就判定卡住」的抖動陷阱；只有
-    // 真的整張疊在另一張正上方那種明顯異常的狀況，才會超過這個比例。
-    let pfStuckSweepCounter = 0;
-    const PF_STUCK_SWEEP_INTERVAL = 45; // 影格數，約每 0.75 秒才掃一次
-    const PF_STUCK_OVERLAP_RATIO = 0.5;
-    Events.on(pfEngine, 'afterUpdate', () => {
-      pfStuckSweepCounter++;
-      if(pfStuckSweepCounter % PF_STUCK_SWEEP_INTERVAL !== 0) return;
-      const all = pfDvdItem ? pfItems.concat([pfDvdItem]) : pfItems;
-      for(let i = 0; i < all.length; i++){
-        const bodyA = all[i].body;
-        for(let j = i + 1; j < all.length; j++){
-          const bodyB = all[j].body;
-          if(!bodyA.isSleeping && !bodyB.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理
-          const ax0 = bodyA.bounds.min.x, ax1 = bodyA.bounds.max.x, ay0 = bodyA.bounds.min.y, ay1 = bodyA.bounds.max.y;
-          const bx0 = bodyB.bounds.min.x, bx1 = bodyB.bounds.max.x, by0 = bodyB.bounds.min.y, by1 = bodyB.bounds.max.y;
-          const ix = Math.min(ax1, bx1) - Math.max(ax0, bx0);
-          const iy = Math.min(ay1, by1) - Math.max(ay0, by0);
-          if(ix <= 0 || iy <= 0) continue; // 外接矩形根本沒相交，不用算比例
-          const overlapArea = ix * iy;
-          const areaA = (ax1 - ax0) * (ay1 - ay0);
-          const areaB = (bx1 - bx0) * (by1 - by0);
-          if(overlapArea / Math.min(areaA, areaB) < PF_STUCK_OVERLAP_RATIO) continue; // 只是靠著、比例不夠高，不當作卡住
-          if(bodyA.isSleeping) Matter.Sleeping.set(bodyA, false);
-          if(bodyB.isSleeping) Matter.Sleeping.set(bodyB, false);
-        }
-      }
-    });
-
-    // ---------- 修正：「抓起下面那張照片移走，上面原本靠著的照片沒有掉下來，
-    // 卡在半空中」----------
-    // 成因：Matter.js 的 isSleeping 是「這顆 body 完全跳過這一步的物理運算」
-    // ——不只跳過碰撞解算，連重力積分（往下掉的加速度）都一併跳過（見上面
-    // 「加開 enableSleeping」那段的完整說明）。堆疊穩定一陣子之後，上面
-    // 那張因為速度趨近零而睡著；使用者用 MouseConstraint 把下面那張抓起來
-    // 移走時，MouseConstraint 只會自動叫醒「被抓的那顆」，不會連帶叫醒
-    // 「原本靠在它上面、現在失去支撐」的鄰居——那張鄰居仍然是 isSleeping，
-    // 重力對它來說形同不存在，於是就這樣定格在原本的高度，變成浮在半空中，
-    // 不管等多久都不會自己掉下來（不是碰撞判斷錯，是它根本沒有在運算）。
-    // 上面那段 PF_STUCK_OVERLAP_DEPTH 的邏輯解決不了這個情況：那段只處理
-    // 「兩顆都還疊在一起、卡住沒分開」，這裡剛好相反——是「原本貼著、現在
-    // 正要分開」，分開的瞬間反而完全沒人去檢查「另一顆是不是該重新醒來」。
-    //
-    // ---------- 這裡是第二次修正：範圍原本鎖太窄，三層(含)以上的堆疊只有
-    // 「直接貼著被拖走那張」的那一層會醒，再上面那幾層還是浮在半空中 ----------
-    // 原本的寫法只檢查「這次結束的碰撞，其中一方是不是目前正被拖著的那顆
-    // (pfMouseConstraint.body)」——如果堆疊是 A(被拖走)／B(疊在 A 上)／
-    // C(疊在 B 上) 三層，A 移走時 A-B 之間的碰撞結束，B 會被這段邏輯正確
-    // 叫醒；但 B-C 之間的碰撞是等 B 真的開始往下掉、跟 C 分開之後才會結束
-    // ——那時候「被拖著的物體」還是 A，不是 B，B 並不等於 pfMouseConstraint.body，
-    // 判斷式直接把這個 pair 排除掉，C 因此永遠不會被這段邏輯碰到，繼續睡著、
-    // 繼續浮在半空中。這正是「蠻常發生」、且感覺上「修了但沒完全修好」的
-    // 成因：只有堆疊剛好只有兩層時看起來像是修好了，三層以上就會漏掉上面
-    // 幾層。
-    // 修法：不再限定「其中一方一定要是目前被拖曳的物體」，改成只要這次
-    // 結束的碰撞是「一顆醒著、一顆睡著」（不管醒著的那顆是不是正被使用者
-    // 拖曳，只要它正在動，例如上面這段邏輯剛叫醒、開始掉落中的 B），就把
-    // 睡著的那顆也叫醒。這樣 A 移走喚醒 B、B 掉落又跟 C 分開喚醒 C，會沿著
-    // 堆疊往上正確連鎖下去，不管疊幾層都能正常掉落。
-    // 不會重新引入「堆疊靜止後持續抖動」那個已經修過的問題：那個問題的
-    // 成因是每一影格都在對所有物件兩兩做粗略的 AABB 相交比對，這裡完全
-    // 不是——只在 Matter.js 自己判斷「這對碰撞關係真的結束了」的那一瞬間
-    // 觸發一次，兩顆都還醒著、正常互動中的物體本來就不會經過這裡（下面
-    // `if(!a.isSleeping && !b.isSleeping) continue` 那行會直接跳過），完全
-    // 靜止、雙雙睡著的堆疊也不會無故被碰到（沒有碰撞關係結束，事件根本
-    // 不會觸發）。
-    //
-    // ---------- 這裡是第三次修正、也是真正的根本原因：前兩次的判斷式讀的
-    // 其實是碰撞「零件」的睡眠狀態，不是整張照片的 ----------
-    // 前兩輪修正邏輯方向都是對的（監聽碰撞結束、擴大到鏈式喚醒），但一直
-    // 沒有完全解決，因為判斷式裡讀的 `pair.bodyA.isSleeping` /
-    // `pair.bodyB.isSleeping`，這兩個其實是「碰撞偵測當下實際碰到的那個
-    // 小矩形零件」，不是整張照片本身（原因跟上面 PF_STUCK_OVERLAP_DEPTH
-    // 那段的說明一樣：照片是複合物體，碰撞偵測逐零件進行）。零件自己的
-    // isSleeping 建立之後沒有人維護，讀起來時對時錯——這正是「常常發生」
-    // 卻又「不是每次都發生」的原因：剛好偵測到的那個零件，它的殘留旗標
-    // 湊巧看起來是「醒著」時，這裡的判斷就會誤判成「兩顆都醒著、不用管」
-    // 直接跳過，明明真正的頂層照片其實是睡著的，該被叫醒的那次就這樣被
-    // 漏掉了。
-    // 修法：一律用 .parent 拿到真正的頂層物件（複合物體本身；如果不是
-    // 複合物體，.parent 指回自己，不受影響）再讀/寫 isSleeping，這才是
-    // Matter.js 內建 Sleeping.afterCollisions() 原始碼實際採用的做法。
-    Events.on(pfEngine, 'collisionEnd', (event) => {
-      const pairs = event.pairs;
-      for(let i = 0; i < pairs.length; i++){
-        const pair = pairs[i];
-        const a = pair.bodyA.parent, b = pair.bodyB.parent;
-        if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著／兩顆都睡著，都不是「一動一靜」失去支撐的情況，不用介入
         if(a.isSleeping) Matter.Sleeping.set(a, false);
         if(b.isSleeping) Matter.Sleeping.set(b, false);
       }
@@ -12311,13 +11629,7 @@
       const pairs = event.pairs;
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
-        // 同樣要用 .parent：飄動的 e 如果是複合物體（多個小矩形拼成，見
-        // buildFallItemBody() 的完整說明），pair.bodyA/bodyB 拿到的是碰撞
-        // 當下那個小矩形零件，直接拿去跟 dvdBody（頂層物件）比較永遠不會
-        // 相等，這個判斷式會整個失效、永遠偵測不到撞牆。理由跟上面
-        // PF_STUCK_OVERLAP_DEPTH／collisionEnd 那兩段完全一樣。
-        const bodyA = pair.bodyA.parent, bodyB = pair.bodyB.parent;
-        const other = bodyA === dvdBody ? bodyB : (bodyB === dvdBody ? bodyA : null);
+        const other = pair.bodyA === dvdBody ? pair.bodyB : (pair.bodyB === dvdBody ? pair.bodyA : null);
         if(!other) continue;
         if(other.label !== 'pfLeftWall' && other.label !== 'pfRightWall' && other.label !== 'pfGround') continue;
         const isStackedPreviewLayout = window.innerWidth <= 640; // 對齊 CSS 手機版 preview-col 改成上下堆疊的 breakpoint
@@ -12333,28 +11645,15 @@
     document.body.style.overflow = 'hidden';
 
     pfItems = [];
-    // ---------- 修正：「照片明明已經靜止，畫面看起來卻還在極輕微地抖」的
-    // 其中一個成因 ----------
-    // 這裡每一影格都直接把 Matter.js 算出來的原始浮點數座標／角度整串
-    // 丟進 translate()/rotate()，小數點後位數很長。即使物體其實已經完全
-    // 停止（速度趨近 0），浮點數運算本身仍會在極小範圍內有尾數飄動，
-    // 對瀏覽器排版引擎來說，只要這串 transform 文字跟上一影格不是「完全
-    // 一模一樣」，就會被當成「這個元素這一影格有變化」，照樣觸發重新
-    // 合成——肉眼看到的就是明明沒在動、邊緣卻在極輕微地閃動。
-    // 修法：四捨五入到小數點後 2 位（位置）／4 位（角度），跟上面第 5164
-    // 行 preview 頁滑動用的寫法同一套慣例。這個精細度遠超過肉眼能分辨的
-    // 範圍，正常移動／掉落／被拖曳中的物體看起來不會有任何差異；但物體
-    // 真正靜止時，每影格四捨五入後的結果會變成完全相同的字串，瀏覽器可以
-    // 正確判斷「這個元素沒有變化」而跳過重新合成，抖動就會消失。
     pfSyncHandler = () => {
       pfItems.forEach(({ body, el, w, h }) => {
         const c = pfBoxCenter(body);
-        el.style.transform = `translate(${(c.x - w / 2).toFixed(2)}px, ${(c.y - h / 2).toFixed(2)}px) rotate(${body.angle.toFixed(4)}rad)`;
+        el.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${body.angle}rad)`;
       });
       if(pfDvdItem){
         const { body, w, h } = pfDvdItem;
         const c = pfBoxCenter(body);
-        dvdBounce.style.transform = `translate(${(c.x - w / 2).toFixed(2)}px, ${(c.y - h / 2).toFixed(2)}px) rotate(${body.angle.toFixed(4)}rad)`;
+        dvdBounce.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${body.angle}rad)`;
       }
     };
     // 效能修正（手機版堆疊頁面 lag／fps 掉很低的根本成因）：原本這裡是
@@ -12552,29 +11851,6 @@
       pfItems.push({ body, el, w: itemW, h: itemH });
     };
 
-    // ---------- 修正：「圖片還在螢幕外（還沒掉下來）就已經重疊」----------
-    // 原本 startX 是每張圖各自獨立抽一次亂數，完全沒檢查跟其他張是否
-    // 重疊；startY 雖然有依 index 往上錯開（PHOTO_FALL_SPAWN_STAGGER_PX），
-    // 但錯開的間距是固定的 130px，跟每張圖實際的高度（itemH，尤其是放大版
-    // 的大圖）完全無關——當某兩張圖剛好抽到差不多的 startX、而它們的
-    // 高度又比 130px 大（或間距被 index 差距拉得不夠開）時，兩張圖在
-    // 「還沒進入螢幕、y 還是負值」的階段，矩形範圍本來就已經疊在一起了。
-    // 等物理引擎開始模擬、它們往下掉、陸續跨過螢幕上緣進入可視範圍時，
-    // 使用者看到的就是「兩張圖一開始就疊著一起掉下來」，而不是各自獨立
-    // 掉落——這正是問題成因。
-    // 修法：這裡改成有「防重疊檢查」的擺放方式——每次算出 startX 之後，
-    // 都拿它跟前面已經擺好的每一張圖的矩形（startX/startY/itemW/itemH
-    // 換算出的 left/right/top/bottom）比對，只要跟任何一張在垂直方向
-    // 有重疊（top/bottom 區間相交）、水平方向也重疊（left/right 區間
-    // 相交），就重新抽一次 startX，最多重試 FS_SPAWN_MAX_ATTEMPTS 次；
-    // 找不到完全不重疊的位置時（極端情況，例如同一批圖片數量太多、螢幕
-    // 太窄擠不下），就用最後一次抽到的位置，不會卡住整個流程。
-    // 這樣所有圖片在還沒掉下來、都還在螢幕外面的階段，彼此的矩形範圍
-    // 保證兩兩不重疊，掉下來的視覺效果自然就是「一張一張各自獨立」。
-    const placedFallSpawnRects = [];
-    const FS_SPAWN_MAX_ATTEMPTS = 40;
-    const FS_SPAWN_MARGIN_PX = 6; // 留一點點間距，不要剛好貼邊擦身而過
-
     for(let i = 0; i < fallCount; i++){
       // 現在掉落的是「漂浮物件圖片庫」（dvdEImages）裡的去背圖，不是
       // 首頁相片——pool 裡每一項是 {src, scale} 物件。
@@ -12600,26 +11876,8 @@
       el.style.width = itemW + 'px';
       el.style.height = itemH + 'px';
 
+      const startX = itemW / 2 + Math.random() * Math.max(1, vw - itemW);
       const startY = -(PHOTO_FALL_SPAWN_BASE_PX + i * PHOTO_FALL_SPAWN_STAGGER_PX + Math.random() * PHOTO_FALL_SPAWN_JITTER_PX);
-      const spawnTop = startY - itemH / 2 - FS_SPAWN_MARGIN_PX;
-      const spawnBottom = startY + itemH / 2 + FS_SPAWN_MARGIN_PX;
-      let startX = itemW / 2 + Math.random() * Math.max(1, vw - itemW);
-      for(let attempt = 0; attempt < FS_SPAWN_MAX_ATTEMPTS; attempt++){
-        const spawnLeft = startX - itemW / 2 - FS_SPAWN_MARGIN_PX;
-        const spawnRight = startX + itemW / 2 + FS_SPAWN_MARGIN_PX;
-        const overlapsExisting = placedFallSpawnRects.some((r) => {
-          if(spawnBottom <= r.top || spawnTop >= r.bottom) return false; // 垂直方向沒交集，不算重疊
-          return !(spawnRight <= r.left || spawnLeft >= r.right); // 水平方向也有交集才算真的重疊
-        });
-        if(!overlapsExisting) break;
-        startX = itemW / 2 + Math.random() * Math.max(1, vw - itemW); // 重疊就重新抽一次，找位置
-      }
-      placedFallSpawnRects.push({
-        left: startX - itemW / 2 - FS_SPAWN_MARGIN_PX,
-        right: startX + itemW / 2 + FS_SPAWN_MARGIN_PX,
-        top: spawnTop,
-        bottom: spawnBottom,
-      });
 
       // 修正「照片掉落中途突然閃動一下」的根本成因：這個 div 平常只有
       // width/height 被設定，transform 完全沒設過——CSS 預設的
@@ -15883,19 +15141,6 @@
       // 用 setDvdBounceImageSrc() 原本就有的「畫面外先解碼好才切換」機制
       // 無縫換成正式畫質，使用者不會感覺到任何跳動。
       const quickUrl = /=s\d+$/.test(firstUrl) ? firstUrl.replace(/=s\d+$/, '=s400') : firstUrl;
-      // ---------- 修正：quickUrl 不能直接沿用離線遮罩資料 ----------
-      // 曾經在這裡讓 quickUrl 直接查表沿用 firstUrl 對應的離線遮罩，理由
-      // 是「兩者是同一張圖、遮罩座標是正規化的、不受解析度影響」——但這個
-      // 假設漏算了一件事：masks.json 裡的遮罩座標系統對應的是「裁切掉
-      // 四周透明留白之後」的那個框（見 build-masks.js 的完整說明），不是
-      // 「整張原始圖」的框。quickUrl 從頭到尾沒有被裁切過，它顯示出來的
-      // 框（dvdW/dvdH）是「整張原圖」的大小，直接套用「裁切後」座標系統
-      // 算出來的遮罩，兩個框對不上，會讓碰撞範圍跑位、變成「圖案明明還
-      // 沒碰到就已經疊在一起」——這正是這一版回報的疊圖成因。
-      // 修法：quickUrl 這極短暫的過渡期間，維持原本「遮罩還沒準備好就
-      // 退回矩形外框判斷」的安全行為（不查表、不即時算也不用等），等
-      // 背景裁切完成、真正換上裁切乾淨的正式版本時，requestAlphaMask()
-      // 才會用 dvdETrimmedSrcToId 查到跟這個版本座標系統一致的離線遮罩。
 
       // ---------- 修正：「手機版剛進站，第一次撞牆永遠不會換照片」----------
       // 成因：撞牆真的能換到「不一樣的一張」，前提是已就緒池
@@ -15961,8 +15206,6 @@
         const quickIdx = qi; // 迴圈變數本身在閉包裡會變動，先固定成獨立變數給下面的 closure 用
         const urlN = orderedUrls[quickIdx];
         const quickUrlN = /=s\d+$/.test(urlN) ? urlN.replace(/=s\d+$/, '=s400') : urlN;
-        // 這些 quickUrlN 一樣是未裁切的過渡版本，不直接沿用離線遮罩——
-        // 理由同上面 quickUrl 那段的完整說明（座標系統對不上，會疊圖）。
         const offscreenN = new Image();
         offscreenN.src = quickUrlN;
         const markReadyN = () => {
