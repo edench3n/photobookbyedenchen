@@ -10399,28 +10399,63 @@
   ];
   const PHOTO_FALL_BG_WHITE = PHOTO_FALL_BG_COLORS[0].value; // 白色現在就是陣列本身第一項的 value，這裡直接引用同一份，不用維護兩份重複的色碼
   let pfBgColorIndex = 0; // 0 代表目前正停在陣列第一項（白色）；點一次背景，index 往後推進一格，超過陣列長度就從頭循環（見 advancePhotoFallBackgroundColor()）
-  // ---------- 修正：「這三張背景圖切換起來特別慢」 ----------
+  // ---------- 修正：「這三張背景圖切換起來特別慢」＋「切過去先白一下才跳出來」 ----------
   // 原本這三張圖只有使用者真的點擊循環切到它們（見下面
   // advancePhotoFallBackgroundColor()）那一刻，才靠 CSS backgroundImage
   // 第一次觸發瀏覽器下載——純色背景切換是瞬間生效（不用下載任何東西），
-  // 這三張背景圖卻是「點下去才臨時發出網路請求」，圖片本身又是全螢幕
-  // 尺寸的 16:9 大圖，下載＋解碼需要的時間才是使用者感受到「特別慢」的
-  // 真正成因，不是程式邏輯本身的問題。
-  // 修法：比照全站既有「背景閒置時間預先暖機」的慣例（見下面
+  // 這三張背景圖卻是「點下去才臨時發出網路請求」，下載＋解碼需要的時間
+  // 才是使用者感受到「特別慢」的真正成因，不是程式邏輯本身的問題。
+  // 光是提前暖機（背景閒置時間先把圖片下載進瀏覽器快取）還不夠：
+  // CSS 的 backgroundImage 屬性本身是「設定了就立刻生效」的同步寫法，
+  // 瀏覽器在圖片真正解碼完成、可以拿來畫之前，這個位置會先顯示成空白
+  // （疊在 photoFallStage 原本的白色版面上，看起來就是「先白一下」），
+  // 等解碼完成才「跳」出真正的圖——就算圖片其實早就下載好、只是解碼
+  // 這一步還沒做完，一樣會先看到那個空白瞬間。
+  // 修法：不要再直接同步設定 backgroundImage，改成先透過
+  // ensurePhotoFallBackgroundImageReady() 確認這張圖「已經真的 decode
+  // 完成、隨時能畫出來」，等它 resolve 之後才真的把 backgroundImage 寫
+  // 進去——套用的那一刻圖片已經完全準備好，一次到位，不會有中間那段
+  // 空白／白幕的過渡。加上暖機機制之後，實務上使用者點擊當下這個
+  // Promise 通常早就 resolve 過了，感受到的是「幾乎瞬間換圖」，跟純色
+  // 切換的手感一致。
+  const pfBgImageReady = new Map(); // src -> Promise<boolean>，true 代表已經真的 decode 完成可以放心使用；false 代表下載/解碼失敗
+  function ensurePhotoFallBackgroundImageReady(src){
+    if(pfBgImageReady.has(src)) return pfBgImageReady.get(src);
+    const img = new Image();
+    try { img.fetchPriority = 'low'; } catch(e){} // 純背景暖機用，失敗也不影響任何既有功能
+    const p = new Promise((resolve) => {
+      img.onload = () => {
+        // decode() 才是真正確保「已經可以無延遲畫出來」的那一步，不是
+        // onload 本身——onload 只代表位元組下載完成，圖片格式解碼（尤其
+        // 大張圖片）仍可能要花一點時間，這裡額外等 decode() 完成才 resolve，
+        // 沒有 decode() 的舊瀏覽器就直接視為已經可用（退回原本行為）。
+        if(img.decode){ img.decode().then(() => resolve(true), () => resolve(true)); }
+        else resolve(true);
+      };
+      img.onerror = () => resolve(false); // 下載失敗（例如檔案還沒上傳、路徑打錯），呼叫端會優雅退回白色
+    });
+    img.src = src;
+    pfBgImageReady.set(src, p);
+    return p;
+  }
+  // 比照全站既有「背景閒置時間預先暖機」的慣例（見下面
   // prefetchAllInBackground()／warmMatterJS() 同一種手法），在瀏覽器真的
-  // 閒下來、不影響首屏渲染的時候，提前把這三張圖都下載＋解碼一次，瀏覽器
-  // 自己就會把它們快取起來——使用者之後真正點擊切到這幾張背景時，直接
-  // 命中快取，不用臨時等網路，明顯感受到的延遲會消失或大幅縮短。
-  // fetchPriority 設成 low，避免搶當下畫面實際需要的首頁縮圖／照片這些
-  // 更優先的資源。
+  // 閒下來、不影響首屏渲染的時候，提前呼叫上面這個函式，讓這三張圖的
+  // 下載＋解碼提早在背景做完，跟 applyPhotoFallBackground() 共用同一份
+  // Promise 快取，不會重複下載。
   function prefetchPhotoFallBackgroundImages(){
     PHOTO_FALL_BG_COLORS.forEach(entry => {
       if(entry.type !== 'image') return;
-      const img = new Image();
-      try { img.fetchPriority = 'low'; } catch(e){} // 純背景暖機用，失敗也不影響任何既有功能
-      img.src = entry.value;
+      ensurePhotoFallBackgroundImageReady(entry.value);
     });
   }
+  // 每次呼叫 applyPhotoFallBackground() 就遞增一次：圖片型背景要等
+  // Promise resolve 之後才真的套用（見下方說明），這段等待期間使用者
+  // 完全可能又點了好幾下、切到别的背景——沒有這個 token，等真的 resolve
+  // 時會不分青紅皂白直接套用，把使用者後來點的新背景蓋回這張早就過期的
+  // 舊圖。resolve 當下比對 token 還是不是「這一次呼叫當時」的最新值，
+  // 不是就直接放棄，不套用。
+  let pfBgApplyToken = 0;
   // 真正把某一項背景（不管是純色還是圖片）套用到 photoFallStage 上：
   // 抽成共用函式，advance／reset 兩處都呼叫這個，不用各自重複一份
   // if(type==='image') 的判斷邏輯。每次切換都要把「另一種」的樣式清乾淨
@@ -10429,16 +10464,28 @@
   // 或圖片切走後純色底下還留著上一張圖的殘影。
   function applyPhotoFallBackground(entry){
     if(!photoFallStage) return;
+    pfBgApplyToken += 1;
+    const myToken = pfBgApplyToken;
     if(entry.type === 'image'){
-      photoFallStage.style.backgroundColor = '';
-      photoFallStage.style.backgroundImage = `url("${entry.value}")`;
-      // cover：以「填滿整個容器、不留白邊」為準去縮放，同時維持圖片原始
-      // 長寬比，比例對不上的那個方向（例如手機直式套 16:9 橫圖）超出
-      // 畫面的部分直接裁掉，不會變形——符合「等比例放大、兩側裁掉、確保
-      // 滿版」的需求。
-      photoFallStage.style.backgroundSize = 'cover';
-      photoFallStage.style.backgroundPosition = 'center';
-      photoFallStage.style.backgroundRepeat = 'no-repeat';
+      ensurePhotoFallBackgroundImageReady(entry.value).then((ok) => {
+        if(myToken !== pfBgApplyToken) return; // 這段等待期間使用者已經切到别的背景，這次套用過期，放棄
+        if(ok){
+          photoFallStage.style.backgroundColor = '';
+          photoFallStage.style.backgroundImage = `url("${entry.value}")`;
+          // cover：以「填滿整個容器、不留白邊」為準去縮放，同時維持圖片
+          // 原始長寬比，比例對不上的那個方向（例如手機直式套 16:9 橫圖）
+          // 超出畫面的部分直接裁掉，不會變形——符合「等比例放大、兩側
+          // 裁掉、確保滿版」的需求。
+          photoFallStage.style.backgroundSize = 'cover';
+          photoFallStage.style.backgroundPosition = 'center';
+          photoFallStage.style.backgroundRepeat = 'no-repeat';
+        } else {
+          // 這張圖片真的載入失敗（檔案不存在、路徑錯誤等），優雅退回白色，
+          // 不要讓畫面卡在「什麼都沒套用成功」的狀態。
+          photoFallStage.style.backgroundImage = '';
+          photoFallStage.style.backgroundColor = PHOTO_FALL_BG_WHITE;
+        }
+      });
     } else {
       photoFallStage.style.backgroundImage = '';
       photoFallStage.style.backgroundColor = entry.value;
