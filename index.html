@@ -379,6 +379,10 @@
   .grid-item{
     position:relative;
     touch-action: manipulation;
+    /* transform（隨機遠近飄浮＋滑鼠視差）直接寫在這一層，見下面 JS 的
+       floatParallaxFrame()。will-change 交給 JS 只在真的參與飄浮效果的
+       格子上設定（見 getFloatItems()），不是每個格子都設，避免無謂佔用
+       合成層資源。 */
   }
   .grid-item .thumb-wrap{
     width:100%;
@@ -407,15 +411,14 @@
     object-fit:contain;
     display:block;
     transform: scale(1);
-    /* transform 不再放進 CSS transition 清單：桌機滑鼠「引力放大」特效
-       （見下面 JS 的 magnetFrame()）改成每一影格都用 requestAnimationFrame
-       直接寫入 style.transform，靠 JS 自己的指數平滑（lerp）算出流暢的
-       過渡手感——如果這裡同時還掛著 CSS transition，兩邊的平滑機制會
-       疊加、互相打架，滑鼠移動時放大效果反而會變得遲鈍、黏滯，不夠
-       跟手。opacity 的淡入轉場跟放大特效無關，維持不變。
-       首頁縮圖「放大進場」動畫（prepareGridRevealState/playGridRevealAnimation）
-       自己會在需要時用 inline style.transition 暫時覆寫，播完後清掉、
-       交還這裡的預設值，不受影響。 */
+    /* transform 不再放進 CSS transition 清單：首頁縮圖「放大進場」動畫
+       （prepareGridRevealState/playGridRevealAnimation）跟照片物理堆疊
+       模式的進出場都是每一影格直接寫入 style.transform，靠自己的邏輯
+       算出流暢的過渡手感——如果這裡同時還掛著 CSS transition，兩邊會
+       疊加、互相打架，動畫反而會變得遲鈍、黏滯。opacity 的淡入轉場跟這些
+       無關，維持不變。（首頁照片「隨機遠近飄浮＋視差」效果寫在外層
+       .grid-item 身上，不是這裡的 img，兩者不會互相影響，見下面
+       .grid-item 的說明。） */
     transition: opacity .3s ease;
     will-change: transform;
     -webkit-user-drag:none;
@@ -426,12 +429,13 @@
     opacity:1;
   }
   /* 原本「滑鼠移上單張照片，那張照片用 CSS :hover 觸發 scale(1.12)」的
-     二元式放大規則，已經改成下面 JS 的 magnetFrame()：滑鼠像有引力一樣，
-     不管游標落在網頁空間的哪裡，附近的每一張照片都會依照距離遠近連續、
-     平滑地放大（越靠近放大越多、越遠越接近原始大小），可以同時有好幾張
-     照片一起反應，不再是只有正在 hover 的那一張才會動。只在真正支援
-     滑鼠 hover 的桌機環境啟用（見 JS 的 supportsHover 判斷），觸控裝置
-     完全不受影響。 */
+     二元式放大規則，後來改成滑鼠「引力放大」，現在整個換掉，改成
+     「隨機遠近飄浮＋滑鼠視差」——每張照片一開始就先隨機分配一個深度，
+     依深度給一個小小的隨機基準位移/旋轉/縮放（看起來像隨手擺放、有遠有
+     近），滑鼠移動（觸控裝置改用陀螺儀傾斜手機）時再疊加一層視差位移，
+     深度越大的照片跟著移動的幅度也越大，營造立體感。完整實作、為什麼
+     這個 transform 是寫在 .grid-item（外層格子）而不是 img 身上，見下面
+     JS 的 floatParallaxFrame() 那段說明。 */
   .grid-item .idx{
     display:none; /* 首頁照片下方的小字編號（001/002...），依需求整個移除、不再顯示。
                      JS 端（positionGridIdxItem() / prepareGridRevealState() /
@@ -2959,42 +2963,13 @@
   // 未套用任何 transform）當下用 getBoundingClientRect() 量到的原始矩形。
   // 見 getObstacleRects() 內的說明，這裡只是共用的儲存空間。
   const gridRevealTargetRectMap = new WeakMap();
-  // 「放大進場」動畫播完、gridRevealInFlight 剛變回 false 的那一刻要呼叫的
-  // 收尾函式：把桌機滑鼠「引力放大」特效（magnetFrame()，見下面 supportsHover
-  // 區塊）內部各張照片自己追蹤的「目前縮放值」統一重設回 1。
-  //
-  // 為什麼需要這個：magnetFrame() 在 gridRevealInFlight 為 true 期間完全
-  // 跳過、不寫入 img.style.transform（見 magnetFrame() 內的判斷），但它自己
-  // 記錄「目前縮放值」的 magnetScaleState 這份資料在凍結期間並不會被同步
-  // 更新或歸零——如果使用者在切換頁面之前，滑鼠正好停在某張縮圖上、那張
-  // 縮圖的引力縮放值凍結在一個大於 1 的數字（例如 1.3），接著整段凍結期間
-  // （放大進場動畫播放中）magnetScaleState 完全沒有機會被重新算過。
-  // 進場動畫播完的那一刻，畫面上每張照片的「實際」大小一定都會落在 CSS
-  // 預設的 scale(1)（playGridRevealAnimation() 收尾時會把 inline transform
-  // 清空、交還這個預設值），但如果沒有這個重設，magnetFrame() 下一次恢復
-  // 運作時，會直接從那個凍結前殘留的舊數字（1.3）當作「目前值」去追新算出
-  // 來的目標值——如果剛好新算出的目標值也接近 1.3（例如滑鼠這段期間完全沒
-  // 移動，還停在同一張縮圖上方），magnetFrame() 會判定「目前值」已經非常
-  // 接近「目標值」，幾乎不需要再過渡，直接把 img.style.transform 寫成
-  // scale(1.3)——畫面上就會是「進場動畫剛把照片放到 scale(1)，下一影格立刻
-  // 無過渡地跳成 scale(1.3)」，正是使用者回報的「引力在放大時卡住，然後
-  // 突然跳一下放大」。
-  //
-  // 修法分兩層：① 進場動畫真正播完的這一刻，強制把每張照片的「目前縮放
-  // 值」重設成 1（跟畫面上此刻真正的大小一致），並把 magnetLastFrameTime
-  // 也重設成 null（比照分頁切回前景時的處理，見 visibilitychange 監聽）；
-  // ② 光是「目前值」歸位還不夠——如果滑鼠這時候剛好已經停在某張縮圖正
-  // 上方，引力算出來的「目標值」在第一影格就已經是接近滿倍率，配合原本
-  // 「貼手」的追蹤速度，短短 300~400ms 內還是會衝到頂，感覺像「一放大完
-  // 馬上又被引力猛拉一下」。所以同時啟動一段「引力強度」的爬升期（見
-  // magnetRevealRampStart／MAGNET_REVEAL_RAMP_MS）：這段期間內，不管滑鼠
-  // 離哪張縮圖多近，目標值都只能拿到「完整引力效果」乘上一個從 0 慢慢
-  // 爬到 1 的係數，逼真正的效果慢慢長出來，而不是一開始就用滿力去追。
-  // 兩者合起來，效果就是「等照片都放大完成之後，引力才用一個成熟、物理
-  // 流暢的慢速從無到有生效」。
-  // 預設是空函式；真正的實作在下面 supportsHover 區塊內才會覆寫（觸控裝置
-  // 完全沒有 magnetFrame()，維持空函式、呼叫了也不會有任何效果）。
-  let resetMagnetScaleForReveal = function(){};
+  // 過去這裡有一個 resetMagnetScaleForReveal()：舊版桌機滑鼠「引力放大」
+  // 特效專用的收尾函式，在「放大進場」動畫播完的那一刻，把每張照片被
+  // 引力凍結住的縮放值重設回 1，避免動畫播完後又突然跳一下。引力放大
+  // 特效已經整個換成「隨機遠近飄浮＋滑鼠視差」（見下面 floatParallaxFrame()
+  // 那段），飄浮效果的位移完全交給滑鼠/陀螺儀當下的即時角度去算，沒有
+  // 「凍結前殘留舊縮放值」這種需要收尾重設的狀態，這個函式已經整個移除，
+  // 不再需要。
   // ---------- 首頁縮圖：依「面積」而不是「寬度」決定每張照片的顯示大小 ----------
   // 原本靠 CSS 的 .grid-item img{ max-width:52%; max-height:52% } 讓瀏覽器
   // 自己算——理論上這應該是以面積為準的等比例縮放，但手機瀏覽器在「img 的
@@ -3204,317 +3179,179 @@
     });
   }
 
-  // ---------- 首頁「滑鼠引力放大」特效（桌機版） ----------
-  // 原本是二元式的 CSS :hover：滑鼠移到某一張照片上，只有那一張會瞬間
-  // 跳到 1.12 倍。現在改成「滑鼠本身像有引力」：不管游標落在網頁空間的
-  // 哪個位置，都會持續影響它附近所有照片——距離游標越近的照片放大得越多
-  // （上限見下面 MAGNET_MAX_SCALE），越遠越接近原始大小，超出有效
-  // 範圍（MAGNET_RADIUS）就完全不受影響；可以同時有好幾張照片一起、各自
-  // 依照跟游標的距離做出不同程度的反應。
+  // ---------- 大改：首頁「滑鼠引力放大」→「隨機遠近飄浮＋視差」 ----------
+  // 原本這裡是滑鼠引力放大特效：游標越靠近哪張照片，那張照片就用
+  // img.style.transform:scale() 連續放大。現在整個效果換掉，改成參考
+  // 網路上常見的 "floating parallax" 效果：每張照片一開始就先隨機分配
+  // 一個「深度」（depth，0~1 之間），照這個深度給一個小小的隨機基準
+  // 位移／旋轉／縮放（看起來像隨手擺放、有遠有近），接著滑鼠移動（觸控
+  // 裝置改用陀螺儀傾斜手機）時，再疊加一層「深度越大、跟著移動的幅度也
+  // 越大」的視差位移——近的照片移動明顯，遠的照片幾乎不動，營造立體感。
   //
-  // 每一張照片各自維護一個「目前縮放值」跟「目標縮放值」，每個
-  // requestAnimationFrame 影格都用 exponential smoothing（跟實際經過的
-  // 時間差掛勾，不是固定寫死的比例，畫面更新頻率不同也不會跑出不一樣的
-  // 手感）把「目前值」平滑地追向「目標值」，才真的寫進 img.style.transform——
-  // 不是每次滑鼠移動就直接跳到目標值，也不是交給 CSS transition 處理
-  // （CSS transition 只認「這一次」的起點/終點，滑鼠連續移動時目標值一直
-  // 在變，會疊出一段一段的生硬轉折，感覺不出「流體」的重量感）。這樣放大／
-  // 縮小才會有一種被慣性、阻尼拖住的物理流暢感，而不是機械式的線性跟隨。
+  // 刻意把這個 transform 寫在 .grid-item（照片格子本身）身上，不是裡面
+  // 的 <img>，理由：
+  //   1) img 的 transform 本來就被另外兩個系統佔用（放大進場動畫
+  //      playGridRevealAnimation()、照片物理堆疊模式的進出場），寫在
+  //      .grid-item 上完全不會撞到那兩邊、不用互相協調。
+  //   2) getStableImgRect()（見上面該函式的說明）量的是 img.offsetWidth/
+  //      offsetHeight——這兩個值不受任何 CSS transform 影響，不管
+  //      transform 是加在 img 自己身上還是任何一層祖先元素上，這裡的
+  //      位移完全不會讓它算錯，橫向對齊那幾個標籤（Photobook by
+  //      edenchen／Preview／Collab）不受影響。
+  //   3) 點擊照片時「格子飛到全螢幕大圖」的轉場（runGridToDetailTransition）
+  //      是直接讀 originImgEl.getBoundingClientRect() 決定起點——那本來就
+  //      是「這一刻」img 實際渲染出來的位置，包含所有祖先 transform 疊加
+  //      後的結果，轉場動畫會自動從「照片當下飄浮到的位置」開始飛，不用
+  //      額外處理。
   //
-  // 編號（.idx）貼齊照片實際邊緣的邏輯完全沿用 positionGridIdxItem()——
-  // 只是現在每一影格都重新呼叫一次，讓它跟著連續變化的縮放同步移動，
-  // 天然保持「編號永遠貼著照片這一刻實際的左邊緣、下緣」，跟改版前的
-  // 對齊邏輯本身沒有任何不同。
-  //
-  // 只在真正支援滑鼠 hover 的桌機環境（supportsHover）啟用；觸控裝置沒有
-  // 游標懸停這件事，維持原本點擊直接進入詳細頁的行為，完全不受影響。
-  if(supportsHover && grid){
-    // 半徑刻意加大到「四張照片交界處的空白區域」都還在有效範圍內：桌機
-    // 5 欄版面下，兩張相鄰照片中心之間的間距（欄寬 + var(--gap)）大約落在
-    // 250~340px 之間，四張照片交界的角落到每張照片中心的距離，大約是這個
-    // 間距的 0.7 倍（對角線的一半）；600px 的半徑留了充足的餘裕，滑鼠停在
-    // 任何四張照片中間的空白角落時，四張都還在放大範圍內，會一起被引力
-    // 稍微拉大，不會有「明明離四張都很近、卻一張都沒反應」的死角。
-    const MAGNET_RADIUS = 600;   // px，游標「引力」的有效範圍半徑，超出這個距離的照片維持原始大小
-    const MAGNET_MAX_SCALE = 1.35; // 游標正中心那一點的最大放大倍率——比原本二元式 hover
-                                    // 的 1.12 明顯更有份量，讓「被引力吸住」的視覺效果更清楚
-    const MAGNET_RESPONSE_MS = 140; // 追向目標縮放值的反應時間常數（越小追得越快、
-                                     // 越貼手；越大越有「拖著慢慢跟上」的重量感）
-    const MAGNET_SETTLE_EPS = 0.0008; // 目前值/目標值都幾乎等於原始大小時，視為已完全
-                                       // 靜止，停止繼續寫入 style、省不必要的重繪
+  // 例外：001／002／004 這三張照片（data-index 0/1/3）是首頁最上排三個
+  // 文字標籤（backHome／previewLabel／headerRight，見 syncFixedChrome()
+  // 裡呼叫 syncEdgeAlignment() 那三行）拿來對齊用的錨點——標籤只在特定
+  // 時機（resize、字型量測完成…）才重新對齊一次，不是每影格都跟著算，
+  // 如果這三張也跟著飄浮，標籤有機會對齊到「剛好飄到某個極端位置」的
+  // 照片、跟其他情況下對齊到的位置不一致。這三張刻意排除在飄浮效果外，
+  // 永遠貼在原本的格子位置，不影響其餘照片的飄浮效果。
+  if(grid){
+    const FLOAT_ANCHOR_INDEXES = new Set([0, 1, 3]); // 001/002/004，見上面說明，維持原本固定位置
 
-    // 首頁縮圖「放大進場」動畫播完的那一刻，引力「強度」（不是縮放值本身）
-    // 從 0 緩慢爬升到 100% 所花的時間。原本只把 magnetScaleState 重設回 1
-    // （見 resetMagnetScaleForReveal），但那只解決了「用到凍結前殘留舊數字」
-    // 的問題——如果使用者這時候滑鼠剛好已經停在某張縮圖正上方，
-    // magnetFalloff() 在第一影格就會算出接近 MAGNET_MAX_SCALE 的目標值，
-    // current 雖然是從 1 開始追，但追的目標本身一開始就已經是滿的，配合
-    // MAGNET_RESPONSE_MS=140 這種「貼手」的反應速度，整個過程仍會在
-    // 300~400ms 內衝到頂，感覺還是像「一放大完，馬上又被引力猛拉一下」，
-    // 不是使用者想要的「緩慢、從沒有到有」的啟動手感。
-    // 真正的修法是讓「引力強度」本身也有一段爬升期：這段期間內，不管滑鼠
-    // 離哪張縮圖多近，目標縮放值都只能拿到 magnetFalloff() 算出來的「完整
-    // 引力效果」乘上一個從 0 慢慢爬到 1 的係數（見下面 magnetFrame() 裡的
-    // rampFactor），這樣不管滑鼠停在哪裡，引力都會像剛通電、慢慢暖機一樣
-    // 溫和地長出來，而不是一開始就用滿力去追。900ms 刻意跟放大進場動畫的
-    // 900ms 同一個量級，讓「照片長大」跟「引力甦醒」感覺起來是同一套節奏的
-    // 兩個階段，不是兩件互相搶戲的動畫。
-    const MAGNET_REVEAL_RAMP_MS = 900;
+    const FLOAT_JITTER_MAX = 26;         // px，靜態隨機基準位移的最大幅度（乘上深度後才是實際拿到的量）
+    const FLOAT_ROT_MAX = 3;             // deg，靜態隨機基準旋轉的最大幅度
+    const FLOAT_PARALLAX_STRENGTH = 30;  // px，深度=1 的照片，滑鼠/傾斜從一端擺到另一端時的最大位移量
+    const FLOAT_RESPONSE_MS = 260;       // 追向目標位移值的反應時間常數，比原本引力效果的 140ms 更慢、
+                                          // 更有漂浮、飄動的重量感，不是跟手的即時反應
+    const FLOAT_SETTLE_EPS = 0.0015;     // 目標值/目前值幾乎沒有差異時，視為已靜止，跳過這次寫入
 
-    let magnetMouseX = 0;
-    let magnetMouseY = 0;
-    let magnetActive = false;   // 滑鼠目前是否在視窗內、有提供有效座標
-    let magnetLastFrameTime = null;
-    const magnetScaleState = new WeakMap(); // item -> 目前實際套用的縮放值
-    // null = 引力目前是滿強度（平常狀態，一般 hover 時都是這樣）；非 null
-    // 時代表「引力強度」還在爬升中，值是爬升起點的時間戳，跟 rAF 傳進
-    // magnetFrame() 的 now 用同一個時間基準（都是 performance.now()），
-    // 兩者可以直接相減算經過的時間。由 resetMagnetScaleForReveal() 在放大
-    // 進場動畫播完那一刻設定成當下時間，啟動這段爬升。
-    let magnetRevealRampStart = null;
+    function floatRand(min, max){ return min + Math.random() * (max - min); }
 
-    // 效能優化：grid.querySelectorAll('.grid-item') 以及每張照片內的
-    // querySelector('.thumb-wrap img') 原本是「每一個 rAF 影格」都重新查詢
-    // 一次 DOM——這個迴圈只要頁面開著就會以 60fps 永久跑下去（不只滑鼠
-    // 移動時才跑，見下面 magnetFrame() 開頭無條件 requestAnimationFrame
-    // 自我排程），等於任何時候（包含滑鼠完全沒動、甚至使用者正在
-    // preview/detail 頁而看不到網格）都在白白重複查詢一次完整的 DOM 樹。
-    // renderGrid() 整個網站生命週期只會呼叫一次（進站時），之後這批
-    // .grid-item 元素不會再被替換或新增，所以在這裡快取一份對照表
-    // （item / thumbWrap / img 三者的參照）完全安全，之後每一影格直接
-    // 走陣列即可，不用再付一次 DOM 查詢的成本；行為（哪些照片受影響、
-    // 縮放的數值與時機）完全不變，純粹是換一種更便宜的方式拿到同樣的
-    // 元素參照。
-    let magnetItemsCache = null;
-    function getMagnetItems(){
-      if(!magnetItemsCache){
+    // 跟原本 getMagnetItems() 一樣「只查一次 DOM、之後永遠吃快取」的寫法：
+    // renderGrid() 整個網站生命週期只呼叫一次，.grid-item 之後不會再被
+    // 替換或新增，第一次查到非空清單後就永久快取。這裡額外在第一次查到
+    // items 的同時，順手把每張照片（排除上面三張錨點照片）的深度／基準
+    // 位移／基準旋轉／基準縮放都隨機算好、一起存進同一份快取——這些值
+    // 只需要在照片第一次出現時決定一次，之後保持固定，不會每次 resize
+    // 或每一影格重新洗牌，否則畫面會一直跳動、失去「固定擺放」的感覺。
+    let floatItemsCache = null;
+    function getFloatItems(){
+      if(!floatItemsCache){
         const nodeList = grid.querySelectorAll('.grid-item');
         if(nodeList.length){
-          magnetItemsCache = Array.from(nodeList).map(item => {
-            const thumbWrap = item.querySelector('.thumb-wrap');
-            const idx = item.querySelector('.idx');
-            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx };
-          });
+          floatItemsCache = Array.from(nodeList)
+            .filter(item => !FLOAT_ANCHOR_INDEXES.has(Number(item.dataset.index)))
+            .map(item => {
+              const depth = floatRand(0.35, 1); // 0＝最遠、1＝最近
+              item.style.zIndex = String(Math.round(depth * 10)); // 近的疊在遠的上面，立體感更清楚
+              item.style.willChange = 'transform'; // 只在真的參與飄浮效果的格子上設定，不是每個格子都設
+              return {
+                item,
+                depth,
+                baseX: floatRand(-1, 1) * FLOAT_JITTER_MAX * (0.4 + depth * 0.6),
+                baseY: floatRand(-1, 1) * FLOAT_JITTER_MAX * (0.4 + depth * 0.6),
+                baseRot: floatRand(-1, 1) * FLOAT_ROT_MAX * (0.4 + depth * 0.6),
+                baseScale: 0.95 + depth * 0.1, // 遠的略縮小、近的略放大，加強遠近的錯覺
+                lastX: null,
+                lastY: null,
+              };
+            });
         }
       }
-      return magnetItemsCache || [];
+      return floatItemsCache || [];
     }
 
-    // 距離 → 目標縮放倍率：游標正上方（距離 0）是放大倍率上限，隨距離
-    // 拉開用 smoothstep 曲線（3t²-2t³）平滑衰減到 1（原始大小），超出
-    // MAGNET_RADIUS 一律是 1。smoothstep 讓「剛開始被拉近」跟「快要恢復
-    // 原狀」這兩端的變化速度都比較和緩，只有中段變化較快，比單純線性衰減
-    // 更接近真實世界引力場那種柔和、有機的手感；半徑加大後，同一時間會有
-    // 更多張照片落在衰減曲線的「前段」（輕微放大），中間游標正下方那一張
-    // 才會吃到接近滿倍率的放大，層次感比小半徑時更明顯。
-    function magnetFalloff(distance){
-      if(distance >= MAGNET_RADIUS) return 1;
-      const t = 1 - (distance / MAGNET_RADIUS);
-      const smooth = t * t * (3 - 2 * t);
-      return 1 + (MAGNET_MAX_SCALE - 1) * smooth;
+    // 目前的滑鼠／傾斜角度，正規化到 -1~1（0 代表視窗/手機正中央或水平）。
+    // raw 是「這一刻量到的原始值」，cur 是每影格用 smoothFactor 慢慢追向
+    // raw 的平滑值——直接用 raw 每一影格都會抖，飄浮的照片會跟著抖，用
+    // 平滑值才有「慢慢飄過去」的重量感，跟原本引力效果的 smoothFactor
+    // 做法相同，只是這裡時間常數更大、追得更慢更柔。
+    let floatRawNX = 0, floatRawNY = 0;
+    let floatCurNX = 0, floatCurNY = 0;
+    let floatLastFrameTime = null;
+
+    if(supportsHover){
+      // 桌機／有滑鼠：正規化成「離視窗正中央多遠」，範圍 -1~1。
+      window.addEventListener('mousemove', (e) => {
+        floatRawNX = (e.clientX / window.innerWidth - 0.5) * 2;
+        floatRawNY = (e.clientY / window.innerHeight - 0.5) * 2;
+      }, { passive: true });
+      // 滑鼠離開整個瀏覽器視窗（例如移到網址列、切到別的視窗）：視差來源
+      // 消失，飄浮的照片緩緩飄回各自的基準位置，不會卡在偏移狀態。
+      window.addEventListener('mouseout', (e) => {
+        if(!e.relatedTarget && !e.toElement){ floatRawNX = 0; floatRawNY = 0; }
+      });
+      window.addEventListener('blur', () => { floatRawNX = 0; floatRawNY = 0; });
+    } else {
+      // 觸控裝置沒有滑鼠可以移動，改用陀螺儀（傾斜手機）模擬同樣的視差。
+      // gamma：左右傾斜（負值往左傾），beta：前後傾斜，第一筆讀數當作
+      // 「手機自然拿著」時的基準角度，之後都用相對這個基準的偏移量，
+      // 不用管使用者平常是斜拿還是正拿手機。
+      // iOS 13+ 需要使用者先做一次真正的觸控手勢，才會跳出授權詢問，
+      // 不能在頁面一載入就自己呼叫——這裡掛在第一次 touchstart/click 時
+      // 才觸發，見下面 requestMotionPermissionOnce()；被拒絕或整支手機
+      // 根本沒有這個感應器，就安靜維持照片靜態隨機擺放，不影響其他功能。
+      let betaBaseline = null;
+      window.addEventListener('deviceorientation', (e) => {
+        if(e.gamma == null || e.beta == null) return;
+        if(betaBaseline == null) betaBaseline = e.beta;
+        floatRawNX = Math.max(-1, Math.min(1, e.gamma / 26));
+        floatRawNY = Math.max(-1, Math.min(1, (e.beta - betaBaseline) / 26));
+      }, true);
+
+      let motionPermissionRequested = false;
+      function requestMotionPermissionOnce(){
+        if(motionPermissionRequested) return;
+        motionPermissionRequested = true;
+        if(typeof DeviceOrientationEvent !== 'undefined' &&
+           typeof DeviceOrientationEvent.requestPermission === 'function'){
+          DeviceOrientationEvent.requestPermission().catch(() => {}); // 使用者拒絕：安靜失敗，不影響其他功能
+        }
+        // 非 iOS 13+ 的瀏覽器（多數 Android）本來就沒有這個授權 API，
+        // 上面掛好的 deviceorientation 監聽器會直接開始收到事件，不用額外動作。
+      }
+      document.addEventListener('touchstart', requestMotionPermissionOnce, { once: true, passive: true });
+      document.addEventListener('click', requestMotionPermissionOnce, { once: true });
     }
 
-    function magnetFrame(now){
-      requestAnimationFrame(magnetFrame);
+    function floatParallaxFrame(now){
+      requestAnimationFrame(floatParallaxFrame);
 
-      // 首頁縮圖「放大進場」動畫播放期間，img.style.transform 由那段動畫
-      // 自己接管（見 gridRevealInFlight），這裡整輪跳過，避免兩邊互搶
-      // 同一個 style 屬性、打架出詭異的閃爍或跳動。
-      if(gridRevealInFlight){ magnetLastFrameTime = now; return; }
-
-      // 照片物理堆疊模式（entering/active/exiting）期間，首頁縮圖被
-      // shrinkHomeForPhotoFall() 收起、整個格子畫面理當是「凍結」的靜止
-      // 狀態，不該再受滑鼠移動影響——但這個模式全程只有 gridRevealInFlight
-      // 曾經被檢查，magnetFrame() 完全不認得堆疊模式自己的旗標
-      // photoFallModeActive，導致堆疊模式期間只要滑鼠靠近某張縮圖原本
-      // 所在的位置，這裡還是會繼續每一影格改寫那張縮圖的 img.style.transform
-      // （直接蓋掉 shrinkHomeForPhotoFall() 設定的 scale(0) 收起效果）並
-      // 呼叫 positionGridIdxItem() 重新定位編號，兩者都用「引力縮放後」的
-      // 錯誤數值——等退出堆疊模式、prepareGridRevealState() 量測時，這些
-      // 被引力持續影響過的照片，編號位置就會跟其他正常照片不一致，也就是
-      // 「只有滑鼠附近的照片編號會錯位」的成因。這裡補上跟 gridRevealInFlight
-      // 一樣的提早跳出，讓整個堆疊模式期間引力效果完全靜止、不碰任何首頁
-      // 縮圖或編號，退出後再由 resetMagnetScaleForReveal() 的爬升期讓引力
-      // 從沒有到有、慢慢重新生效。
-      if(photoFallModeActive){ magnetLastFrameTime = now; return; }
-
-      // ---------- 修正：這個磁吸迴圈原本不管使用者在哪一頁都会以 60fps
-      // 永久跑下去（見上面 magnetItemsCache 那段註解也承認了這個浪費，
-      // 但當時只解決了「重複查詢 DOM」，沒有解決「preview／detail 頁完全
-      // 看不到網格，卻還在每一影格對著全部縮圖跑迴圈」這件事本身）。
-      // 這個迴圈跟飄動物件的 stepDvdBounce()、fsTick() 等其他 RAF 迴圈是
-      // 同一個主執行緒、同一輪 requestAnimationFrame 批次一起執行的——
-      // 網格縮圖一多（上百張），每一影格白白多跑這一輪 forEach，會墊高
-      // 這一整輪 RAF 的執行時間，容易造成掉幀；掉幀之後下一次 stepDvdBounce()
-      // 拿到的 dt（影格間隔）會變大，飄動的 e 一次移動的距離也跟著變大，
-      // 肉眼看起來就像「忽然跳了一段」——這正是「preview 頁還會跟著一起
-      // 卡頓／飄動物件不定時跳一下」的成因之一，跟碰撞判斷本身無關，
-      // 純粹是背景多跑了一個沒必要的迴圈拖慢了整體幀率。
-      // 修法：只有真的在首頁格子畫面（gallery）時才需要跑這個磁吸效果，
-      // preview／detail 頁完全用不到、也看不到網格，直接提早跳出，不做
-      // 任何 forEach／getBoundingClientRect／style 寫入，把這一輪 RAF 的
-      // 執行時間還給其他真正需要跑的迴圈。
-      if(previewPage.classList.contains('active') || detailPage.classList.contains('active')){
-        magnetLastFrameTime = now;
+      // 跟原本引力效果一樣：放大進場動畫、照片物理堆疊模式期間完全不碰
+      // .grid-item 的 transform，避免互搶、打架。preview／detail 頁看不到
+      // 網格，也直接跳過，把這一輪 RAF 的時間還給其他真正需要的迴圈。
+      if(gridRevealInFlight || photoFallModeActive ||
+         previewPage.classList.contains('active') || detailPage.classList.contains('active')){
+        floatLastFrameTime = now;
         return;
       }
 
-      if(magnetLastFrameTime == null) magnetLastFrameTime = now;
-      const dt = Math.min(64, now - magnetLastFrameTime); // 上限 64ms：分頁切走再切回來、
-                                                            // 或掉幀時，不要讓追趕的那一步跳太大
-      magnetLastFrameTime = now;
-      const smoothFactor = 1 - Math.exp(-dt / MAGNET_RESPONSE_MS);
+      if(floatLastFrameTime == null) floatLastFrameTime = now;
+      const dt = Math.min(64, now - floatLastFrameTime); // 上限 64ms：分頁切走再切回來、
+                                                          // 或掉幀時，不要讓追趕的那一步跳太大
+      floatLastFrameTime = now;
+      const smoothFactor = 1 - Math.exp(-dt / FLOAT_RESPONSE_MS);
+      floatCurNX += (floatRawNX - floatCurNX) * smoothFactor;
+      floatCurNY += (floatRawNY - floatCurNY) * smoothFactor;
 
-      // 「引力強度」爬升係數：0 代表這一刻引力完全不生效（不管滑鼠多近，
-      // 目標值都固定是 1，等同原始大小），1 代表引力已經是平常的滿強度。
-      // 只在 magnetRevealRampStart 有值（爬升進行中）時才需要計算，並在
-      // 爬滿之後把旗標清掉、之後每一影格都直接視為滿強度、不再多做這段
-      // 判斷，避免長期在收斂狀態下也要重複算这個。用跟 magnetFalloff()
-      // 一樣的 smoothstep 曲線（3t²-2t³）：爬升的頭尾都慢、中段快，跟
-      // 「引力場慢慢甦醒」的物理直覺更接近，而不是等速的機械爬升。
-      let rampFactor = 1;
-      if(magnetRevealRampStart != null){
-        const elapsed = now - magnetRevealRampStart;
-        if(elapsed >= MAGNET_REVEAL_RAMP_MS){
-          magnetRevealRampStart = null;
-        } else {
-          const rt = Math.max(0, elapsed) / MAGNET_REVEAL_RAMP_MS;
-          rampFactor = rt * rt * (3 - 2 * rt);
+      getFloatItems().forEach(entry => {
+        const dx = entry.baseX + floatCurNX * FLOAT_PARALLAX_STRENGTH * entry.depth;
+        const dy = entry.baseY + floatCurNY * FLOAT_PARALLAX_STRENGTH * entry.depth * 0.7; // 垂直方向幅度收窄一點，跟相鄰列重疊的機會小一點
+        if(entry.lastX != null &&
+           Math.abs(dx - entry.lastX) < FLOAT_SETTLE_EPS &&
+           Math.abs(dy - entry.lastY) < FLOAT_SETTLE_EPS){
+          return; // 幾乎沒變化，跳過這次寫入，省不必要的重繪
         }
-      }
-
-      // ---------- 修正：「飄動物件移動中偶爾還會小小卡lag一下」 ----------
-      // 原本這裡是單一個 forEach，對每張照片依序做「讀 wrapRect（算跟滑鼠
-      // 的距離）→ 寫 img.style.transform → 呼叫 positionGridIdxItem()（裡面
-      // 又是讀 wrapRect/imgRect → 寫 idx.style.left/top）」——一張接一張，
-      // 讀、寫、讀、寫交替下去。上百張照片這樣跑，每一次「寫」都會讓瀏覽器
-      // 上一輪量到的版面資訊失效，逼得緊接在後面的「讀」必須先同步跑一次
-      // 完整的頁面重新排版（forced synchronous layout）才拿得到正確數字，
-      // 這正是經典的「layout thrashing」——跟上面 positionAllGridIdx() 當初
-      // 那次「剛進站，飄動物件卡住不動很久」修的是同一種成因，只是這裡是
-      // magnetFrame() 這個永遠跟著滑鼠移動、以 60fps 常態在跑的迴圈，不是
-      // 只跑一次的保底補位，所以只要滑鼠停在首頁格子上移動，這筆 layout
-      // thrashing 的成本就會每一影格重複發生一次。這個迴圈跟飄動的 e 那套
-      // stepDvdBounce() 是同一個主執行緒、同一輪 requestAnimationFrame 批次
-      // 一起跑的，這裡多花的時間會直接墊高整輪 RAF 的執行時間、容易掉幀，
-      // 掉幀之後 stepDvdBounce() 拿到的 dt 變大，飄動的 e 一次移動的距離
-      // 也跟著變大，肉眼看起來就是「移動中偶爾小小卡一下、跳一下」。
-      // 修法：跟 positionAllGridIdx() 同一個精神，把「讀」跟「寫」拆開集中
-      // 處理，不要讓它們在同一輪迴圈裡逐張穿插：
-      //   1) 第一輪只讀 wrapRect（算跟滑鼠的距離）、算出新的縮放值，不寫
-      //      任何 style，版面全程不會被弄髒。
-      //   2) 第二輪把所有照片的 img.style.transform 一次寫完（含歸零）。
-      //   3) 第三輪：idx 編號要貼齊的是「縮放後」的實際邊緣，所以一定要
-      //      等上面的 transform 真的寫進去才讀得到正確數字——這裡才需要
-      //      再讀一次 wrapRect/imgRect，但集中在同一輪讀完，不會再跟寫
-      //      交替。
-      //   4) 第四輪把算好的 idx left/top 一次寫完。
-      // 總共只需要「一次寫→一次讀」這一個交界會觸發一次強制重排，不管
-      // 網格有幾百張照片，強制重排的次數都固定是 1 次，不會再隨照片數量
-      // 線性增加。
-      const magnetPending = [];
-      getMagnetItems().forEach(({ item, thumbWrap, img, idx }) => {
-        if(!img || !img.classList.contains('loaded')) return;
-
-        let target = 1;
-        if(magnetActive && thumbWrap){
-          const wrapRect = thumbWrap.getBoundingClientRect();
-          const cx = wrapRect.left + wrapRect.width / 2;
-          const cy = wrapRect.top + wrapRect.height / 2;
-          const dx = magnetMouseX - cx;
-          const dy = magnetMouseY - cy;
-          const fullTarget = magnetFalloff(Math.sqrt(dx * dx + dy * dy));
-          // 引力還在爬升期間：只給「完整效果」的 rampFactor 比例，其餘
-          // 部分視為還沒生效，這樣不管滑鼠這一刻離哪張縮圖多近，都不會
-          // 讓爬升期的目標值突然衝滿，達到「從沒有到有，慢慢長出引力」
-          // 的效果。爬滿之後 rampFactor 恆為 1，跟原本行為完全相同。
-          target = 1 + (fullTarget - 1) * rampFactor;
-        }
-
-        let current = magnetScaleState.get(item);
-        if(current == null) current = 1;
-        current += (target - current) * smoothFactor;
-
-        const settled = Math.abs(current - target) < MAGNET_SETTLE_EPS && Math.abs(target - 1) < MAGNET_SETTLE_EPS;
-        // hadTransform：這張照片「這一影格開始前」是不是還帶著 inline
-        // transform——settled 情況下只有原本還有 transform 才需要真的寫一次
-        // 歸零並重新貼齊編號，已經是原始大小、且本來就沒有 inline transform
-        // 的照片，維持原本「不用每影格都碰它」的省電行為，不放進待處理清單。
-        const hadTransform = !!img.style.transform;
-        if(settled && !hadTransform) return;
-        magnetPending.push({ item, thumbWrap, img, idx, current, settled });
-      });
-
-      // 寫階段：先把這一輪所有照片的 transform（含歸零）一次寫完，這一輪
-      // 完全不讀取任何版面資訊，不會被上面已經讀好的 wrapRect 弄髒。
-      magnetPending.forEach(({ item, img, current, settled }) => {
-        if(settled){
-          img.style.transform = '';
-          magnetScaleState.set(item, 1);
-        } else {
-          magnetScaleState.set(item, current);
-          img.style.transform = `scale(${current.toFixed(4)})`;
-        }
-      });
-
-      // 讀階段：上面這輪 transform 寫完之後，每張照片的編號位置才可能
-      // 真的變了（idx 貼齊的是縮放後的實際邊緣），這裡才需要重新讀一次
-      // wrapRect/imgRect——集中在同一輪讀完，不會再跟上面的寫穿插。
-      const idxUpdates = [];
-      magnetPending.forEach(({ thumbWrap, img, idx }) => {
-        if(!thumbWrap || !img || !idx) return;
-        const wrapRect = thumbWrap.getBoundingClientRect();
-        const imgRect = img.getBoundingClientRect();
-        if(!imgRect.width || !imgRect.height) return; // 極端情況（例如剛好被隱藏）保底不動
-        const left = Math.max(0, Math.round(imgRect.left - wrapRect.left));
-        const top = Math.max(0, Math.round(imgRect.bottom - wrapRect.top)) + GRID_IDX_GAP;
-        idxUpdates.push({ idx, left, top });
-      });
-
-      // 寫階段：idx 的 left/top 也集中在最後一次寫完。
-      idxUpdates.forEach(({ idx, left, top }) => {
-        idx.style.left = left + 'px';
-        idx.style.top = top + 'px';
+        entry.lastX = dx;
+        entry.lastY = dy;
+        entry.item.style.transform =
+          `translate3d(${dx.toFixed(2)}px, ${dy.toFixed(2)}px, 0) rotate(${entry.baseRot.toFixed(2)}deg) scale(${entry.baseScale.toFixed(3)})`;
       });
     }
-
-    window.addEventListener('mousemove', (e) => {
-      magnetMouseX = e.clientX;
-      magnetMouseY = e.clientY;
-      magnetActive = true;
-    }, { passive: true });
-
-    // 滑鼠離開整個瀏覽器視窗（例如移到網址列、切到別的視窗）：引力來源
-    // 消失，所有照片自然平滑地收斂回原始大小，不會卡在放大狀態。
-    window.addEventListener('mouseout', (e) => {
-      if(!e.relatedTarget && !e.toElement) magnetActive = false;
-    });
-    window.addEventListener('blur', () => { magnetActive = false; });
 
     // 分頁切到背景時，rAF 本來就會被瀏覽器自動節流；切回來的那一刻把
     // 「上一影格時間」重設掉，避免拿背景期間累積的超長 dt 一次追趕跳動。
     document.addEventListener('visibilitychange', () => {
-      if(!document.hidden) magnetLastFrameTime = null;
+      if(!document.hidden) floatLastFrameTime = null;
     });
 
-    requestAnimationFrame(magnetFrame);
-
-    // 覆寫外層預設的空函式，接上真正的重設實作（見上面
-    // resetMagnetScaleForReveal 宣告處的完整說明）：把每張照片的
-    // magnetScaleState 都設回 1、magnetLastFrameTime 歸零，並啟動
-    // 「引力強度」的爬升期（magnetRevealRampStart = 這一刻的時間戳），讓
-    // playGridRevealAnimation() 收尾時可以呼叫這個函式，確保「放大進場」
-    // 動畫播完的那一刻，magnetFrame() 不只是從跟畫面實際大小一致的 1
-    // 重新開始追，追的目標本身也會先從 0 強度開始、花 MAGNET_REVEAL_RAMP_MS
-    // 慢慢暖機到滿強度——整體效果就是「照片都放大完成之後，引力才用一個
-    // 成熟、物理流暢的慢速開始生效」，不會有任何無過渡的瞬間跳動。
-    resetMagnetScaleForReveal = function(){
-      getMagnetItems().forEach(({ item }) => {
-        magnetScaleState.set(item, 1);
-      });
-      magnetLastFrameTime = null;
-      magnetRevealRampStart = performance.now();
-    };
+    requestAnimationFrame(floatParallaxFrame);
   }
 
   // 圖片載入完成時，如果編號正處於「待補」狀態（見 prepareGridRevealState()
@@ -4346,19 +4183,10 @@
       });
       // 動畫真正播完，照片尺寸已經穩定回最終大小，這裡才能放心解除
       // gridRevealInFlight（見 positionGridIdxItem() 內的說明）。
-      //
-      // 在解除凍結之前，先呼叫 resetMagnetScaleForReveal()：
-      // ① 把桌機滑鼠「引力放大」特效內部每張照片自己追蹤的「目前縮放值」
-      // 統一重設回 1（跟這一刻畫面上剛清空 inline transform、回到 CSS
-      // 預設 scale(1) 的實際大小一致），避免凍結前殘留的舊縮放值（例如
-      // 使用者切頁面前滑鼠剛好停在某張縮圖上留下的 1.3）造成無過渡的跳動。
-      // ② 同時啟動「引力強度」的爬升期（magnetRevealRampStart 設成當下
-      // 時間戳）：接下來 MAGNET_REVEAL_RAMP_MS 這段時間內，就算滑鼠已經
-      // 停在某張縮圖正上方，引力也只會慢慢、從 0 強度開始長出來，而不是
-      // 用平常「貼手」的速度一口氣衝到滿倍率。兩者合起來，效果就是「照片
-      // 都放大完成之後，引力才用一個成熟、物理流暢的慢速從無到有開始
-      // 生效」——符合預期的先後順序，兩邊不再互搶，也不會有任何瞬間跳動。
-      resetMagnetScaleForReveal();
+      // （這裡原本在解除凍結前還會呼叫 resetMagnetScaleForReveal()，是舊版
+      // 桌機滑鼠「引力放大」特效專用的收尾重設；引力放大已經整個換成
+      // 「隨機遠近飄浮＋滑鼠視差」，沒有需要收尾重設的殘留縮放值，這一步
+      // 已經移除，見上面 gridRevealTargetRectMap 宣告處的完整說明。）
       gridRevealInFlight = false;
       flushPendingGridIdxAfterReveal();
     }, GRID_REVEAL_MS + 60);
