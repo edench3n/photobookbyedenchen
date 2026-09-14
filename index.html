@@ -2093,11 +2093,10 @@
     return (performance.now() - DVD_SCRIPT_START_TS) < DVD_E_PRIORITY_WINDOW_MS;
   }
 
-  const GOOGLE_DRIVE_FOLDER_ID = '1wQI2MMoORB78XoC8E5GnxKkLLUEZsxPn';
-  const GOOGLE_API_KEY = 'AIzaSyDoTpWEZ-UGEhOm3HScpL2mTlwc7tYiiNg';
-
-  const DRIVE_CACHE_KEY = 'photobook-cache-v1:' + GOOGLE_DRIVE_FOLDER_ID;
-  const DRIVE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 分鐘：同一次瀏覽（含來回切換頁面）都能吃到快取，又不會放到隔天還在用舊清單
+  // GOOGLE_DRIVE_FOLDER_ID／GOOGLE_API_KEY／DRIVE_CACHE_KEY／DRIVE_CACHE_TTL_MS：
+  // 照片牆原本現查 Drive API 時代用的資料夾 id／金鑰／sessionStorage 快取
+  // 設定，離線化成 photos-manifest.json 之後不再需要，已移除（見下面
+  // fetchDriveImages() 內的完整說明）。
 
   // ---------- 大改：飄動的「e」撞牆換圖用的圖片庫，改成同源靜態檔案 ----------
   // 原本這批圖（跟碰撞遮罩）放在一個獨立的 Google Drive 資料夾，進站當下
@@ -2173,18 +2172,16 @@
   // 沒辦法讓它變快，唯一能做的就是讓這個請求「越早發出去越好」，好讓它
   // 在飛的這段時間，剛好跟後面那些本地運算平行進行，而不是先做完本地
   // 運算才開始等網路。
-  // 做法：把 fetchDriveImages() 挪到整份 IIFE 最前面呼叫（只挪到這裡需要用
-  // 到的兩個變數 DRIVE_CACHE_KEY／DRIVE_CACHE_TTL_MS 也一起宣告好之後，
-  // 避免 const 的 temporal dead zone 噴錯），先把 Promise 存起來；函式內部
-  // 真正用到 RANDOM_ORDER_SALT 等稍後才宣告的變數的那幾行，都是在
-  // await fetch(...) 真正解析完 response 之後才會執行到——那已經是事件迴圈
-  // 之後的事，這份腳本這時早就從頭到尾執行過一輪，所有變數都已經宣告完成，
-  // 不會有任何提前引用的問題。
+  // 做法：把 fetchDriveImages() 挪到整份 IIFE 最前面呼叫，先把 Promise 存
+  // 起來；函式內部真正用到 demoPhotos／supportsTouch 等稍後才宣告的變數的
+  // 那幾行，都是在 await fetch(...) 真正解析完 response 之後才會執行到——
+  // 那已經是事件迴圈之後的事，這份腳本這時早就從頭到尾執行過一輪，所有
+  // 變數都已經宣告完成，不會有任何提前引用（temporal dead zone）的問題。
   // init() 裡原本呼叫 fetchDriveImages() 的地方，改成直接 await 這個提早
   // 建立好的 photosPromise——結果、行為（成功回傳照片陣列、失敗退回
-  // demoPhotos、sessionStorage 快取邏輯……）完全不變，純粹只是讓這個網路
-  // 請求早在腳本一開始執行就已經在路上，而不是等所有本地初始化都做完
-  // 才姍姍來遲，藉此縮短使用者在 preview 頁看到第一張照片之前要等待的時間。
+  // demoPhotos）完全不變，純粹只是讓這個網路請求早在腳本一開始執行就已經
+  // 在路上，而不是等所有本地初始化都做完才姍姍來遲，藉此縮短使用者在
+  // preview 頁看到第一張照片之前要等待的時間。
   const photosPromise = fetchDriveImages();
 
   const demoFileNames = [
@@ -2811,207 +2808,71 @@
     positionAllGridIdx(); // 視窗尺寸/欄數改變後，重新把每張照片的編號貼回「照片本身」的右下角
   }
 
-  // 照片的 001/002/003... 順序：不是照檔名排序，而是用一個「固定的隨機順序」。
-  // 做法是拿每張照片在 Google Drive 裡永遠不變的 file.id，混合下面這個
-  // RANDOM_ORDER_SALT 種子字串，跑一個固定的雜湊函式算出一個數字，再照這個
-  // 數字排序——同一個 file.id + 同一個種子字串，每次算出來的數字都完全一樣，
-  // 所以不管重新整理幾次網頁、什麼時候打開，順序永遠一致，不會每次都變。
-  // 新增照片時：新照片的 file.id 也會算出一個固定數字，插進現有順序中間
-  // 看起來像隨機的某個位置，但完全不影響其他既有照片彼此之間的相對順序。
-  // 如果哪天想「換一組新的固定隨機順序」，只要把 RANDOM_ORDER_SALT 改成
-  // 別的字串（例如加個版本號），全部照片就會照新種子重新洗牌成另一組、
-  // 同樣固定不變的新順序。
-  const RANDOM_ORDER_SALT = 'edenchen-photobook-order-v1';
-  function hashStringToInt(str){
-    // FNV-1a 32-bit 雜湊：純數學運算、不含任何跟時間/亂數相關的成分，
-    // 同樣的輸入字串永遠得到同樣的輸出數字。
-    let h = 0x811c9dc5;
-    for(let i = 0; i < str.length; i++){
-      h ^= str.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return h >>> 0;
-  }
+  // 照片的 001/002/003... 順序：不是照檔名排序，而是用一個「固定的隨機順序」，
+  // 做法是拿每張照片在 Google Drive 裡永遠不變的 file.id 混合一個固定種子
+  // 字串跑雜湊函式排序（RANDOM_ORDER_SALT／hashStringToInt()）。這一步
+  // 離線化之後移到 scripts/build-photos-manifest.js 裡做（同一份演算法、
+  // 同一組種子字串），直接把排好的順序寫進 photos-manifest.json 的陣列
+  // 順序，前端不用再自己排一次，原本這裡的兩個定義已移除，詳見下面
+  // fetchDriveImages() 內的完整說明。
 
-  // ---------- Drive API 回應快取（同分頁內有效） ----------
-  // 這支 API 呼叫是整個網站「第一張照片出現前」最前面、會卡住後面所有事
-  // 的關鍵請求（見上面 preconnect 該處的說明）。使用者在同一個分頁內
-  // 上一頁/下一頁、或重新整理，其實九成情況下拿到的照片清單跟剛剛一模
-  // 一樣，卻要整個網站重新等一次這個請求的往返時間，才能開始下載第一張
-  // 照片——這段等待其實完全可以省略。
-  // 用 sessionStorage 存一份「最近一次成功拿到的清單」，並附上時間戳記：
-  //   - 同一個分頁只要在 CACHE_TTL_MS 之內再次進站，直接用快取的清單，
-  //     完全跳過這次網路請求，第一張照片幾乎瞬間開始下載。
-  //   - 超過 TTL（代表使用者可能真的隔了一段時間才回來，Drive 資料夾內容
-  //     也可能已經更新過），照舊重新打一次 API，維持資料新鮮度。
-  //   - 只用 sessionStorage（分頁關閉即清空）不用 localStorage：避免使用者
-  //     隔了很多天再打開時，還在用已經過期很久、可能早就跟 Drive 現況對
-  //     不上的舊清單；同時也不會有跨分頁互相汙染快取的問題。
-  //   - 存的是「處理過後、已經算好每個尺寸網址」的完整結果（不是原始 API
-  //     回應），下次命中快取時連 .map() 的計算都一起省下來，是真正意義上
-  //     的「直接可用」。
-  //   - 任何一步（讀取/解析/寫入 sessionStorage）失敗都直接忽略，不影響
-  //     原本的網路請求流程——快取只是錦上添花，絕不能變成新的失敗點。
-  function readDriveCache(){
-    try{
-      const raw = sessionStorage.getItem(DRIVE_CACHE_KEY);
-      if(!raw) return null;
-      const parsed = JSON.parse(raw);
-      if(!parsed || !Array.isArray(parsed.photos) || typeof parsed.savedAt !== 'number') return null;
-      if(Date.now() - parsed.savedAt > DRIVE_CACHE_TTL_MS) return null;
-      return parsed.photos;
-    }catch(err){ return null; }
-  }
-  function writeDriveCache(photosList){
-    try{
-      sessionStorage.setItem(DRIVE_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), photos: photosList }));
-    }catch(err){ /* 私密瀏覽模式、儲存空間已滿等狀況，忽略即可，不影響正常運作 */ }
-  }
-
+  // ---------- 大改：照片牆改成讀同源的靜態 photos-manifest.json ----------
+  // 完整脈絡跟上面 dvdEImageUrlToId／fetchDvdEImages() 的離線化是同一件事：
+  // 原本這裡進站當下才現查 Drive API（列出資料夾、再組出網格縮圖／hover
+  // 大圖／detail 大圖／preview 跳轉頁……好幾種尺寸的網址），這個 API 請求
+  // 是整個網站「第一張照片出現前」最前面、會卡住後面所有事的關鍵請求，
+  // 現在改成離線批次工具（scripts/build-photos-manifest.js，由
+  // .github/workflows/build-e-manifest.yml 自動跑）把整批照片、每張再各自
+  // 產生 8 種尺寸，直接下載＋存成這個 repo 裡的靜態檔案：
+  //   - photos/<driveFileId>-<size>.<ext>   每張照片、每種尺寸各一份
+  //   - photos-manifest.json                {generatedAt, folderId, photos:[...]}
+  // 同源靜態檔案瀏覽器解析到 HTML 就能直接命中 HTTP 快取，不用再等 Drive
+  // API 的查詢＋認證來回。原本 sessionStorage 那層快取（DRIVE_CACHE_KEY／
+  // readDriveCache()／writeDriveCache()）本來就是為了在單次瀏覽期間避免
+  // 重複打 Drive API 才存在，同源靜態檔案交給瀏覽器自己的 HTTP 快取處理
+  // 就好，不需要再自己多維護一份，整段一起拿掉；排序也不用再靠
+  // RANDOM_ORDER_SALT／hashStringToInt() 在前端重算一次，build script 用
+  // 同一組種子字串算好、直接照這個順序寫進 manifest 陣列，前端拿到之後
+  // 依陣列順序顯示就是正確的「固定隨機」順序。
+  // manifest 抓不到、內容是空的、或任何一步出錯，一律回傳 demoPhotos，
+  // 讓網格至少有東西可以顯示，不會讓整個網站因為這個離線化而壞掉——跟
+  // 原本 Drive 資料夾沒設定/是空的/請求失敗時的備援行為完全一樣。
   async function fetchDriveImages(){
-    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
-       !GOOGLE_DRIVE_FOLDER_ID || GOOGLE_DRIVE_FOLDER_ID === 'YOUR_FOLDER_ID'){
-      return demoPhotos;
-    }
-
-    const cached = readDriveCache();
-    if(cached) return cached;
-
     try{
-      const q = encodeURIComponent(`'${GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
-      // imageMediaMetadata(width,height)：Google Drive 針對圖片檔案本來就會
-      // 回傳的原始像素尺寸，額外多要這兩個欄位，才能算出每張照片「實際的
-      // 長寬比」——這個比例後面給照片物理堆疊模式（spawnFallingPhotos()）
-      // 用，讓掉落的每一張照片畫成它本來的形狀，不是統一的正方形。
-      // 原本這裡還多要了一個 createdTime 欄位，但整份程式碼從頭到尾都沒有
-      // 任何地方真的用到它（排序用的是 orderBy=name，不是建立時間）——
-      // 純粹是每一張照片都要多帶一段沒人看的時間字串回來，資料夾照片一多，
-      // 這筆多餘的資料量會跟著線性增加，也要多花一點時間解析。拿掉之後
-      // 對外沒有任何行為變化，回應本身變小、解析也快一點點，純粹是清掉
-      // 死重量，不影響任何顯示畫質。
-      const fields = encodeURIComponent('files(id,name,thumbnailLink,imageMediaMetadata(width,height))');
-      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=name&key=${GOOGLE_API_KEY}`;
-
-      // 保底逾時：原本沒有設定 fetch 的逾時，網路狀況不好（例如訊號時有時無、
-      // 請求卡在半路沒有明確失敗也沒有回應）時，這個 await 可能會無限期
-      // 掛著，使用者會一直卡在空白畫面、什麼都看不到，也沒有任何備援。
-      // 用 AbortController 設一個 8 秒的保底：超過就主動中斷這次請求，
-      // 直接落到下面 catch 區塊，退回使用 demoPhotos，至少讓使用者能看到
-      // 內容，而不是永遠卡住的白畫面。8 秒對正常網路來說綽綽有餘，不會
-      // 誤傷任何一次「只是稍微慢一點」的正常請求。
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-      let res;
-      try{
-        // priority:'high'：這是整個網站「preview 頁第一批照片出現之前」
-        // 最前面、會卡住後面所有事情的一個網路請求（見上面 photosPromise
-        // 宣告處的完整說明），理當拿到瀏覽器能給的最高網路優先度。支援
-        // Priority Hints 的瀏覽器（目前主要是 Chromium 系）會因此把頻寬
-        // 優先分配給這個請求，比同時間發出的其他次要請求（例如字體、
-        // 縮圖預連線）更早拿到回應；不支援這個選項的瀏覽器會直接忽略它，
-        // 行為等同沒有這個屬性，不會出錯、也不會變慢，純粹是「有支援就
-        // 賺到、沒支援也不會更差」的安全加分項。
-        res = await fetch(url, { signal: controller.signal, priority: 'high' });
-      } finally {
-        clearTimeout(timeoutId);
-      }
-      if(!res.ok) throw new Error('Drive API request failed: ' + res.status);
+      // priority:'high'：理由跟原本 fetchDriveImages() 這裡完全一樣——這是
+      // 整個網站「preview 頁第一批照片出現之前」最前面、會卡住後面所有事情
+      // 的請求，理當拿到瀏覽器能給的最高網路優先度。
+      const res = await fetch('/photos-manifest.json', { priority: 'high' });
+      if(!res.ok) return demoPhotos;
       const data = await res.json();
+      if(!data.photos || data.photos.length === 0) return demoPhotos;
 
-      if(!data.files || data.files.length === 0) return demoPhotos;
-
-      const result = data.files
-        .sort((a,b) => hashStringToInt(a.id + RANDOM_ORDER_SALT) - hashStringToInt(b.id + RANDOM_ORDER_SALT))
-        .map(file => {
-          // thumbnailLink 是 Google 圖片 CDN 產生的、已經縮圖過的版本（速度快、
-          // 全球都有快取節點，也比較不會像 uc?export=view 那樣在檔案較大時
-          // 被擋掉或跳出「無法掃描病毒」的中介頁面）。網格縮圖只是小圖，
-          // 用 800px 的版本畫質完全足夠；點開大圖看細節時才用原始全尺寸檔案，
-          // 畫質不受任何影響。
-          const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
-          // 照片實際的寬高比（寬/高）：來自 Drive 回傳的 imageMediaMetadata，
-          // 是這張圖片檔案本身真正的像素尺寸，不是任何一種縮圖／顯示尺寸。
-          // 部分檔案（例如非標準圖片格式）Drive 可能沒有回傳這個欄位，量不到
-          // 就退回 1（正方形），至少不會整個壞掉，只是那一張退回舊行為。
-          const meta = file.imageMediaMetadata;
-          const aspect = (meta && meta.width && meta.height) ? (meta.width / meta.height) : 1;
-          return {
-            title: file.name.replace(/\.[^/.]+$/, ''),
-            aspect,
-            url: `https://drive.google.com/uc?export=view&id=${file.id}`, // 原始全尺寸檔案：畫質最高，但走 drive.google.com/uc，
-                                                                            // 不是 CDN，檔案大時常常要等好幾秒才回應，甚至偶爾被
-                                                                            // 導去「無法掃描病毒」的中介頁面——這是白屏拖很久的主因
-            // detailUrl：大圖頁真正優先使用的來源。一樣是 thumbnailLink 這個
-            // Google 圖片 CDN（全球節點、速度快很多），只是把尺寸從網格用的
-            // 800px 拉到 2000px——一般螢幕（含 Retina）全螢幕顯示都綽綽有餘，
-            // 肉眼幾乎看不出跟原始檔案的差異，但下載速度是原本 uc?export=view
-            // 的好幾倍快，白屏時間大幅縮短。
-            detailUrl: thumbBase ? (thumbBase + '=s2000') : '',
-            // detailUrlMobile：只給手機版大圖頁用的縮小版本。手機螢幕的可視
-            // 寬度（扣掉左右箭頭留白後）通常落在 250~300px 左右，就算是
-            // Retina/3x 螢幕，實際需要的像素寬度也大概落在 900px 上下，
-            // 2000px 對手機來說是遠超過肉眼看得出差異的大小，卻要多花好幾倍
-            // 的下載時間。改用 1200px：畫質在手機螢幕上跟 2000px 幾乎沒有
-            // 分別，但檔案小很多、下載快很多，這樣切換照片時大機率能直接
-            // 一次到位顯示正確畫面，不需要再靠縮圖墊場、事後校正這些額外的
-            // 過場處理。只在觸控裝置套用，桌機版不受影響，仍然用 2000px。
-            detailUrlMobile: (supportsTouch && thumbBase) ? (thumbBase + '=s1200') : '',
-            thumbUrl: thumbBase ? (thumbBase + '=s750') : `https://drive.google.com/uc?export=view&id=${file.id}`, // hover 大圖預覽專用：上一輪速度優化從 800 調到 700，這次使用者反應整體看起來偏小／偏糊，往回調到 750——介於兩者之間，畫質比 700 明顯提升，仍然比原本的 800 省一點下載量，維持優化的方向不變。
-            // gridUrl：首頁網格縮圖實際顯示用的尺寸。網格每張圖片最終渲染出來
-            // 頂多幾十到一百多 px 寬（.grid-item img { max-width:52% } 疊在
-            // 本來就不大的欄位裡），用 800px 明顯是殺雞用牛刀，檔案大小是真正
-            // 需要的好幾倍，這正是「首頁小圖載入速度太慢」的主因。改用 400px，
-            // 即使是 Retina 螢幕也綽綽有餘，肉眼幾乎看不出差異，但檔案大小明顯
-            // 縮小、下載更快。注意：hover 滑鼠跳出來的大圖預覽刻意還是用上面
-            // 那個沒被縮小的 thumbUrl，不會被這次調整影響到。
-            //
-            // ---- 這一輪速度優化 ----
-            // 這是整個網格畫面裡「用量最大」的一個尺寸——網格裡每一張照片
-            // 都要載入一份，張數一多，光是這個尺寸的總下載量就決定了首頁
-            // 整體跑出來的快慢。原本從 400px 微調到 340px（約再小 15%，換算
-            // 面積／檔案大小大約再省三成）省下不少下載量，但使用者後來反應
-            // 整體圖片看起來偏小、優化得太過頭，這裡再往回調到 380px——
-            // 幅度只回補一半左右，畫質比 340px 明顯好一截，但仍然比最早的
-            // 400px 小、維持著優化的方向，不是整個復原。跟 thumbUrl／
-            // tinyUrl／previewUrl 這幾個同一批調整的尺寸一樣，detailUrl／
-            // detailUrlMobile（大圖詳細頁，使用者真正會放大細看的地方）
-            // 刻意完全不動，把畫質預算留在使用者真的會盯著看的地方。
-            gridUrl: thumbBase ? (thumbBase + '=s380') : `https://drive.google.com/uc?export=view&id=${file.id}`,
-            fallbackUrl: thumbBase ? (thumbBase + '=s1600') : '', // 縮圖／原圖都失敗時的備援
-            // tinyUrl：專門給 preview 頁「飄動的 e 撞到上/下邊界」觸發跳轉、但撞擊
-            // 太快或連續撞擊、且連 thumbUrl（現在是 750px）都還沒被瀏覽器快取到時
-            // 使用的最後備援圖。原本是 60px，檔案極小、瞬間就能顯示，但撞太快
-            // 時整個畫面幾乎全是這張圖，60px 拉滿半個螢幕肉眼一看就是馬賽克，
-            // 畫質完全不能看；後來改成 320px、再提升到 480px，清晰度明顯提升，
-            // 即使是它被顯示出來的少數情況，看起來也不會再一眼就覺得「畫質
-            // 很差」。上一輪微調到 420px，這次跟其他幾個尺寸一起往回補一點，
-            // 調到 450px：出現的情境依舊是「畫面正在快速跳轉的過渡瞬間」，
-            // 肉眼原本就來不及細看，但整體都補一點之後看起來更一致，不會
-            // 這張特別小。
-            tinyUrl: thumbBase ? (thumbBase + '=s450') : `https://drive.google.com/uc?export=view&id=${file.id}`,
-            // previewUrl：preview 跳轉頁（一打開網站看到的那個左右／上下交錯
-            // 全版跳轉畫面）專用。這裡的照片撞牆就換、停留時間很短，肉眼幾乎
-            // 來不及看清細節，卻要求跟大圖詳細頁一樣載 2000px 原始尺寸的
-            // thumbnail，這正是「一打開網站，preview 畫面第一批照片跑出來
-            // 明顯慢一拍」的主因——不只手機，桌機同樣受影響。
-            // 手機（supportsTouch）原本是 900px，上一輪調到 800px；這次跟
-            // 其他尺寸一起往回補一點，調到 850px——介於兩者之間，肉眼可辨
-            // 的畫質比 800px 好一點，仍然比最早的 900px 省一些下載量。
-            // 桌機／平板原本完全沒有專屬的 previewUrl，會直接落到下面
-            // fallback 清單的下一個候選 detailUrl（=s2000），等於用「大圖
-            // 詳細頁在看細節」才需要的尺寸，去餵一個只佔螢幕一半寬、而且
-            // 隨時會被下一張蓋過去的跳動畫面，白白多下載、多等好幾倍的資料量。
-            // 補上桌機專屬的尺寸，原本是 1600px，上一輪調到 1400px，這次
-            // 同樣往回補一點到 1500px：欄寬是 50vw，即使是 Retina/2x 螢幕，
-            // 1500px 仍然遠超過那個寬度實際需要的像素，這裡的取捨原則跟上面
-            // gridUrl／tinyUrl 一致：畫面停留短、使用者來不及細看的地方，
-            // 優化的方向維持不變，只是這次把幅度往回收一些。
-            previewUrl: thumbBase ? (thumbBase + (supportsTouch ? '=s850' : '=s1500')) : ''
-          };
-        });
-
-      writeDriveCache(result); // 存一份快取，下次同分頁再進站可以直接跳過這次 API 往返
-      return result;
+      return data.photos.map(entry => {
+        const files = entry.files || {};
+        return {
+          title: entry.title,
+          aspect: entry.aspect,
+          // url：原本這裡是 Drive 原始全尺寸檔案（畫質最高但常常很慢、
+          // 偶爾被導去中介頁面）。離線化之後不再另外抓 Drive 原始檔——
+          // 相機直出常常好幾 MB，塞進 repo 只會拖慢 clone／部署，這裡直接
+          // 用畫質已經很夠、檔案小很多的 2000px detail 版本頂替，跟其他
+          // 呼叫端把 detailUrl 排在 url 前面的 fallback 順序（見
+          // renderDetailLight()／prefetchOne() 附近的 sources 清單）本來
+          // 就吃不太到 url 這個欄位，不影響任何實際顯示畫質。
+          url: files.detail ? ('/' + files.detail) : '',
+          detailUrl: files.detail ? ('/' + files.detail) : '',
+          detailUrlMobile: files.detailMobile ? ('/' + files.detailMobile) : '',
+          thumbUrl: files.thumb ? ('/' + files.thumb) : '',
+          gridUrl: files.grid ? ('/' + files.grid) : '',
+          fallbackUrl: files.fallback ? ('/' + files.fallback) : '',
+          tinyUrl: files.tiny ? ('/' + files.tiny) : '',
+          // previewUrl：跟原本一樣分手機／桌機兩種尺寸，只是現在是兩個
+          // 各自獨立下載好的靜態檔案，不是同一個 CDN 網址換參數。
+          previewUrl: (supportsTouch ? files.previewMobile : files.previewDesktop)
+            ? ('/' + (supportsTouch ? files.previewMobile : files.previewDesktop))
+            : ''
+        };
+      });
     }catch(err){
       return demoPhotos;
     }
