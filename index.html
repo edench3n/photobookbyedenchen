@@ -1878,10 +1878,12 @@
      桌機／平板維持原本 min(92vw,820px) / 80vh 的大小不變。手機版螢幕本來就窄，
      92vw 的截圖幾乎頂滿整個寬度，這裡縮小成 min(62vw,360px)，同時把
      overlay 跟 actions 的間距也等比例縮小，讓 download／back 兩顆按鈕
-     不會因為截圖變小而離得老遠，而是緊跟在截圖下方。按鈕本身也依照
-     跟桌機版相同的縮放比例（92→68，46→34，同樣維持 2:1 的原始比例）
-     一起等比例縮小，視覺上才會跟變小的截圖搭配得上，不會顯得按鈕相對
-     過大。 */
+     不會因為截圖變小而離得老遠，而是緊跟在截圖下方。按鈕本身原本依照
+     跟桌機版相同的縮放比例（92→68，46→34）等比例縮小，後來使用者反應
+     手機上按鈕偏小、按起來不夠好按，這裡在維持原始比例（download≈2.8:1、
+     back≈2.1:1）的前提下整體再放大一點（68→78，34→39，換算下來 height
+     也跟著等比例微調），比之前好按一些，但仍然比桌機版小、不會顯得
+     跟縮小後的截圖不搭。 */
   @media (max-width:640px){
     .wallpaper-preview-img{
       max-width:min(62vw, 360px);
@@ -1893,8 +1895,8 @@
     .wallpaper-preview-actions{
       gap:22px;
     }
-    #wallpaperDownloadBtn{ width:68px; height:24px; }
-    #wallpaperCloseBtn{ width:34px; height:16px; }
+    #wallpaperDownloadBtn{ width:78px; height:28px; }
+    #wallpaperCloseBtn{ width:39px; height:18px; }
   }
 
 
