@@ -51,30 +51,6 @@
      才會知道，這是整個頁面「第一張照片出現前」最前面、會卡住後面所有事情
      的一個網路請求；先建好連線，能省下這個關鍵請求的 TCP/TLS 交握時間。 -->
 <link rel="preconnect" href="https://www.googleapis.com" crossorigin>
-<!-- 🌟 堆疊頁面（photo-fall）的 3 張漸層背景圖，提早由瀏覽器「preload scanner」
-     在解析 HTML 的當下就直接開始下載，完全不需要等任何 JS 執行 🌟
-     原本這 3 張圖只靠 JS 在 scheduleIdle()（見 <script> 內
-     prefetchPhotoFallBackgroundImages() 的呼叫點）延後到「瀏覽器真正閒下來」
-     才觸發下載，桌機最晚也要等到 4000ms、沒有 requestIdleCallback 的手機
-     Safari 更是排在 Matter.js、網格建置等一長串工作後面，實際上常常是
-     頁面載入 2~4 秒後才「開始」下載＋解碼。如果使用者進站後很快就雙擊
-     飄動的 e、又很快點過前面幾個純色背景，切到這 3 張圖片時，下載根本
-     還沒開始或還沒完成，看到的就是「先白一下才跳出來」。
-     這裡改成瀏覽器原生的 rel="preload"：解析到這幾行的當下就會排進網路
-     佇列開始下載，不吃 JS 主執行緒、不用等 requestIdleCallback、也不受
-     Safari 沒有這個 API 拖累，三種瀏覽器都能盡早把檔案抓到手上。
-     fetchpriority="low" 讓它排在字體／照片 API／首批網格縮圖這些真正
-     「使用者馬上會看到」的資源之後，不會反過來拖慢首屏；但仍然比原本
-     「等到 idle 才觸發」早了幾秒鐘起跑，而且不會被其他背景工作卡住起跑
-     時間點。JS 那邊的 ensurePhotoFallBackgroundImageReady() 仍然會用同一個
-     網址再建一個 <img> 物件並呼叫 decode()——瀏覽器會直接命中這裡預先
-     建好的快取，不會重新發一次網路請求，decode() 也會因為 bytes 早就
-     到位而幾乎瞬間完成，兩邊搭配才能真正做到「使用者點到那張背景時，
-     圖片已經完全就緒」。三個檔名要跟 JS 內 PHOTO_FALL_BG_COLORS 陣列裡的
-     路徑保持完全一致，之後要換圖也要記得這裡跟那邊一起改。 -->
-<link rel="preload" as="image" href="/pf-bg-photo-1.jpg" fetchpriority="low">
-<link rel="preload" as="image" href="/pf-bg-photo-2.jpg" fetchpriority="low">
-<link rel="preload" as="image" href="/pf-bg-photo-3.jpg" fetchpriority="low">
 <!-- 全站字體 Stack Sans Text：這次要用到 260、350 這種非標準字重數值，
      改成用可變字重（variable font）的範圍語法載入，瀏覽器可以在範圍內
      內插出任意數字的字重，不用侷限在 400/500/700 這些固定字重。
@@ -1589,57 +1565,18 @@
   }
   .photo-fall-stage.active{ display:block; pointer-events:auto; }
   .photo-fall-stage.grabbing{ cursor:grabbing; }
-  /* ---------- 堆疊背景圖：直接用 <img> 元素顯示，不透過 CSS background-image ----------
-     完整成因見 JS ensurePhotoFallBackgroundImageReady() / showPhotoFallBackgroundImageEl()
-     上方的說明：部分瀏覽器（尤其手機 Safari）就算網址早就下載＋decode()
-     過，改用 CSS background-image 設同一個網址時，仍然可能重新解碼一次，
-     一樣會卡出「先白一下才跳出來」的畫面。改成直接複用同一個已經解碼好
-     的 <img> 節點、疊在 photoFallStage 內部最底層（永遠是第一個子節點，
-     掉落中的照片／飄動的 e 都是之後才 append 進來，天然疊在它上面）。
-     object-fit:cover 讓圖片維持原始比例、滿版鋪滿整個容器，比例對不上的
-     方向直接裁掉，跟原本 CSS background-size:cover 想要的視覺效果一致。
-     ---------- 進一步修正：「點下去還是會 lag 一下才變」 ----------
-     decode() 只解決「把壓縮過的圖檔位元組，解成可以畫的原始像素資料」這一
-     層——瀏覽器要真的把這包像素資料「畫」進畫面上（rasterize／上傳成 GPU
-     材質、合成進畫面），是另外、更晚的一個步驟，只有在這個元素真的進入
-     「會被畫出來」的渲染樹時才會發生。原本用 display:none／block 切換：
-     display:none 的元素完全被排除在渲染樹外，就算背後的圖片資料早就
-     decode() 完成，瀏覽器也完全不會提早幫它做這一步——所以每次「第一次」
-     把某張圖從 none 切成 block 的那一刻，這個「畫出來」的成本（尤其是
-     解析度較大的照片，光是把整張像素資料鋪上 GPU 材質就需要看得見的時間）
-     都會全部發生在使用者點下去的當下，這才是即使 decode() 早就做完，體感
-     還是「lag 一下才變」的真正原因，而純色背景完全沒有這個問題——改變
-     background-color 從來不需要「鋪一整張点陣圖上 GPU」這種工作，永遠是
-     瞬間生效。
-     真正修法：不要再用 display 這種「整個進出渲染樹」的開關，改用
-     opacity 開關——opacity:0 的元素雖然肉眼看不見，但它仍然完整留在渲染
-     樹裡，瀏覽器一樣要（也一樣會）把它畫出來、鋪上 GPU 材質，只是最後合成
-     時用透明度 0 蓋掉，不會被使用者看到。這代表只要這張圖提早（趁使用者
-     還在點前面幾個純色背景的空檔）被插進 DOM、設成 opacity:0，瀏覽器就有
-     機會利用這幾次點擊之間、看似很短暫但確實存在的「兩次繪製之間」空檔，
-     把這張圖提早「畫」進一個獨立的合成圖層，真正需要顯示的那一刻只需要
-     把 opacity 從 0 調到 1——這是純粹的合成器（compositor）操作，不需要
-     重新排版、重新繪製，效果應該要跟純色背景的切換一樣快。
-     transform:translateZ(0) + will-change:opacity 是明確告訴瀏覽器「這個
-     元素之後會頻繁只改 opacity」，強制它一開始就升成獨立的合成圖層，而不
-     是等第一次真的改變 opacity 時才臨時升層（臨時升層那一次一樣會卡）。
-     實際插入時機、pre-warm 的呼叫點見 JS prewarmPhotoFallBackgroundLayers()
-     的完整說明；插入之後這個元素就永久留在 DOM 裡（不再移除），下一次
-     循環到同一張圖只需要切換 opacity，不用重新插入。 */
-  .photo-fall-stage .pf-bg-img{
-    position:absolute;
-    inset:0;
-    width:100%;
-    height:100%;
-    object-fit:cover;
-    object-position:center;
-    opacity:0;
-    pointer-events:none;
-    transform:translateZ(0);
-    will-change:opacity;
-    transition: opacity .16s ease;
-  }
-  .photo-fall-stage .pf-bg-img.pf-bg-img-visible{ opacity:1; }
+  /* ---------- 堆疊背景（含原本 3 張漸層照片）改成純 CSS 漸層／純色，不再用
+     <img> 元素 ----------
+     這 3 張圖原本用獨立 <img> 節點＋opacity 合成圖層 pre-warm 這一整套
+     機制解決「切換會 lag」的問題（完整歷史脈絡：先是 decode() 沒解決、
+     再來是 display:none/block 切換本身要重新鋪 GPU 材質、最後才靠 pre-warm
+     繞過去）。後來實際打開圖片分析後發現這 3 張根本就是單純的線性漸層
+     色塊，沒有任何具體拍攝內容，於是直接把它們分析成 CSS
+     linear-gradient()（見 JS PHOTO_FALL_BG_COLORS 陣列裡的完整說明），
+     從根本上不再需要任何圖片元素、下載、解碼、合成圖層——漸層現在跟純色
+     背景走同一條路（分別是 background-image／background-color），瀏覽器
+     用公式算色，沒有「要等圖片準備好」這件事，前面那一整套 <img>／
+     opacity／pre-warm 的機制因此完全用不到，一起拿掉。 */
 
   /* ---------- 堆疊頁面初次進場的規則說明圖（桌機／平板／手機都會顯示；見 JS
      showPfRulesOverlay()/hidePfRulesOverlay() 完整說明） ----------
@@ -10446,202 +10383,85 @@
   // 下一次點擊會照 % 運算自動繞回 index 0，也就是自然回到白色，之後
   // 再點才會是黑色——完整符合「白色排在黑色前面、循環到底會繞回白色」
   // 這個新順序。
-  // ---------- 新增：循環清單裡混入一張「背景圖片」，不再只有純色 ----------
-  // 原本 PHOTO_FALL_BG_COLORS 每一項都是色碼字串，直接拿去設定
-  // backgroundColor。現在改成每一項是 { type, value } 物件：type 是
-  // 'color' 就沿用原本邏輯設 backgroundColor；type 是 'image' 則改設
-  // backgroundImage，並靠 background-size: cover 讓這張圖不管在什麼
-  // 螢幕比例（電腦橫式、平板、手機直式…）下都能維持原始比例、滿版鋪滿
-  // 整個畫面，比例對不上的方向直接裁掉兩側（或上下），不會被拉伸變形。
-  // 圖片本身放在 GitHub repo 根目錄（跟 /pf-rules.png 這些既有素材同一種
-  // 放法），這裡只放路徑，實際檔案由使用者自行上傳到對應的檔名生效。
-  // 三張圖片各自獨立一個項目、各自一個檔名，彼此互不影響，循環到哪一張
-  // 就照那一張的路徑去抓圖，之後要換某一張圖也只需要換掉那個檔名對應的
-  // 檔案，不會動到其他兩張。
-  // ---------- 調整：三張背景圖平均錯落穿插在純色中間，不再全部擠在最後面 ----------
-  // 原本 9 個純色排在前面、3 張圖片全部擠在陣列最後三格，代表使用者要連續
-  // 點滿 9 下純色之後才會第一次看到背景圖，前面很長一段都是純色。這裡把
-  // 白色以外的 8 個純色盡量平分成三段（3 個、3 個、2 個），每段結束後
-  // 插入一張背景圖，讓「點幾下純色、跳出一張圖、再點幾下純色、再跳出
-  // 下一張圖」平均錯落分布在整個循環裡，不會出現「圖片全部集中在後段」
-  // 的落差感。白色固定留在陣列第一項
-  // （index 0）不動——它同時是 PHOTO_FALL_BG_WHITE 的來源、也是離開堆疊
-  // 頁面時 resetPhotoFallBackgroundColor() 重設回去的起點，兩處都直接寫死
-  // 引用 PHOTO_FALL_BG_COLORS[0]，這個位置不能被其他項目取代。
+  // ---------- 大改：3 張背景圖改成分析出來的 CSS 漸層，不再是點陣圖 ----------
+  // 使用者上傳的這 3 張圖實際打開來看，本質上就是「單純由上到下的線性
+  // 漸層色塊」（拿實際圖檔在垂直中線上，從最上面到最下面每隔幾 % 取樣
+  // 一次像素顏色，結果證實了這件事——同一個 y 位置不管取樣哪個 x，顏色
+  // 幾乎完全相同，只有最外側 1px 邊緣因為圖檔匯出時的邊框假影跟中央顏色
+  // 不同，已經在取樣時排除、改用緊接著下面那一整片的真實顏色），完全沒有
+  // 具體拍攝內容、細節或紋理需要保留。既然如此，與其每次都要下載＋
+  // decode()＋鋪 GPU 材質才能畫出這張「其實就是幾個顏色公式」的圖，不如
+  // 直接讓瀏覽器用公式算出同樣的漸層——CSS linear-gradient 走的是純色計算
+  // 這條路徑，跟改變 background-color 屬於同一個等級的操作，完全沒有
+  // 圖片這個環節，也就從根本上不存在「要等圖片準備好」這件事，切換速度
+  // 理論上應該要跟純色背景完全一樣快，不會再有任何一絲 lag。
+  // 之前為了緩解「圖片切換會 lag」這個問題而加上的整套機制——preload
+  // link、ensurePhotoFallBackgroundImageReady()／decode()、opacity-based
+  // 合成圖層 pre-warm——全部一起拿掉，程式碼也因此變簡單很多；下面
+  // PHOTO_FALL_BG_COLORS 陣列的 type 從 'image' 改成 'gradient'，value 放
+  // 現成、直接可以指派給 style.background 的 CSS 漸層字串；另外多帶一個
+  // stops 陣列（[百分比, 色碼] 成對），供「長按截圖存成桌布」那個功能
+  // （見 capturePhotoFallWallpaper()）在 canvas 上用
+  // createLinearGradient()／addColorStop() 重建同一個漸層時使用——兩處
+  // （CSS 用的 value 字串、canvas 用的 stops 陣列）都是從同一份取樣資料
+  // 手動轉出來的，數值上完全對應，不會有「畫面看到的漸層」跟「截圖存下來
+  // 的漸層」長得不一樣的問題。之後如果想再換成別張圖的漸層，一樣可以
+  // 用同一套「垂直中線每隔幾 % 取樣一次顏色」的方法重新分析、更新這裡
+  // 的 value／stops，不需要改動其他任何程式碼。
   const PHOTO_FALL_BG_COLORS = [
     { type: 'color', value: '#ffffff' },
     { type: 'color', value: '#000000' },
     { type: 'color', value: '#b6f1ff' },
     { type: 'color', value: '#f93d3d' },
-    { type: 'image', value: '/pf-bg-photo-1.jpg' }, // 使用者提供的第 1 張 16:9 背景圖
+    { // 原 pf-bg-photo-1.jpg：由上到下、淺灰白漸暗到接近全黑、再微微回升到深灰
+      type: 'gradient',
+      value: 'linear-gradient(to bottom, #f2f2f2 0%, #ececec 5%, #dedede 10%, #bbbbbb 20%, #949494 30%, #6b6b6b 40%, #3f3f3f 50%, #111111 60%, #101010 70%, #272727 80%, #333333 90%, #333333 95%, #333333 100%)',
+      stops: [[0,'#f2f2f2'],[5,'#ececec'],[10,'#dedede'],[20,'#bbbbbb'],[30,'#949494'],[40,'#6b6b6b'],[50,'#3f3f3f'],[60,'#111111'],[70,'#101010'],[80,'#272727'],[90,'#333333'],[95,'#333333'],[100,'#333333']]
+    },
     { type: 'color', value: '#f7f746' },
     { type: 'color', value: '#c1c1c1' },
     { type: 'color', value: '#3640ff' },
-    { type: 'image', value: '/pf-bg-photo-2.jpg', darkText: true }, // 第 2 張：畫面偏暗，跟純黑背景一樣要讓上排文字變白色，見 darkText 用法
+    { // 原 pf-bg-photo-2.jpg：上半部全黑，下半部漸漸轉成淺藍；上半部偏暗，
+      // 沿用原本 darkText 設定讓上排文字維持白色
+      type: 'gradient',
+      value: 'linear-gradient(to bottom, #000000 0%, #000000 5%, #000000 10%, #000000 20%, #000000 30%, #000000 40%, #000000 50%, #080c0d 60%, #2b3c44 70%, #537080 80%, #79a6bd 90%, #89bcd7 95%, #98cae3 100%)',
+      stops: [[0,'#000000'],[5,'#000000'],[10,'#000000'],[20,'#000000'],[30,'#000000'],[40,'#000000'],[50,'#000000'],[60,'#080c0d'],[70,'#2b3c44'],[80,'#537080'],[90,'#79a6bd'],[95,'#89bcd7'],[100,'#98cae3']],
+      darkText: true
+    },
     { type: 'color', value: '#12ff5a' },
     { type: 'color', value: '#efe6c7' },
-    { type: 'image', value: '/pf-bg-photo-3.jpg', darkText: true }  // 第 3 張：同上，也要讓上排文字變白色
+    { // 原 pf-bg-photo-3.jpg：上半部深墨綠，下半部漸漸轉成亮黃綠；上半部
+      // 偏暗，沿用原本 darkText 設定讓上排文字維持白色
+      type: 'gradient',
+      value: 'linear-gradient(to bottom, #0b170d 0%, #0b170d 5%, #0b170d 10%, #0b170d 20%, #0e1a0e 30%, #1f2b17 40%, #3a4622 50%, #5c6631 60%, #818b42 70%, #adb756 80%, #dbe56a 90%, #e8f370 95%, #f4ff75 100%)',
+      stops: [[0,'#0b170d'],[5,'#0b170d'],[10,'#0b170d'],[20,'#0b170d'],[30,'#0e1a0e'],[40,'#1f2b17'],[50,'#3a4622'],[60,'#5c6631'],[70,'#818b42'],[80,'#adb756'],[90,'#dbe56a'],[95,'#e8f370'],[100,'#f4ff75']],
+      darkText: true
+    }
   ];
   const PHOTO_FALL_BG_WHITE = PHOTO_FALL_BG_COLORS[0].value; // 白色現在就是陣列本身第一項的 value，這裡直接引用同一份，不用維護兩份重複的色碼
   let pfBgColorIndex = 0; // 0 代表目前正停在陣列第一項（白色）；點一次背景，index 往後推進一格，超過陣列長度就從頭循環（見 advancePhotoFallBackgroundColor()）
-  // ---------- 修正：「這三張背景圖切換起來特別慢」＋「切過去先白一下才跳出來」 ----------
-  // 原本這三張圖只有使用者真的點擊循環切到它們（見下面
-  // advancePhotoFallBackgroundColor()）那一刻，才靠 CSS backgroundImage
-  // 第一次觸發瀏覽器下載——純色背景切換是瞬間生效（不用下載任何東西），
-  // 這三張背景圖卻是「點下去才臨時發出網路請求」，下載＋解碼需要的時間
-  // 才是使用者感受到「特別慢」的真正成因，不是程式邏輯本身的問題。
-  // ---------- 進一步修正：光靠「等 decode() 完成才寫入 CSS」還是沒用 ----------
-  // 原本的做法是：先用一個獨立的 Image() 物件背景暖機、呼叫它的
-  // decode()，等 decode 完成才把同一個網址寫進 photoFallStage 的 CSS
-  // background-image。這個做法在部分瀏覽器（尤其手機 Safari／WebKit）
-  // 上其實沒有真正解決問題：瀏覽器對「用 JS Image() 物件解碼過的點陣圖」
-  // 跟「拿同一個網址設進 CSS background-image」，兩者的解碼快取不一定是
-  // 同一份——CSS 背景圖走的是另一條資源管線，即使 HTTP 網路層有命中
-  // 快取（不用重新下載），WebKit 仍然可能在真正要畫出這個背景圖層時，
-  // 重新做一次解碼／合成，這一步驟本身還是會卡住、擋住畫面，看起來就是
-  // 「先白一下才跳出來」——症狀完全沒變，因為我們等的那個 decode()
-  // 其實跟畫面上真正要用到的這一份解碼是兩回事。
-  // 真正修法：不要再透過 CSS background-image 這個間接管道，改成直接把
-  // 「早就已經 decode() 完成的那個 <img> 元素本身」搬進畫面裡顯示——不是
-  // 用它的網址重新建一份新的圖層，而是直接複用同一個已經解碼好的 DOM
-  // 節點。瀏覽器沒有理由再重新解碼一份「同一個、根本沒變過」的點陣圖，
-  // 這樣才能保證套用的那一刻是真的、立即可畫，不會再有任何一種瀏覽器
-  // 上還殘留這個問題。
-  const pfBgImageReady = new Map(); // src -> Promise<{ok:boolean, img?:HTMLImageElement}>
-  function ensurePhotoFallBackgroundImageReady(src){
-    if(pfBgImageReady.has(src)) return pfBgImageReady.get(src);
-    const img = new Image();
-    img.alt = ''; // 純裝飾用背景圖，不需要對螢幕閱讀器朗讀任何內容
-    img.draggable = false;
-    try { img.fetchPriority = 'low'; } catch(e){} // 純背景暖機用，失敗也不影響任何既有功能
-    const p = new Promise((resolve) => {
-      img.onload = () => {
-        // decode() 讓這個 <img> 元素自己確實已經解碼完成——重點不是
-        // 「decode() 這個動作本身」，而是之後套用背景時，我們會直接搬動
-        // 「這一個元素」進畫面，不是用它的網址另外重建一份，所以這裡
-        // decode 完成之後，這個元素往後不管什麼時候被插進 DOM 顯示，都
-        // 一定是已經解碼好、可以立即畫出來的狀態。沒有 decode() 的舊
-        // 瀏覽器就直接視為已經可用（退回原本行為）。
-        if(img.decode){ img.decode().then(() => resolve({ ok: true, img }), () => resolve({ ok: true, img })); }
-        else resolve({ ok: true, img });
-      };
-      img.onerror = () => resolve({ ok: false }); // 下載失敗（例如檔案還沒上傳、路徑打錯），呼叫端會優雅退回白色
-    });
-    img.src = src;
-    pfBgImageReady.set(src, p);
-    return p;
-  }
-  // 比照全站既有「背景閒置時間預先暖機」的慣例（見下面
-  // prefetchAllInBackground()／warmMatterJS() 同一種手法），在瀏覽器真的
-  // 閒下來、不影響首屏渲染的時候，提前呼叫上面這個函式，讓這三張圖的
-  // 下載＋解碼提早在背景做完，跟 applyPhotoFallBackground() 共用同一份
-  // Promise 快取，不會重複下載、也不會重複解碼。
-  function prefetchPhotoFallBackgroundImages(){
-    PHOTO_FALL_BG_COLORS.forEach(entry => {
-      if(entry.type !== 'image') return;
-      ensurePhotoFallBackgroundImageReady(entry.value);
-    });
-  }
-  // 目前實際顯示在畫面上的那個背景圖 <img> 元素（同一個網址永遠對應
-  // 同一個元素，來自上面 pfBgImageReady 那份快取，不會重複建立）；換成
-  // 純色或换成另一張圖片時，先把它藏起來，不用整個移除重建。
-  let pfCurrentBgImgEl = null;
-  // ---------- 修正：讓多張背景圖之間、跟「插入 DOM 但保持隱藏」這個 pre-warm
-  // 動作共用同一套排序邏輯 ----------
-  // 這幾張背景圖 <img> 一律要疊在 photoFallStage 最前面（DOM 順序最早）：
-  // 掉落中的照片／飄動的 e 都是之後才 appendChild 進來的，只要背景圖們
-  // 全部排在它們前面，自然會被畫在下面，不會蓋住它們。目前的循環順序
-  // （見 PHOTO_FALL_BG_COLORS）保證任兩張背景圖之間一定隔著至少一個純色，
-  // 不會發生「兩張背景圖同時淡入淡出、彼此重疊」這種需要講究彼此上下順序
-  // 的情境，所以 3 張背景圖互相之間的先後順序不重要，只要都排在最前面即可。
-  // 已經在正確位置（本來就是第一個子節點）就直接跳過、不做任何 DOM 搬動
-  // ——挪動節點在部分瀏覽器上可能連帶讓它已經畫好的合成圖層被標記成需要
-  // 重新合成一次，沒事就不要動它，把「維持已經暖好的狀態」的效益留住。
-  function placePfBgImgAtStageFront(img){
-    if(photoFallStage.firstChild !== img){
-      photoFallStage.insertBefore(img, photoFallStage.firstChild);
-    }
-  }
-  function showPhotoFallBackgroundImageEl(img){
-    placePfBgImgAtStageFront(img);
-    img.classList.add('pf-bg-img'); // 樣式全部交給這個 class（見上面 CSS .photo-fall-stage .pf-bg-img 的說明），這裡只負責掛上去；用 add 而非整個覆蓋 className，保留萬一已經有的其他 class
-    if(pfCurrentBgImgEl && pfCurrentBgImgEl !== img){
-      pfCurrentBgImgEl.classList.remove('pf-bg-img-visible');
-    }
-    // ---------- 修正：「點下去還是會 lag 一下才變」 ----------
-    // 完整成因、修法見上面 CSS .photo-fall-stage .pf-bg-img 的說明：原本
-    // 這裡是切 img.style.display = 'block'，display:none→block 的元素在
-    // 「切過去的那一刻」才第一次真正進入渲染樹、被畫出來（鋪上 GPU 材質），
-    // 就算 decode() 早就做完，這一步的耗時還是會全部發生在使用者點下去的
-    // 當下。改成只切 class（opacity 0→1），只要這個元素之前已經被
-    // prewarmPhotoFallBackgroundLayers() 提早插進 DOM（見該函式），瀏覽器
-    // 早就趁隱藏的時候把它畫進獨立合成圖層了，這裡真正需要做的只剩「把
-    // 合成器裡已經有的這個圖層透明度調到 1」，是純合成器操作，效果應該要
-    // 跟純色背景切換一樣快、沒有肉眼可見的延遲。
-    img.classList.add('pf-bg-img-visible');
-    pfCurrentBgImgEl = img;
-  }
-  function hidePhotoFallBackgroundImageEl(){
-    if(pfCurrentBgImgEl){
-      // 只拿掉「顯示中」這個標記（opacity 淡回 0），元素本身留在 DOM 裡
-      // 不移除——這樣它已經被瀏覽器畫好的那個合成圖層可以繼續保留、
-      // 下次循環回到同一張圖片時不用重新來一次「第一次顯示」的成本。
-      pfCurrentBgImgEl.classList.remove('pf-bg-img-visible');
-      pfCurrentBgImgEl = null;
-    }
-  }
-  // ---------- 新增：進場後趁使用者還在點前面幾個純色背景的空檔，提早把
-  // 3 張背景圖都插進 DOM（opacity:0，不影響任何視覺），完整原因見上面 CSS
-  // .photo-fall-stage .pf-bg-img 的說明 ----------
-  // 只需要每個分頁執行一次：一旦某張圖被插入過，之後只靠切換
-  // pf-bg-img-visible 這個 class 顯示/隱藏，元素本身不會被移除，所以不用
-  // 每次進場都重跑一次。呼叫時機見 enterPhotoFallMode() 內對這個函式的
-  // 呼叫點——特地排到該函式最後面才呼叫，而且用 scheduleIdle 稍微延後，
-  // 不跟「e 開始掉落」這個使用者進場當下最先感覺到的動畫搶主執行緒。
-  let pfBgLayersPrewarmed = false;
-  function prewarmPhotoFallBackgroundLayers(){
-    if(pfBgLayersPrewarmed || !photoFallStage) return;
-    pfBgLayersPrewarmed = true;
-    PHOTO_FALL_BG_COLORS.forEach(entry => {
-      if(entry.type !== 'image') return;
-      ensurePhotoFallBackgroundImageReady(entry.value).then((result) => {
-        if(!result.ok) return; // 下載失敗，之後真的循環到這張時 applyPhotoFallBackground() 自己會處理退回白色
-        if(result.img === pfCurrentBgImgEl) return; // 剛好就是目前正顯示的這張（理論上不會，pre-warm 一律晚於初次進場），不用碰
-        placePfBgImgAtStageFront(result.img);
-        result.img.classList.add('pf-bg-img'); // 只加上基礎 class（opacity:0），不加 pf-bg-img-visible，維持隱藏
-      });
-    });
-  }
-  // 每次呼叫 applyPhotoFallBackground() 就遞增一次：圖片型背景要等
-  // Promise resolve 之後才真的套用（見下方說明），這段等待期間使用者
-  // 完全可能又點了好幾下、切到别的背景——沒有這個 token，等真的 resolve
-  // 時會不分青紅皂白直接套用，把使用者後來點的新背景蓋回這張早就過期的
-  // 舊圖。resolve 當下比對 token 還是不是「這一次呼叫當時」的最新值，
-  // 不是就直接放棄，不套用。
-  let pfBgApplyToken = 0;
-  // 真正把某一項背景（不管是純色還是圖片）套用到 photoFallStage 上：
-  // 抽成共用函式，advance／reset 兩處都呼叫這個，不用各自重複一份
-  // if(type==='image') 的判斷邏輯。
+  // 真正把某一項背景（不管是純色還是漸層）套用到 photoFallStage 上：抽成
+  // 共用函式，advance／reset 兩處都呼叫這個，不用各自重複一份判斷邏輯。
+  // 漸層現在直接比照純色處理——兩者都是瀏覽器用公式算出來的顏色，設定
+  // 上完全同一個等級，不再需要任何非同步等待（原本圖片版本需要等
+  // ensurePhotoFallBackgroundImageReady() 的 Promise resolve、還要處理
+  // 「等待期間使用者又切到別的背景」的 token 比對，現在整段都不需要了）。
   function applyPhotoFallBackground(entry){
     if(!photoFallStage) return;
-    pfBgApplyToken += 1;
-    const myToken = pfBgApplyToken;
-    if(entry.type === 'image'){
-      ensurePhotoFallBackgroundImageReady(entry.value).then((result) => {
-        if(myToken !== pfBgApplyToken) return; // 這段等待期間使用者已經切到别的背景，這次套用過期，放棄
-        if(result.ok){
-          showPhotoFallBackgroundImageEl(result.img);
-        } else {
-          // 這張圖片真的載入失敗（檔案不存在、路徑錯誤等），優雅退回白色，
-          // 不要讓畫面卡在「什麼都沒套用成功」的狀態。
-          hidePhotoFallBackgroundImageEl();
-          photoFallStage.style.backgroundColor = PHOTO_FALL_BG_WHITE;
-        }
-      });
+    if(entry.type === 'gradient'){
+      // 漸層走 background-image 這個管道（linear-gradient() 本質上是一種
+      // <image> 值，CSS 規格上跟真的圖片用同一個屬性），background-color
+      // 順手清空——這 3 個漸層本身完全不透明、滿版蓋住整個容器，理論上
+      // 就算不清也不會露出底色，這裡清空純粹是保持狀態單純、避免之後
+      // 萬一疊了半透明漸層時反而被忘記清空的舊顏色搞混。
+      photoFallStage.style.backgroundImage = entry.value;
+      photoFallStage.style.backgroundColor = '';
     } else {
-      hidePhotoFallBackgroundImageEl();
+      // 純色沿用原本 background-color 這條路徑，維持上面 CSS
+      // transition:background-color .16s ease 那個淡入淡出效果不變；
+      // background-image 順手清成 none，避免殘留上一次顯示的漸層。
+      photoFallStage.style.backgroundImage = 'none';
       photoFallStage.style.backgroundColor = entry.value;
-
     }
   }
   // 單擊畫面（不管點中的是空白背景還是某張漂浮物件，見下面 photoFallStage
@@ -11434,14 +11254,6 @@
     // 判斷用（見上面 pfEnterGeneration 宣告處的完整說明）。
     pfEnterGeneration++;
     document.body.classList.add('photo-fall-active');
-    // 進場當下就排入這個 pre-warm（完整原因見 prewarmPhotoFallBackgroundLayers()
-    // 上方的說明）：越早排進去，使用者點過前面幾個純色背景、真正循環到某張
-    // 背景圖之前，瀏覽器能拿來提早畫好那幾個隱藏圖層的空檔就越長。用
-    // scheduleIdle 而不是直接同步呼叫，是不想讓「建立/插入 3 個 <img>」
-    // 這件事跟下面 e 開始掉落、規則圖淡入這些使用者進場當下第一眼會看到的
-    // 動畫搶同一影格的主執行緒——反正只需要「盡快、但排在這幾個更優先的
-    // 動畫之後」，不需要真的立刻同步做完。
-    scheduleIdle(prewarmPhotoFallBackgroundLayers, { timeout: 300, fallbackDelay: 50 });
     // ---------- 修正：「規則圖出現之前，先點底下剛掉下來的堆疊照片就能
     // 觸發換一批」（手機版回報）----------
     // 成因：原本「滿版透明遮罩提早站上去擋點擊」這件事，是掛在
@@ -13191,14 +13003,11 @@
       // CORS 乾淨的版本可用（見上面 loadCorsSafeImageForCapture() 的完整
       // 說明）；同一張圖片同一次頁面停留期間只會真的 fetch 一次，之後
       // 每次長按都直接沿用快取，幾乎不會有感覺得到的延遲。
-      // 目前這一刻的背景（見 PHOTO_FALL_BG_COLORS／pfBgColorIndex）如果剛好
-      // 是那張圖片，擷取出來的桌布也要一起把這張背景圖畫上去，不能讓畫面上
-      // 看到的是圖片、截出來的桌布卻退回純色——這裡把它跟其餘物件的圖片
-      // 一起丟進同一輪 CORS 安全載入，共用同一份快取（同一張圖不會因為
-      // 「當背景」還是「當掉落物件」被重複下載兩次）。
+      // 背景（見 PHOTO_FALL_BG_COLORS／pfBgColorIndex）現在只會是純色或
+      // CSS 漸層兩種，都是算出來的顏色、不是圖片，不需要再額外丟進這輪
+      // CORS 安全載入——這裡只需要載入「掉落中的照片」本身用到的圖片。
       const pfCaptureBg = PHOTO_FALL_BG_COLORS[pfBgColorIndex];
       const uniqueSrcs = Array.from(new Set(entries.map(entry => entry.img.src)));
-      if(pfCaptureBg.type === 'image') uniqueSrcs.push(pfCaptureBg.value);
       Promise.all(uniqueSrcs.map(loadCorsSafeImageForCapture)).then((safeImgs) => {
         const srcToSafeImg = new Map(uniqueSrcs.map((src, i) => [src, safeImgs[i]]));
         entries.forEach(entry => { entry.safeImg = srcToSafeImg.get(entry.img.src); });
@@ -13219,25 +13028,24 @@
         canvas.width = canvasW;
         canvas.height = canvasH;
         const ctx = canvas.getContext('2d');
-        // ---------- 底色（或背景圖）改成跟擷取當下的堆疊背景一致 ----------
+        // ---------- 底色（或漸層）改成跟擷取當下的堆疊背景一致 ----------
         // 原本這裡固定寫死 '#ffffff'，不管使用者當時把背景換成哪個顏色，
         // 截出來的桌布底色永遠是白色，跟畫面上看到的不一致。現在改成直接
-        // 看 pfCaptureBg（見上面，已經在載入圖片那一輪順便讀出來）是純色
-        // 還是圖片：純色就跟原本一樣 fillRect；是圖片則用「cover」邏輯把它
-        // 畫滿整個畫布——取寬、高兩個縮放比例中較大的那一個，讓圖片兩個
-        // 方向都至少蓋滿畫布，比例對不上的方向置中裁掉超出的部分，跟畫面上
-        // CSS background-size:cover 的視覺效果一致。圖片萬一 CORS 讀取失敗
-        // （safeImg 是 null），優雅退回白色，不讓整個擷取失敗。
-        const pfCaptureBgImg = pfCaptureBg.type === 'image' ? srcToSafeImg.get(pfCaptureBg.value) : null;
-        if(pfCaptureBg.type === 'image' && pfCaptureBgImg){
-          const bgScale = Math.max(canvasW / pfCaptureBgImg.width, canvasH / pfCaptureBgImg.height);
-          const bgDrawW = pfCaptureBgImg.width * bgScale;
-          const bgDrawH = pfCaptureBgImg.height * bgScale;
-          ctx.drawImage(pfCaptureBgImg, (canvasW - bgDrawW) / 2, (canvasH - bgDrawH) / 2, bgDrawW, bgDrawH);
+        // 看 pfCaptureBg 是純色還是漸層：純色跟原本一樣 fillRect；漸層則用
+        // canvas 的 createLinearGradient() 搭配 PHOTO_FALL_BG_COLORS 裡
+        // 同一份 stops 資料（[百分比,色碼] 陣列）重建同一個垂直漸層再
+        // fillRect——跟畫面上 CSS linear-gradient() 用的是同一份色標數值，
+        // 保證截圖跟畫面看到的顏色完全一致。兩種情況都不再需要載入任何
+        // 圖片，也就不會有「CORS 讀取失敗」這種需要優雅退回白色的邊界
+        // 情況（漸層／純色都是本地算出來的，沒有跨網域讀取這回事）。
+        if(pfCaptureBg.type === 'gradient'){
+          const grad = ctx.createLinearGradient(0, 0, 0, canvasH);
+          pfCaptureBg.stops.forEach(([pct, color]) => grad.addColorStop(pct / 100, color));
+          ctx.fillStyle = grad;
         } else {
           ctx.fillStyle = pfCaptureBg.type === 'color' ? pfCaptureBg.value : PHOTO_FALL_BG_WHITE;
-          ctx.fillRect(0, 0, canvasW, canvasH);
         }
+        ctx.fillRect(0, 0, canvasW, canvasH);
 
         // ---------- 對齊方式：左、右、下三邊都精準貼齊，只有上方可能留白 ----------
         // 原本這裡是「整批置中＋兩軸都留白」（跟 CSS object-fit:contain 一樣
@@ -13287,7 +13095,7 @@
         canvas.toBlob((blob) => {
           if(!blob) return;
           // 傳給 showWallpaperPreview() 的只需要「是不是白色」這個判斷用的
-          // 色碼字串：純色背景直接傳它自己的色碼；圖片背景沒有這個概念，
+          // 色碼字串：純色背景直接傳它自己的色碼；漸層背景沒有這個概念，
           // 傳一個必定不等於 PHOTO_FALL_BG_WHITE 的值即可（隨便一個顏色都
           // 行，這裡直接用 null），讓彈窗底色維持原本近白色的預設樣式。
           showWallpaperPreview(URL.createObjectURL(blob), pfCaptureBg.type === 'color' ? pfCaptureBg.value : null); // 多帶一個擷取當下的底色，
@@ -15817,26 +15625,6 @@
     // 路徑，這裡只是「能先準備就先準備」的加分項，不是必要條件。
     const warmMatterJS = () => { loadMatterJS().catch(() => {}); };
     scheduleIdle(warmMatterJS, { timeout: 4000, fallbackDelay: 2000 });
-
-    // ---------- 修正：「這三張背景圖切過去還是會先白一下才跳出來」 ----------
-    // 原本這裡跟 warmMatterJS 用一模一樣的 scheduleIdle(...,{timeout:4000,
-    // fallbackDelay:2000}) 延後觸發：桌機最晚也要等到 4000ms、沒有
-    // requestIdleCallback 的手機 Safari 更是要排在 Matter.js／網格建置
-    // 這些工作後面才輪到，等於「使用者只要進站後很快雙擊飄動的 e、又快速
-    // 點過前面幾個純色背景」，切到這 3 張圖片時，JS 這邊連下載都還沒開始
-    // 觸發，當然只能先看著空白（退回目前背景色，見 applyPhotoFallBackground()）
-    // 等網路跟解碼都跑完才跳出來。
-    // 這 3 張圖現在已經在 <head> 用原生 <link rel="preload" as="image"
-    // fetchpriority="low"> 提前觸發下載（見該處完整說明）——網路層的
-    // 「何時開始抓、跟誰搶頻寬」已經交給瀏覽器自己的資源優先權機制處理，
-    // 不需要再靠 JS 這層 idle 排程去人工延後起跑點。這裡改成直接呼叫，
-    // 讓 ensurePhotoFallBackgroundImageReady() 裡建立 <img>／掛
-    // decode() 這件事盡快發生：因為網址跟 <head> 那三個 preload 完全
-    // 相同，瀏覽器會直接沿用那邊已經在跑（或已經跑完）的下載，不會重複
-    // 發送網路請求，decode() 也會因為 bytes 早就到位而幾乎立即完成。
-    // 呼叫本身只是建立 3 個 Image() 物件、指定 src，不做任何同步運算，
-    // 不會佔用主執行緒、也不會影響上面 preview／網格的載入優先順序。
-    prefetchPhotoFallBackgroundImages();
 
     // ---------- 進站預設先看到 preview 頁，點一下才到首頁 ----------
     // 原本只有網址是 #preview 時才會自動開 preview；現在改成不管網址有沒有
