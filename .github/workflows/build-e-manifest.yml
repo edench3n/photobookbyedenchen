@@ -2,8 +2,8 @@ name: Build e-manifest
 
 on:
   workflow_dispatch: {}
-  # schedule:
-  #   - cron: '0 18 * * *'  # 每天 UTC 18:00（台北時間凌晨 2:00）
+  schedule:
+    - cron: '0 18 * * *'  # 每天 UTC 18:00（台北時間凌晨 2:00）
 
 permissions:
   contents: write
@@ -25,6 +25,11 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: node scripts/build-e-manifest.js
 
+      - name: Run build-photos-manifest.js
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: node scripts/build-photos-manifest.js
+
       - name: Install canvas (needed by build-masks.js)
         run: npm install canvas
 
@@ -35,11 +40,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add e-manifest.json e-images/ masks.json
+          git add e-manifest.json e-images/ masks.json photos-manifest.json photos/
           if git diff --cached --quiet; then
             echo "沒有變動，不 commit。"
           else
-            git commit -m "chore: update e-manifest + masks (automated)"
+            git commit -m "chore: update e-manifest + masks + photos-manifest (automated)"
 
             n=0
             until git push; do
