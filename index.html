@@ -1842,11 +1842,20 @@
     color:#111;
     cursor:pointer;
     line-height:1;
-  }
-  .wallpaper-preview-btn img{
-    display:block;
-    -webkit-user-drag:none;
+    /* 按鍵圖示改用 background-image 呈現（見下方 #wallpaperDownloadBtn /
+       #wallpaperCloseBtn），而不是 <img> 標籤：這樣瀏覽器就沒有「圖片
+       元素」可以右鍵另存、手機長按也不會跳出「儲存圖片」選單，同時
+       完全不影響按鍵本身的點擊/下載功能。下面幾行是額外再擋一層手機
+       Safari 的長按選單（-webkit-touch-callout）跟選取/拖曳，避免使用者
+       長按到按鍵本身時跳出系統選單。 */
+    -webkit-touch-callout:none;
+    -webkit-user-select:none;
     user-select:none;
+    -webkit-user-drag:none;
+    user-drag:none;
+    background-repeat:no-repeat;
+    background-position:center;
+    background-size:contain;
   }
   /* download.png 原始尺寸 3243×1130px、back.png 原始尺寸 1618×780px——
      兩張圖字重／留白比例不同，如果各自獨立設成同一個 height，會把
@@ -1854,9 +1863,16 @@
      只鎖 download 的寬度（92px，換算下來高度跟之前的 32px 幾乎一樣），
      back 用同一個縮放比例（92÷3243）換算出對應寬度（約 46px），兩者
      的相對大小就會完全貼合原始 px 尺寸的比例，整體視覺大小也跟之前
-     差不多。 */
-  #wallpaperDownloadBtn img{ width:92px; height:auto; }
-  #wallpaperCloseBtn img{ width:46px; height:auto; }
+     差不多。改成 background-image 之後沒有 <img> 的 auto 高度可以用，
+     這裡改成直接按原始比例算出固定的 width/height。 */
+  #wallpaperDownloadBtn{
+    background-image:url('/download.png');
+    width:92px; height:32px;
+  }
+  #wallpaperCloseBtn{
+    background-image:url('/back.png');
+    width:46px; height:22px;
+  }
 
   /* ---------- 手機版：桌布截圖預覽彈窗，截圖縮小、下方按鈕跟著調整 ----------
      桌機／平板維持原本 min(92vw,820px) / 80vh 的大小不變。手機版螢幕本來就窄，
@@ -1877,8 +1893,8 @@
     .wallpaper-preview-actions{
       gap:22px;
     }
-    #wallpaperDownloadBtn img{ width:68px; }
-    #wallpaperCloseBtn img{ width:34px; }
+    #wallpaperDownloadBtn{ width:68px; height:24px; }
+    #wallpaperCloseBtn{ width:34px; height:16px; }
   }
 
 
@@ -1947,7 +1963,13 @@
        手機用另外準備的 pf-rules-mobile.png（字級／版面針對手機螢幕重新
        設計過，見 JS 內 PF_RULES_IMG_SRC 的說明）。 -->
   <div class="pf-rules-overlay" id="pfRulesOverlay" aria-hidden="true">
-    <img id="pfRulesOverlayImg" src="/pf-rules.png" alt="one tap object to switch / double tap object to exit / one tap background to change color / hold to save" draggable="false">
+    <!-- 修正：原本這裡寫死 src="/pf-rules.png"（桌機版），會讓瀏覽器一解析到
+         這個標籤就搶跑下載桌機版圖片，即使外層 display:none 也擋不住。網路差
+         時如果手機版 pf-rules-mobile.png 還沒載完，瀏覽器會拿這張早就載好的
+         桌機版頂著畫面，造成「先閃過電腦版、才跳成正確的手機版」。故意不給
+         初始 src，圖片一律由 JS（showPfRulesOverlay() / preloadPfRulesImages()）
+         依裝置動態指定，見下方完整說明。 -->
+    <img id="pfRulesOverlayImg" alt="one tap object to switch / double tap object to exit / one tap background to change color / hold to save" draggable="false">
   </div>
 
   <!-- 堆疊頁面長按擷取畫面之後才會出現的桌布預覽彈窗，平常是空的、
@@ -1955,8 +1977,8 @@
   <div class="wallpaper-preview-overlay" id="wallpaperPreviewOverlay" aria-hidden="true">
     <img class="wallpaper-preview-img" id="wallpaperPreviewImg" alt="">
     <div class="wallpaper-preview-actions">
-      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg"><img src="/download.png" alt="download" draggable="false"></a>
-      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn"><img src="/back.png" alt="back" draggable="false"></button>
+      <a class="wallpaper-preview-btn" id="wallpaperDownloadBtn" download="wallpaper.jpg" role="img" aria-label="download" oncontextmenu="return false"></a>
+      <button type="button" class="wallpaper-preview-btn secondary" id="wallpaperCloseBtn" role="img" aria-label="back" oncontextmenu="return false"></button>
     </div>
   </div>
 
@@ -10240,6 +10262,52 @@
 
   let photoFallState = 'idle'; // 'idle' | 'entering' | 'active' | 'exiting' | 'reshuffling'（單擊換批，見 reshufflePhotoFallBatch()）
   let photoFallModeActive = false; // entering/active/exiting 這整段期間都是 true
+  // ---------- Bug 修正：「換批換到一半，之後不管怎麼單擊都沒反應、整個
+  // 堆疊頁面卡死」----------
+  // 使用者實測回報：換到某一批之後（尤其是那批裡有照片載入比較慢的時候），
+  // 再單擊畫面，完全沒有任何反應——換批動畫沒有播、也沒有換新照片，像
+  // 當機一樣。reshufflePhotoFallBatch() 內部本來就有一組「保底逾時」機制
+  // （checkOldOut 輪詢＋triggerReshuffleFallback 的絕對上限，約 10 秒），
+  // 理論上就算舊照片卡住掉不出畫面，最多等 10 秒也會被強制收尾、換上新一批、
+  // 把 photoFallState 改回 'active'，讓後續單擊恢復正常。
+  // 但這組保底機制本身是在 reshufflePhotoFallBatch() 函式「執行到一半」才
+  // 建立的（見該函式最後兩行 setTimeout）——如果函式從一開始到那兩行之間
+  // 任何一步意外拋出例外（例如某張照片的 aspect 快取查不到、Matter body
+  // 建立失敗等各種想不到的邊角情況），後面這兩個 setTimeout 根本來不及
+  // 被排上去，整組保底機制形同沒生效，photoFallState 會永遠卡在
+  // 'reshuffling'——因為單擊換批 reshufflePhotoFallBatch() 本身要求
+  // photoFallState==='active' 才會真的執行（見該函式開頭），一旦卡在
+  // 'reshuffling'，之後不管點幾次都會被直接忽略，就是使用者看到的
+  // 「怎麼點都沒反應」。
+  // 修法：另外加一道完全獨立、不依賴 reshufflePhotoFallBatch() 內部有沒有
+  // 順利跑完的「外部看門狗」——每秒檢查一次，只要偵測到 photoFallState
+  // 卡在 'reshuffling' 超過一個寬裕的上限（比內部保底逾時的 10 秒再多一點，
+  // 12 秒），不管內部那組計時器狀態如何，一律直接強制把畫面收乾淨、換上
+  // 新的一批（或退回 'active'，讓使用者至少能繼續互動），確保「卡死」這
+  // 個症狀最壞情況下也只會多等幾秒、絕對不會永久卡住。
+  let pfReshuffleWatchdogSince = 0; // 0 代表目前沒有在 reshuffling；否則記錄「進入 reshuffling 那一刻」的時間戳記
+  const PF_RESHUFFLE_WATCHDOG_MS = 12000;
+  setInterval(() => {
+    if(photoFallState !== 'reshuffling'){ pfReshuffleWatchdogSince = 0; return; }
+    if(!pfReshuffleWatchdogSince){ pfReshuffleWatchdogSince = Date.now(); return; }
+    if(Date.now() - pfReshuffleWatchdogSince < PF_RESHUFFLE_WATCHDOG_MS) return;
+    // 逾時仍卡在 'reshuffling'：內部保底機制顯然沒有正常生效，這裡直接
+    // 強制收尾。優先呼叫 finishReshuffleOldBatch()（跟正常換批完成時走
+    // 同一條路，會清乾淨舊照片、換上新一批）；萬一連這個函式本身都拿不到
+    // 乾淨的資料（例如 pfEngine 這時已經是 null），退而求其次直接把狀態
+    // 扳回 'active'，至少讓使用者接下來的單擊能重新正常運作，不會永久卡死。
+    pfReshuffleWatchdogSince = 0;
+    try{
+      if(pfEngine){
+        const freshBatch = pickReshuffleBatch(photoFallCount() + 1);
+        finishReshuffleOldBatch(pfItems, freshBatch, {});
+      } else {
+        photoFallState = 'active';
+      }
+    } catch(err){
+      photoFallState = 'active';
+    }
+  }, 1000);
   // ---------- 修正：「從堆疊頁面按 Preview 之後，飄動的 e 撞邊界永遠不會換照片」----------
   // 成因：cycleDvdEImage() 傳給 setDvdBounceImageSrc() 的 shouldApply（見該處
   // 呼叫點的完整說明）原本寫的是 `() => !photoFallModeActive`——本意只是想擋掉
@@ -10889,9 +10957,19 @@
   // 真正呼叫 showPfRulesOverlay() 時圖片多半已經在快取裡，把 <img src>
   // 換過去幾乎是瞬間顯示，opacity 的淡入 transition 才會是使用者實際
   // 感覺到的唯一時間軸，兩種裝置的淡入時長才會一致。
+  // 修正：「網路不好時規則圖一開始顯示成另一個裝置的版本，過一下才跳成
+  // 正確版本」——原因是 showPfRulesOverlay() 把 <img src> 換成當下裝置該
+  // 用的那張後，如果新圖片網路還沒載完，瀏覽器會先沿用「上一張已經解碼
+  // 好」的舊圖頂著畫面（常是另一張早就載完的圖），等新圖真正載完才整個
+  // 換掉，畫面上就會看到「先閃過一種版本、才跳成正確版本」。
+  // 這裡額外記錄每張圖片「是否真的已經下載完成」，showPfRulesOverlay()
+  // 顯示前會檢查這個狀態，沒載完就先等它載完再顯示，見該函式內說明。
+  const pfRulesImgLoaded = {};
   (function preloadPfRulesImages(){
     [PF_RULES_IMG_SRC.desktop, PF_RULES_IMG_SRC.mobile].forEach((src) => {
+      pfRulesImgLoaded[src] = false;
       const preloadImg = new Image();
+      preloadImg.onload = () => { pfRulesImgLoaded[src] = true; };
       preloadImg.src = src;
     });
   })();
@@ -10903,13 +10981,34 @@
   let pfRulesInteractableTimer = null; // 淡入播完、把 pfRulesInteractable 設成 true 的計時器
 
   function showPfRulesOverlay(){
-    if(!pfRulesOverlay) return;
-    if(pfRulesOverlayImg){
-      // 每次顯示前才依當下裝置決定要哪一張圖（而不是寫死在 HTML 裡），
-      // 這樣如果使用者中途轉螢幕方向、或是在桌機／手機切版寬度上下
-      // 遊走，之後每次重新觸發都還是抓到當下正確的那一張。
-      pfRulesOverlayImg.src = isDetailMobile() ? PF_RULES_IMG_SRC.mobile : PF_RULES_IMG_SRC.desktop;
+    if(!pfRulesOverlay || !pfRulesOverlayImg) return;
+    // 每次顯示前才依當下裝置決定要哪一張圖（而不是寫死在 HTML 裡），
+    // 這樣如果使用者中途轉螢幕方向、或是在桌機／手機切版寬度上下
+    // 遊走，之後每次重新觸發都還是抓到當下正確的那一張。
+    const targetSrc = isDetailMobile() ? PF_RULES_IMG_SRC.mobile : PF_RULES_IMG_SRC.desktop;
+    pfRulesOverlayImg.src = targetSrc;
+    // 修正核心：確認「這次要顯示的那張圖」真的下載完成了才往下顯示。
+    // 已經載完（多半是網路正常、或 preloadPfRulesImages() 早就抓好）就
+    // 立刻顯示；還沒載完（網路不好，preload 也還沒抓完）就先掛 load
+    // 監聽器等它載完再顯示，避免瀏覽器在等待期間拿另一張舊圖頂著畫面，
+    // 造成使用者先看到錯的裝置版本。額外加 3 秒保險逾時，避免圖片萬一
+    // 載入失敗、規則圖畫面永遠卡住不出現。
+    if(pfRulesImgLoaded[targetSrc]){
+      revealPfRulesOverlay();
+    } else {
+      let revealed = false;
+      const doReveal = () => {
+        if(revealed) return;
+        revealed = true;
+        pfRulesImgLoaded[targetSrc] = true;
+        revealPfRulesOverlay();
+      };
+      pfRulesOverlayImg.addEventListener('load', doReveal, { once:true });
+      setTimeout(doReveal, 3000);
     }
+  }
+
+  function revealPfRulesOverlay(){
     markPfRulesShownThisTab(); // 這次頁面載入顯示過了，記下來，同一次載入之後不用再顯示（重新整理會重跑 JS、旗標歸零，見上面完整說明）
     clearTimeout(pfRulesHideTimer);
     pfRulesHideTimer = null;
