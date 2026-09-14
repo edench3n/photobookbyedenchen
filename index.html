@@ -51,6 +51,26 @@
      才會知道，這是整個頁面「第一張照片出現前」最前面、會卡住後面所有事情
      的一個網路請求；先建好連線，能省下這個關鍵請求的 TCP/TLS 交握時間。 -->
 <link rel="preconnect" href="https://www.googleapis.com" crossorigin>
+<!-- 🌟 飄動的「e」撞牆換圖用的圖片清單＋碰撞遮罩，現在都是跟本站同源的
+     靜態檔案（完整脈絡見 JS dvdEImageUrlToId 宣告處的說明：原本這兩份
+     資料要進站當下才現查 Google Drive API，來回時間不穩定，使用者反應
+     「剛進站、飄動物件第一下撞擊常常沒換照片」正是這個原因），這裡用
+     rel="preload" 讓瀏覽器解析到 HTML 的當下就直接開始下載，完全不用等
+     JS 執行到 fetchDvdEImages()／precomputedEMasksPromise 那幾行才觸發。
+     e-manifest.json 很小（幾十 KB），是決定「有哪些圖可以換」的清單，
+     直接決定 cycleDvdEImage() 候選數量夠不夠，優先度維持預設（不刻意
+     調低）；masks.json 幾 MB，只影響碰撞邊界的精細度（查不到就退回即時
+     運算，不影響「換不換得了圖」這件事本身，見 requestAlphaMask() 的
+     說明），標成 fetchpriority="low"，不跟上面這兩個更關鍵的資源搶頻寬。
+     as="fetch" 搭配 crossorigin：JS 那邊是用 fetch() 讀這兩個檔案，
+     as 屬性要跟實際發出請求的方式一致，瀏覽器才會把這裡預先抓好的資源
+     跟之後 JS fetch() 同一個網址對上、直接沿用、不重新下載一次；fetch
+     請求預設就是 anonymous 模式的 CORS 請求，這裡的 preload 也要標
+     crossorigin 才會被瀏覽器視為同一份資源（沒有這個屬性，preload 抓到
+     的會被歸類成不同的快取項目，之後 fetch() 照樣得重新發一次請求，
+     等於白 preload）。 -->
+<link rel="preload" as="fetch" href="/e-manifest.json" crossorigin>
+<link rel="preload" as="fetch" href="/masks.json" crossorigin fetchpriority="low">
 <!-- 全站字體 Stack Sans Text：這次要用到 260、350 這種非標準字重數值，
      改成用可變字重（variable font）的範圍語法載入，瀏覽器可以在範圍內
      內插出任意數字的字重，不用侷限在 400/500/700 這些固定字重。
@@ -2057,21 +2077,26 @@
   const DRIVE_CACHE_KEY = 'photobook-cache-v1:' + GOOGLE_DRIVE_FOLDER_ID;
   const DRIVE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 分鐘：同一次瀏覽（含來回切換頁面）都能吃到快取，又不會放到隔天還在用舊清單
 
-  // ---------- 飄動的「e」撞牆換圖用的圖片庫（獨立的 Google Drive 資料夾） ----------
-  // 跟上面照片牆用的是完全不同的一個資料夾：把要讓「e」撞到邊界時輪流換上的
-  // PNG 直接丟進這個資料夾就好，不用改任何程式碼、也不會影響上面的照片牆。
-  // 共用同一把 GOOGLE_API_KEY 即可（Google Drive API 的公開檔案清單查詢，
-  // key 本身不綁定資料夾，同一把 key 可以查詢任何一個公開分享的資料夾）。
-  const EDEN_E_FOLDER_ID = '1QXgbx5t6KC5q07gyhGL6tXqo_YUKzpKH';
-
-  // ---------- 預算好的碰撞遮罩（離線用 Puppeteer 算好，放在同一個 Drive 資料夾） ----------
-  // dvdEImageUrlToId：這次頁面載入真的打了 Drive API 查詢時，記錄「這張圖片
-  // 的網址 → Drive file id」，供下面 recordDvdEMaskMapping() 用來把「裁切完
-  // 之後的網址」(trimTransparentImage()/trimLoadedImage() 的回傳值) 對應回
-  // 原始的 file id，這樣 requestAlphaMask() 才能用 file id 查表拿現成遮罩。
-  // 讀到 sessionStorage 快取（EDEN_E_CACHE_KEY）時這份 Map 會是空的——這是
-  // 已知、無害的降級：那次頁面載入單純會少了「跳過即時算遮罩」這個優化，
-  // 行為（畫面效果）完全不受影響，只是那幾張圖照舊即時算。
+  // ---------- 大改：飄動的「e」撞牆換圖用的圖片庫，改成同源靜態檔案 ----------
+  // 原本這批圖（跟碰撞遮罩）放在一個獨立的 Google Drive 資料夾，進站當下
+  // 才臨時打 Drive API 查清單、抓 masks.json——即使已經有低優先度抓取、
+  // sessionStorage 快取等好幾輪緩解，Drive API 本身的來回時間還是不夠
+  // 穩定，使用者反應「剛進站、飄動物件第一下撞擊常常沒換照片」，成因就是
+  // 這幾個 Drive API 請求還沒回來，已就緒池（dvdEImages）候選數量不足，
+  // 被 cycleDvdEImage() 的保護判斷擋下（完整成因見該函式旁的說明）。
+  // 現在改成離線批次工具（scripts/build-e-manifest.js／scripts/build-masks.js，
+  // 由 .github/workflows/build-e-manifest.yml 自動跑）把整批圖片＋碰撞
+  // 遮罩下載＋算好，直接存成這個 repo 裡的靜態檔案：
+  //   - e-images/<driveFileId>.<ext>   每張圖片本體
+  //   - e-manifest.json                {generatedAt, folderId, images:[{id,file,contentType}]}
+  //   - masks.json                     {<driveFileId>: {mask,w,h,boundary,fullBBox}}
+  // id 刻意沿用原始 Drive file id 當 key，讓 dvdEImageUrlToId／
+  // dvdETrimmedSrcToId／recordDvdEMaskMapping()／requestAlphaMask() 這整套
+  // 既有的「file id 查表」邏輯完全不用改，只需要換掉「id 從哪裡來、
+  // masks.json 從哪裡抓」這兩個源頭。跟自己網站同源的靜態檔案，瀏覽器
+  // 解析到 HTML 就能直接命中 HTTP 快取／<head> 的 preload（見該處），不用
+  // 再等 Drive API 的查詢＋認證來回，這才是真正解決「第一下撞擊沒換圖」
+  // 的關鍵。
   const dvdEImageUrlToId = new Map();
   const dvdETrimmedSrcToId = new Map();
   function recordDvdEMaskMapping(originalUrl, trimmedSrc){
@@ -2080,31 +2105,24 @@
     if(id) dvdETrimmedSrcToId.set(trimmedSrc, id);
   }
 
-  // precomputedEMasksPromise：非同步去 Drive 資料夾裡找一個叫 masks.json 的
-  // 檔案（用 build-masks.js 那支工具離線算好、手動上傳進去的），抓到內容
-  // 之後轉成 Map（file id -> {mask,w,h}）存進 precomputedEMasks。跟下面
-  // dvdEImagesPromise 一樣「越早發出去越好」，這裡直接在宣告完就呼叫，
-  // 不等 init()。找不到檔案、解析失敗、或任何一步出錯，都直接回傳 null，
-  // 下面 requestAlphaMask() 查不到就會照舊退回即時算，不影響網站運作。
+  // precomputedEMasksPromise：直接抓同源的靜態 masks.json（build-masks.js
+  // 離線算好、由 GitHub Actions 自動 commit 進這個 repo），抓到內容之後
+  // 轉成 Map（file id -> {mask,w,h,boundary,fullBBox}）存進
+  // precomputedEMasks。跟下面 dvdEImagesPromise 一樣「越早發出去越好」，
+  // 這裡直接在宣告完就呼叫，不等 init()；同一個網址在 <head> 也用
+  // <link rel="preload"> 提早觸發下載（見該處說明），這裡的 fetch 會直接
+  // 命中那份已經在下載中／下載完成的資源，不會重複發送請求。找不到檔案、
+  // 解析失敗、或任何一步出錯，都直接回傳 null，下面 requestAlphaMask()
+  // 查不到就會照舊退回即時算，不影響網站運作，只是那幾張圖的碰撞邊界會
+  // 比較粗略。mask 欄位是位元打包過的 base64 字串，實際使用時要先經過
+  // decodeMaskBits() 還原（見該函式的完整說明），這裡只負責原樣存進 Map，
+  // 不用先展開，展開放到真正要用時才做，避免用不到的圖也白白解碼。
   let precomputedEMasks = null;
   const precomputedEMasksPromise = (async () => {
-    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
-       !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
-      return null;
-    }
     try{
-      const q = encodeURIComponent(`'${EDEN_E_FOLDER_ID}' in parents and name = 'masks.json' and trashed = false`);
-      const fields = encodeURIComponent('files(id)');
-      const listUrl = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&key=${GOOGLE_API_KEY}`;
-      const listRes = await fetch(listUrl, { priority: 'low' });
-      if(!listRes.ok) return null;
-      const listData = await listRes.json();
-      const fileId = listData.files && listData.files[0] && listData.files[0].id;
-      if(!fileId) return null;
-      const contentUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}`;
-      const contentRes = await fetch(contentUrl, { priority: 'low' });
-      if(!contentRes.ok) return null;
-      const json = await contentRes.json();
+      const res = await fetch('/masks.json', { priority: 'low' });
+      if(!res.ok) return null;
+      const json = await res.json();
       const map = new Map();
       Object.keys(json).forEach(id => map.set(id, json[id]));
       precomputedEMasks = map;
@@ -2113,12 +2131,6 @@
       return null;
     }
   })();
-  const EDEN_E_CACHE_KEY = 'photobook-e-cache-v3:' + EDEN_E_FOLDER_ID; // v1→v2：來源縮圖尺寸從 =s240 改成 =s1600；
-    // v2→v3：再從 =s1600 微調成 =s1400，理由同上一次升版——版本號跟著换，
-    // 才不會讓還留著舊版 sessionStorage 快取的使用者，繼續沿用裡面存的舊 =s1600 網址，完全吃不到這次調整的效果。
-    // （見 fetchDvdEImages() 內對應的完整說明）
-  const EDEN_E_CACHE_TTL_MS = 10 * 60 * 1000;
-  // 跟下面 photosPromise 的道理完全一樣：請求越早發出去越好，不要等整份
   // script 執行到 init() 才姍姍來遲——這裡先把 Promise 存起來，真正用到
   // 結果是在 init() 內 await 它。
   // 正式部署用檔案：Drive 圖片庫抓得到就用真圖，抓不到（資料夾沒設定、
@@ -2983,165 +2995,33 @@
     }
   }
 
-  // ---------- 讀取「e」圖片庫（撞牆換圖用）的快取 ----------
-  // 邏輯跟上面 readDriveCache()/writeDriveCache() 完全一樣，只是換一組
-  // key／TTL，兩份快取彼此獨立，互不覆蓋。
-  // 修法（對應上面「預算好的碰撞遮罩」段落）：這層 session 快取原本只存了
-  // 網址、沒有存對應的 Drive file id，導致只要命中這層快取，dvdEImageUrlToId
-  // 這張對照表就是空的——就算 masks.json 已經上傳、內容也是對的，
-  // requestAlphaMask() 一樣查不到 id，只能整批退回即時算 alpha mask，完全
-  // 沒吃到離線預算好的資料。這裡把 file id 一起存進快取、讀取時一併還原
-  // 回 dvdEImageUrlToId，讓命中 session 快取時 masks.json 查表照樣能生效，
-  // 即時運算只留給「masks.json 還沒抓回來」「新照片還沒收錄進 masks.json」
-  // 這兩種真正需要備援的情況。
-  function readDvdECache(){
-    try{
-      const raw = sessionStorage.getItem(EDEN_E_CACHE_KEY);
-      if(!raw) return null;
-      const parsed = JSON.parse(raw);
-      if(!parsed || !Array.isArray(parsed.urls) || typeof parsed.savedAt !== 'number') return null;
-      if(Date.now() - parsed.savedAt > EDEN_E_CACHE_TTL_MS) return null;
-      // 把快取裡存的 file id 還原回 dvdEImageUrlToId，讓 recordDvdEMaskMapping()／
-      // requestAlphaMask() 能繼續查到對應的 masks.json 資料。舊版（補這個欄位
-      // 之前）寫入的快取不會有 ids，用 length 比對保護，沒有就靜靜跳過，退回
-      // 原本「這批圖沒有 id 對照、全部即時算」的行為，不會壞掉。
-      if(Array.isArray(parsed.ids) && parsed.ids.length === parsed.urls.length){
-        parsed.urls.forEach((url, i) => {
-          const id = parsed.ids[i];
-          if(url && id) dvdEImageUrlToId.set(url, id);
-        });
-      }
-      return parsed.urls;
-    }catch(err){ return null; }
-  }
-  function writeDvdECache(urls, ids){
-    try{
-      sessionStorage.setItem(EDEN_E_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), urls: urls, ids: ids || [] }));
-    }catch(err){ /* 私密瀏覽模式等情況，忽略即可 */ }
-  }
-
-  // 抓「e」圖片庫資料夾內所有 PNG／圖片檔案，回傳一組可以直接拿來當
-  // <img src> 用的網址陣列。刻意跟上面照片牆的 fetchDriveImages() 分開
-  // 寫成兩個獨立函式：這裡只需要「網址」，不需要標題、長寬比這些照片牆
-  // 才要用到的欄位，保持簡單。
+  // 抓「e」圖片庫（撞牆換圖、堆疊頁面掉落照片共用同一批，見 dvdEImages 的
+  // 完整說明）的檔案清單，回傳一組可以直接拿來當 <img src> 用的網址陣列。
+  // 刻意跟上面照片牆的 fetchDriveImages() 分開寫成兩個獨立函式：這裡只
+  // 需要「網址」，不需要標題、長寬比這些照片牆才要用到的欄位，保持簡單。
   //
-  // 沒有設定 EDEN_E_FOLDER_ID、資料夾是空的、或任何一個環節失敗，一律
-  // 回傳空陣列——呼叫端（cycleDvdEImage）看到空陣列就會直接放棄換圖，
-  // 維持原本內建的那張圖片，不會讓整個網站因為這個額外功能而壞掉。
+  // ---------- 改成讀同源的靜態 e-manifest.json ----------
+  // 完整脈絡見上面 dvdEImageUrlToId 宣告處的說明：原本這裡是進站當下才
+  // 現查 Drive API（列出資料夾內容、再組出每張圖的縮圖網址），這裡直接
+  // 改成 fetch 這個 repo 裡的靜態 manifest，同源、不用等 Drive 認證／
+  // 查詢來回，也不需要原本那層 sessionStorage 快取（EDEN_E_CACHE_KEY／
+  // readDvdECache()／writeDvdECache()）——那層快取本來就是為了在單次瀏覽
+  // 期間避免重複打 Drive API 而存在，同源靜態檔案交給瀏覽器自己的 HTTP
+  // 快取處理就好，不需要再自己多維護一份，整段一起拿掉。
+  // manifest 抓不到、內容是空的、或任何一步出錯，一律回傳空陣列——呼叫端
+  // （cycleDvdEImage）看到空陣列就會直接放棄換圖，維持原本內建的那張
+  // 圖片，不會讓整個網站因為這個額外功能而壞掉。
   async function fetchDvdEImages(){
-    if(!GOOGLE_API_KEY || GOOGLE_API_KEY === 'YOUR_API_KEY' ||
-       !EDEN_E_FOLDER_ID || EDEN_E_FOLDER_ID === 'YOUR_E_FOLDER_ID'){
-      return [];
-    }
-
-    const cached = readDvdECache();
-    if(cached) return cached;
-
     try{
-      const q = encodeURIComponent(`'${EDEN_E_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`);
-      // 這裡只需要 id（沒有 thumbnailLink 時的備援網址要用）跟 thumbnailLink
-      // 本身，不需要 name——原本多要的 name 欄位從頭到尾沒有任何地方用到
-      // （下面 map 只讀 thumbnailLink／id），純粹是白白多讓 Google 多傳一段
-      // 檔名回來、也要多花一點點時間解析，拿掉之後行為完全不變，只是
-      // 回應變小一點、快一點。
-      const fields = encodeURIComponent('files(id,thumbnailLink)');
-      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=name&key=${GOOGLE_API_KEY}`;
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-      let res;
-      try{
-        // priority:'low'：這個資料夾的圖片只有撞牆換圖時才用得到，不是
-        // 使用者這一刻馬上要看到的關鍵內容（真正關鍵的是上面 photosPromise
-        // 那個請求，見那裡的 priority:'high' 說明）。明確標成低優先度，
-        // 讓支援 Priority Hints 的瀏覽器把頻寬優先讓給更重要的那個請求，
-        // 這個請求晚一點點拿到回應也不影響使用者馬上看到的畫面——反而
-        // 間接讓「真正的照片庫」更快出現，這才是使用者感受到的「圖片庫
-        // 抓取變快」。不支援這個選項的瀏覽器會直接忽略，不影響原本行為。
-        res = await fetch(url, { signal: controller.signal, priority: 'low' });
-      } finally {
-        clearTimeout(timeoutId);
-      }
-      if(!res.ok) throw new Error('Drive API request failed: ' + res.status);
+      const res = await fetch('/e-manifest.json', { priority: 'low' });
+      if(!res.ok) return [];
       const data = await res.json();
-      if(!data.files || data.files.length === 0) return [];
-
-      // 「e」在畫面上實際顯示的高度：原本落在 40~119px 之間時，240px 高的
-      // 來源圖就算是 Retina/3x 螢幕也綽綽有餘，所以先前一路維持 240 這個
-      // 尺寸沒有跟著調整。後來這個元素整體放大過好幾輪，桌機/平板目前
-      // 最大可以到 315px、手機更到 656px，240px 的來源圖被拉伸到這個尺寸
-      // 早就遠遠超出取樣範圍，使用者反應「都糊掉了」正是這個原因——不是
-      // 裁切／編碼過程壓縮造成的（下面裁切完是用 canvas.toDataURL('image/png')
-      // 輸出，PNG 是無損格式，不會額外損失畫質），純粹是來源圖本身解析度
-      // 不夠、被瀏覽器放大顯示時內插模糊。
-      // 改成 1600px：即使是手機版最大 656px 高、疊上 3x Retina 螢幕
-      // （656 × 3 ≈ 1968px）也已經非常接近「幾乎不需要再放大」的程度，
-      // 桌機/平板最大 315px 更是綽綽有餘；同時 1600 仍然遠小於原始檔案，
-      // 不是完全不設限，下載/裁切速度不會變得跟原圖一樣慢。用
-      // thumbnailLink 這個 Google 圖片 CDN 版本，比原始檔案
-      // （drive.google.com/uc?export=view）快很多、也不會被導去「無法
-      // 掃描病毒」中介頁面。沒有 thumbnailLink 的檔案（極少數情況）退回
-      // uc?export=view 當備援（原始檔案本身沒有這個尺寸限制問題）。
-      //
-      // ---------- 再往下修一點點：1600px → 1400px ----------
-      // trimLoadedImage() 裡真正花時間的幾步（drawImage 畫進 canvas、
-      // 最後 toDataURL('image/png') 編碼輸出）運算量是跟著來源圖的像素
-      // 總量线性增加的，1600px 改 1400px，像素量少了大約 24%
-      // （1400²/1600² ≈ 0.766），這幾步對應也會快上約兩到三成，網路
-      // 下載/解碼的時間同樣受惠。找邊界用的取樣（SCAN_MAX_DIM，見下面
-      // trimLoadedImage() 的說明）本來就已經統一縮到 400px 掃描，不受
-      // 來源解析度影響，所以這裡調整完全不影響「找留白邊界」的準確度。
-      // 只小幅下修（-12.5%），不是打回舊的 240px：1400px 疊上手機版
-      // 最大 656px 高、3x Retina（656 × 3 ≈ 1968px）雖然不像 1600px
-      // 那樣幾乎不用再放大，但仍然遠遠超出 240px 那次讓使用者反應「都
-      // 糊掉了」的程度，肉眼幾乎分辨不出跟 1600px 的差異，只有在「手機
-      // 版飄動物件剛好放到最大、又剛好是 3x 螢幕」這種最極端的情況下，
-      // 才有極輕微、幾乎看不出來的差距。
-      //
-      // ---------- 手機版再往下修一截：1400px → 1000px ----------
-      // 承上面「手機版剛進站，撞沒幾次就又看到同一張照片」那輪修正
-      // （見 trimDvdEImagesStaggered() 內 scheduleNext() 的完整說明）：
-      // 那輪只收緊了排程的「等待間隔」，但每一張圖真正要花的下載時間、
-      // 以及 trimLoadedImage() 內 drawImage／getImageData／toDataURL 這幾步
-      // 運算時間，都是隨來源圖「像素量」線性增加的，光壓縮排隊間隔碰不到
-      // 這一塊——這正是使用者反應「剛進站頭幾次撞擊、飄動物件依然完全
-      // 不會換圖」在收緊排程間隔之後仍然存在的原因：真正的硬傷是這幾步
-      // 運算本身要花的時間，不是排隊排太久。
-      // 修法：比照專案裡其他地方（見 supportsTouch 判斷各處：detailUrlMobile
-      // 用 =s1200、previewUrl 手機用 =s850）已經在用的「手機版用較小尺寸」
-      // 做法，這批「e」圖片庫也一樣，手機改抓 =s1000（桌機維持 1400 不變）。
-      // 1000²/1400² ≈ 0.51，下載量、以及 trimLoadedImage() 這幾步運算量
-      // 都減少約一半，直接讓已就緒池在手機上長大快將近一倍，是使用者
-      // 同意接受的畫質換速度取捨；1000px 疊上手機版飄動物件最大 656px、
-      // 2x Retina（656 × 2 ≈ 1312px）仍然夠用，只有在最大顯示尺寸疊上
-      // 3x 螢幕這種較少見的組合時，才會比原本 1400px 略為軟一點，肉眼
-      // 差異不算明顯，換來的是進站頭幾秒撞牆就能正常換圖。
-      //
-      // ---------- 桌機/平板再往下修一點點：1400px → 1000px ----------
-      // 上面手機版已經改用 1000px，這裡桌機/平板原本維持 1400px 沒動；
-      // 但桌機/平板這顆飄動物件顯示的最大高度其實只有 315px（見上面這段
-      // 開頭「桌機/平板目前最大可以到 315px」的說明），就算疊上少見的
-      // 3x Retina 螢幕，需要的像素也只有 315 × 3 ≈ 945px，1400px 遠遠
-      // 超出這個需求、多下載的部分肉眼完全用不到。改成跟手機版一致的
-      // 1000px：仍然比 945px 這個「3x Retina 情境下真正需要」的門檻多留
-      // 一截安全邊際，不會有肉眼可辨的模糊，卻能省下約三成（1000²/1400²
-      // ≈ 0.51，實際約省 49%）的下載量與裁切運算量；跟手機版共用同一個
-      // 尺寸參數，也讓兩邊的行為更一致、好維護。刻意不比照手機版再往下修
-      // （手機版 1000px 疊上最大 656px、3x Retina 已經算是取捨後的下限，
-      // 見上面該段完整說明），這裡的 1000px 純粹是桌機/平板這邊「原本明顯
-      // 超額」的部分被修掉，不是同一種取捨。
-      const ids = [];
-      const urls = data.files.map(file => {
-        const thumbBase = file.thumbnailLink ? file.thumbnailLink.replace(/=s\d+$/, '') : '';
-        const size = '=s1000';
-        const url = thumbBase ? (thumbBase + size) : `https://drive.google.com/uc?export=view&id=${file.id}`;
-        dvdEImageUrlToId.set(url, file.id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
-        ids.push(file.id);
+      if(!data.images || !data.images.length) return [];
+      return data.images.map(entry => {
+        const url = '/' + entry.file; // entry.file 已經是 "e-images/<id>.<ext>" 這種相對路徑
+        dvdEImageUrlToId.set(url, entry.id); // 供 recordDvdEMaskMapping() 之後查表用，見上面完整說明
         return url;
       });
-
-      writeDvdECache(urls, ids); // 把 file id 一起存進 session 快取，見上面 readDvdECache() 的完整說明
-      return urls;
     }catch(err){
       return [];
     }
@@ -6774,13 +6654,13 @@
 
       // ---------- 修正「剛進站飄動物件很LAG」：找邊界的逐像素掃描改在縮小版
       // 的取樣 canvas 上進行 ---------- 原本下面三輪迴圈（找留白邊界／判斷
-      // 純色背景／算 coverage）都是直接對「來源全解析度」掃描——圖片庫縮圖
-      // 現在請求的是 =s1600（見上面 EDEN_E_CACHE_KEY 的說明，畫質比舊版好
-      // 很多），一張 1600×1600 的圖，光是找邊界那一輪就要跑 256 萬次逐像素
-      // 判斷，三輪疊加、圖片庫裡通常不只一張，使用者剛進站、瀏覽器主執行緒
-      // 同時還在處理照片載入／版面計算等其他工作，這幾百萬次迴圈疊在同一
-      // 時間點，就是「剛進入網頁飄動物件很LAG」的主因——不是網路慢，是這段
-      // 裁切運算本身太重。
+      // 純色背景／算 coverage）都是直接對「來源全解析度」掃描——圖片庫這批
+      // 圖目前尺寸落在 1000px 上下（見 scripts/build-e-manifest.js 的
+      // IMAGE_SIZE 設定），一張 1000×1000 的圖，光是找邊界那一輪就要跑
+      // 100 萬次逐像素判斷，三輪疊加、圖片庫裡通常不只一張，使用者剛進站、
+      // 瀏覽器主執行緒同時還在處理照片載入／版面計算等其他工作，這幾百萬次
+      // 迴圈疊在同一時間點，就是「剛進入網頁飄動物件很LAG」的主因——不是
+      // 網路慢，是這段裁切運算本身太重。
       // 找邊界／算 coverage 只需要抓到「大概位置」，不需要跟原圖一樣精細；
       // 改成先把圖片縮小畫到一張最長邊不超過 SCAN_MAX_DIM 的取樣用 canvas，
       // 所有逐像素迴圈都改在這張縮小版上跑（面積只剩原本的
@@ -7328,6 +7208,27 @@
       }
     }, { timeout: 500, fallbackDelay: 0 });
   }
+  // ---------- 對應 build-masks.js 的 packMaskBits()：把 8 格塞 1 byte、
+  // 再轉成 base64 字串的遮罩資料，還原回原本「每格一個 0/1」的 Uint8Array ----------
+  // 靜態版 masks.json（離線批次算好、由 build-masks.js 產生，完整格式
+  // 說明見該檔案開頭的註解）為了縮小檔案體積，mask 欄位不再是原本那種
+  // 「每一格存一個 JSON 數字」的陣列，改成位元打包過的 base64 字串——同樣
+  // 格數，體積大約只剩原本陣列寫法的 1/20。這裡是唯一需要新增的還原步驟，
+  // 位元順序（LSB-first，也就是每個 byte 的第 0 個 bit 對應這一批裡最前面
+  // 那一格）必須跟 build-masks.js 的 packMaskBits() 完全一致，兩邊已經
+  // 對好、不需要再調整。只有從 precomputedEMasks 讀出來的資料需要經過這一
+  // 步；即時運算（buildAlphaMaskFromSourceChunked()）產生的 mask 本來就是
+  // 未壓縮的 Uint8Array，不受影響、也不會經過這支函式。
+  function decodeMaskBits(base64Str, n){
+    const binary = atob(base64Str);
+    const bytes = new Uint8Array(binary.length);
+    for(let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const mask = new Uint8Array(n);
+    for(let i = 0; i < n; i++){
+      mask[i] = (bytes[i >> 3] >> (i & 7)) & 1;
+    }
+    return mask;
+  }
   function requestAlphaMask(src, imgEl){
     if(!src || !imgEl || pfAlphaMaskCache.has(src) || pfAlphaMaskPending.has(src)) return;
     pfAlphaMaskPending.add(src);
@@ -7363,7 +7264,7 @@
       const pre = precomputedEMasks.get(precomputedId);
       if(pre && pre.mask && pre.w && pre.h){
         finish({
-          mask: Uint8Array.from(pre.mask),
+          mask: decodeMaskBits(pre.mask, pre.w * pre.h),
           w: pre.w,
           h: pre.h,
           boundary: (pre.boundary && pre.boundary.length) ? Float32Array.from(pre.boundary) : new Float32Array(0),
