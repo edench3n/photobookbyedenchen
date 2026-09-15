@@ -15761,9 +15761,15 @@
 
   function dvdTapHintAllowed(){
     if(!dvdTapHintEl || !dvdBounce) return false;
-    // 觸控裝置沒有 hover 的概念，這個提示本來就觸發不到，直接整組關掉
-    // （CSS 端也有 @media (hover:none) 的保險，見該處說明）。
-    if(!supportsHover) return false;
+    // 注意：這裡「不」再用 !supportsHover 直接整組關掉。這行是加入觸控版
+    // 「手指按住就顯示」那套之前留下來的舊邏輯——當初滑鼠 hover 是唯一的
+    // 觸發方式，沒有 hover 能力的裝置自然整組沒用，所以直接擋掉；但後來
+    // 加了 dvdTouchHoldPointerIds 那套獨立的觸控觸發方式之後，這行沒有跟著
+    // 拿掉，導致「真正的手機/平板（!supportsHover）」在 dvdTapHintFrame()
+    // 一開頭就被這裡擋下、hideDvdTapHint() 掉，touchHolding 判斷根本沒機會
+    // 跑到——這就是「手機板現在沒有效果」的成因。CSS 端已經在更早之前改成
+    // 不靠 (hover:none) 隱藏（見 .dvd-tap-hint 上方的說明），這裡的 JS 判斷
+    // 卻沒有同步移除，兩邊不一致。
     const bodyCls = document.body.classList;
     // 首頁以外的所有情境一次擋掉：
     //   preview-active     → Preview 頁
