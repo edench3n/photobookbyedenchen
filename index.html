@@ -1507,10 +1507,10 @@
     display:block;
     /* 大小參考設計稿：跟飄動物件的比例大致是「提示圖寬度約等於物件寬度的
        三分之一」。這裡用高度 + vw 連續內插（不是斷點跳動），桌機滿版時
-       約 30px 高、換算寬度約 169px，跟設計稿量到的比例一致；視窗變窄時
+       約 40px 高、換算寬度約 226px；視窗變窄時
        等比例縮小，不會在小螢幕上大到蓋掉整個畫面。width:auto 自動跟著
        等比縮放，不用另外處理。 */
-    height: clamp(19px, 1.9vw, 30px);
+    height: clamp(25px, 2.5vw, 40px);
     width:auto;
     opacity:0;
     transform: scale(.68);
@@ -1536,12 +1536,12 @@
     transition: opacity .1s ease-in,
                 transform .1s ease-in;
   }
-  /* 觸控裝置（沒有滑鼠、沒有 hover 的概念）完全不顯示這個提示：JS 端也有
-     supportsHover 的判斷，這裡只是多一層保險，確保就算未來 JS 條件改動，
-     手機也不會冒出一個永遠觸發不到的元素。 */
-  @media (hover: none){
-    .dvd-tap-hint{ display:none !important; }
-  }
+  /* 注意：這裡「不」再用 @media (hover:none) 整組隱藏。觸控裝置（手機／
+     平板）現在有自己的觸發方式——手指按住飄動物件的整段期間顯示提示（見
+     JS dvdTouchHoldPointerIds 那段的完整說明），不是靠 hover，所以不能
+     再用「沒有 hover 能力」當作隱藏依據，否則手機/平板永遠看不到這個提示。
+     預設狀態（沒有 .visible）本來就是 opacity:0，JS 沒有主動觸發的情況下
+     本來就不會顯示，不需要靠 CSS 額外隱藏。 */
   @media (max-width: 640px){
     /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍，這裡再整體放大 1.3 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間
        ↓再整體縮小約 0.9 倍（使用者反應手機版飄動物件偏大，縮小一點點），區間三個數字等比例乘上 0.9
@@ -15721,12 +15721,26 @@
   const dvdTapHintEl = document.getElementById('dvdTapHint');
   const dvdTapHintImgEl = document.getElementById('dvdTapHintImg');
 
-  // 進場門檻用比較小的容錯（滑鼠要真的碰到圖案本身才算），一旦顯示出來就
-  // 改用比較寬鬆的門檻才判定「離開」——這是刻意做出來的遲滯（hysteresis）：
-  // 去背後的照片邊緣本來就參差不齊，若進出用同一個門檻，滑鼠停在邊緣附近
-  // 時提示會高速閃爍。兩個門檻拉開之後，碰到要準、離開要明顯，觀感穩定。
-  const DVD_TAP_HINT_ENTER_TOLERANCE = 10; // px
-  const DVD_TAP_HINT_KEEP_TOLERANCE = 24;  // px
+  // ---------- 修正：「物件移動中掠過滑鼠時，提示一直消失又出現」----------
+  // 成因：原本的觸發判定跟撞牆用的是同一套「去背後的 alpha 遮罩逐點取樣」
+  // ——滑鼠要真的壓在不透明像素上才算碰到。問題是照片去背後內部本來就有
+  // 大量透明縫隙（樹枝之間、建築物的窗格、人物輪廓之間……），物件在移動
+  // 時，滑鼠等於在一路快速穿過「實心→透明→實心→透明」的交替區域，每穿過
+  // 一個縫隙就判定一次「離開了」、下一格又判定「碰到了」，提示自然會高速
+  // 閃爍。這不是效能或動畫時間的問題，是判定條件本身太細。
+  // 修法：觸發範圍改成「去背後實際圖案的外接矩形」整塊（computeDvdPixelInsets()
+  // 算出來的那個框，見 computeDvdTapHintPlacement() 的說明）——也就是只要
+  // 滑鼠在這張照片的輪廓範圍之內就算碰到，穿過內部任何透明縫隙都維持觸發，
+  // 不會再中斷。撞牆物理判定完全不受影響，那邊仍然用原本精準的遮罩取樣，
+  // 兩者是獨立的兩套判斷。
+  //
+  // 下面兩個數值是這個外接矩形「再往外放大」多少：進場稍微放大一點點，讓
+  // 滑鼠靠近就有反應；一旦顯示出來就換成更寬鬆的那個值才判定離開（刻意做
+  // 出來的遲滯 hysteresis）——物件移動速度可能比滑鼠快，若進出用同一個
+  // 門檻，物件邊緣在滑鼠附近來回一兩個像素就會反覆開關，放大退場門檻之後
+  // 就不會再有「跟不太上而反覆消失又出現」的情況。
+  const DVD_TAP_HINT_ENTER_EXPAND = 18; // px，進場：輪廓外擴這麼多就算碰到
+  const DVD_TAP_HINT_KEEP_EXPAND = 46;  // px，退場：要離開輪廓這麼遠才判定滑走
   // 提示圖跟「去背後實際圖案邊緣」之間的間距下限，另外還會再取「提示圖本身
   // 高度的一半」當作動態下限（圖越大、間距跟著等比例拉開），確保在任何螢幕
   // 尺寸下看起來都是同一種疏密關係。
@@ -15776,32 +15790,25 @@
     return true;
   }
 
-  // 滑鼠這一刻有沒有真的落在「飄動物件去背後的圖案本身」上。
-  // 先用外框矩形快速排除（絕大多數影格都在這裡就 return false，成本極低），
-  // 真的落在框內才進一步把座標轉回物件的本地未旋轉座標系、用那張圖的 alpha
-  // 遮罩取樣——做法跟撞牆判斷用的 pixelShapesOverlap() 完全同一套（見該處
-  // 說明），所以「看起來碰到了」跟「判定碰到了」永遠一致：滑鼠穿過照片
-  // 去背後的透明空隙時不會誤觸發提示。
-  // 取樣不只取滑鼠那一個點，還取它周圍一圈偏移點，讓邊緣有一點容錯，
-  // 不用把游標精準壓在圖案正中央才會有反應。
-  function dvdTapHintPointerOnObject(px, py, tolerance){
+  // 滑鼠這一刻有沒有落在「飄動物件當下那張照片的輪廓範圍」內。
+  // 這裡刻意「不」用撞牆那套逐點 alpha 遮罩取樣（完整理由見上面
+  // DVD_TAP_HINT_ENTER_EXPAND 的說明：那樣會讓滑鼠每穿過一次照片內部的
+  // 透明縫隙就中斷一次觸發，移動中會瘋狂閃爍）。改成用
+  // computeDvdPixelInsets() 算出來的「去背後實際圖案的外接矩形」整塊當作
+  // 觸發範圍，再往外放大一點點（expand）——滑鼠只要在這個範圍內，不管
+  // 底下是實心像素還是透明縫隙，都一律維持觸發。
+  // 先做一次外框矩形的快速排除：絕大多數影格滑鼠根本不在附近，在這裡就
+  // return false，連比較貴的 computeDvdPixelInsets() 都不會跑到。
+  function dvdTapHintPointerOnObject(px, py, expand){
     if(!dvdW || !dvdH) return false;
-    if(px < dvdX - tolerance || px > dvdX + dvdW + tolerance ||
-       py < dvdY - tolerance || py > dvdY + dvdH + tolerance) return false;
-    const entry = getCachedAlphaMask(dvdActiveImgSrc);
-    if(!entry) return true; // 這張圖的遮罩還沒算好，退回「外框矩形」判斷，行為跟遮罩上線前一樣
-    const cx = dvdX + dvdW / 2, cy = dvdY + dvdH / 2;
-    const theta = -dvdRotationDeg * Math.PI / 180; // 反方向旋轉，把螢幕座標轉回本地未旋轉座標系
-    const cosT = Math.cos(theta), sinT = Math.sin(theta);
-    const t = tolerance, d = tolerance * 0.7;
-    const offsets = [0, 0, t, 0, -t, 0, 0, t, 0, -t, d, d, -d, d, d, -d, -d, -d];
-    for(let i = 0; i < offsets.length; i += 2){
-      const relX = px + offsets[i] - cx, relY = py + offsets[i + 1] - cy;
-      const localX = relX * cosT - relY * sinT + dvdW / 2;
-      const localY = relX * sinT + relY * cosT + dvdH / 2;
-      if(sampleAlphaMaskSolid(entry, localX / dvdW, localY / dvdH)) return true;
-    }
-    return false;
+    if(px < dvdX - expand || px > dvdX + dvdW + expand ||
+       py < dvdY - expand || py > dvdY + dvdH + expand) return false;
+    const insets = computeDvdPixelInsets(); // 旋轉之後的實際輪廓外接範圍，跟畫面上看到的邊緣同步
+    const left = dvdX + insets.left - expand;
+    const right = dvdX + dvdW - insets.right + expand;
+    const top = dvdY + insets.top - expand;
+    const bottom = dvdY + dvdH - insets.bottom + expand;
+    return px >= left && px <= right && py >= top && py <= bottom;
   }
 
   // 依照這次隨機決定的四邊優先順序，挑第一個「放得下」的邊，算出提示圖左上角
@@ -15862,12 +15869,48 @@
   }
 
   function positionDvdTapHint(){
+    // 提示正顯示著的時候，飄動物件有可能剛好撞牆換成另一張照片——這時要
+    // 立刻換成「新那張照片自己的」擺放方式，維持「一張照片一個固定位置」
+    // 這條規則；沒換圖的話這裡只是一次字串比較，成本可以忽略。
+    if(dvdTapHintAppliedSrc !== (dvdActiveImgSrc || '')) applyDvdTapHintPlacementForCurrentImage();
     const pos = computeDvdTapHintPlacement();
     // 外層容器只寫 translate3d、完全沒有 transition（見 CSS .dvd-tap-hint
     // 的說明），所以這裡逐影格改寫位置不會有任何延遲，提示圖會像黏在飄動
     // 物件旁邊一樣跟著它走；縮放／淡入淡出則是內層圖片自己的 transition
     // 在負責，兩條軌道互不干擾。
     dvdTapHintEl.style.transform = 'translate3d(' + Math.round(pos.x) + 'px,' + Math.round(pos.y) + 'px,0)';
+  }
+
+  // ---------- 「同一張照片永遠是同一個位置，換一張照片才換位置」 ----------
+  // 需求：滑鼠離開再回來，提示應該回到原本那個位置，不該每碰一次就跳一個
+  // 地方；只有飄動物件撞牆換成「另一張照片」時，才重新抽一個新位置。
+  // 做法：用當下這張圖的 src 當 key，把抽到的擺放方式（四邊優先順序 + 沿邊
+  // 位置）記進一個 Map。第一次碰到某張照片時抽一次並存起來，之後只要還是
+  // 同一張照片就直接沿用同一筆，位置完全一致；換圖之後 key 變了，才會抽新
+  // 的一筆。
+  // 這裡存的是「相對於圖案輪廓的擺放方式」而不是絕對座標——絕對座標會隨著
+  // 物件飄動每一刻都不同，存了也沒有意義；存相對關係，才能做到「同一張照片
+  // 不管飄到哪裡，提示永遠出現在它的同一側、同一個相對高度」。
+  // 圖片庫本身就是有限的幾十張，這個 Map 不會無限成長，不需要額外清理。
+  const dvdTapHintPlacementBySrc = new Map();
+  let dvdTapHintAppliedSrc = null; // 目前套用的是哪一張照片的擺放方式，用來偵測「顯示中途換了圖」
+  function applyDvdTapHintPlacementForCurrentImage(){
+    const key = dvdActiveImgSrc || '';
+    dvdTapHintAppliedSrc = key;
+    let saved = dvdTapHintPlacementBySrc.get(key);
+    if(!saved){
+      // 第一次遇到這張照片：四邊順序洗牌 + 沿邊的隨機位置。刻意把範圍收在
+      // 0.18~0.82 之間，不讓它跑到太靠近圖案的角落，那裡看起來會像沒對齊。
+      const order = ['right', 'bottom', 'left', 'top'];
+      for(let i = order.length - 1; i > 0; i--){
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+      }
+      saved = { order, frac: 0.18 + Math.random() * 0.64 };
+      dvdTapHintPlacementBySrc.set(key, saved);
+    }
+    dvdTapHintSideOrder = saved.order;
+    dvdTapHintFrac = saved.frac;
   }
 
   function showDvdTapHint(){
@@ -15878,16 +15921,7 @@
     dvdTapHintW = dvdTapHintImgEl ? dvdTapHintImgEl.offsetWidth : 0;
     dvdTapHintH = dvdTapHintImgEl ? dvdTapHintImgEl.offsetHeight : 0;
     if(!dvdTapHintW || !dvdTapHintH) return;
-    // 這次出現用的隨機擺放：四邊順序洗牌 + 沿邊的隨機位置。刻意把範圍收在
-    // 0.18~0.82 之間，不讓它跑到太靠近圖案的角落，那裡看起來會像沒對齊。
-    dvdTapHintSideOrder = ['right', 'bottom', 'left', 'top'];
-    for(let i = dvdTapHintSideOrder.length - 1; i > 0; i--){
-      const j = Math.floor(Math.random() * (i + 1));
-      const tmp = dvdTapHintSideOrder[i];
-      dvdTapHintSideOrder[i] = dvdTapHintSideOrder[j];
-      dvdTapHintSideOrder[j] = tmp;
-    }
-    dvdTapHintFrac = 0.18 + Math.random() * 0.64;
+    applyDvdTapHintPlacementForCurrentImage();
     positionDvdTapHint(); // 先把位置擺好，再開始播進場動畫，避免第一幀從舊位置飛過來
     dvdTapHintEl.classList.remove('leaving');
     dvdTapHintEl.classList.add('visible');
@@ -15903,23 +15937,54 @@
     dvdTapHintEl.classList.add('leaving');
   }
 
+  // ---------- 手機／平板：手指按住飄動物件的整段期間顯示提示 ----------
+  // 沒有滑鼠就沒有 hover 這個概念，上面那一整套「滑鼠碰到/離開」的判斷
+  // 對觸控裝置完全用不上，改成另一套獨立的觸發方式：手指一碰到飄動物件
+  // 就顯示，不管接下來這一下會變成單純點一下、拖著它跑、還是雙指旋轉，
+  // 只要還「按著」它就維持顯示，放開／手勢取消才收掉。
+  //
+  // 這裡刻意「不」掛進既有那一大套抓取／拖曳／雙擊/旋轉的狀態機
+  // （dvdTapCandidatePointerId／dvdDragging／dvdRotatePointerId 那些），
+  // 而是另外開一組完全獨立、只做「記住現在有哪些手指按在飄動物件上」這一
+  // 件事的監聽器：好處是不會動到那套已經反覆調校過、行為很精細的拖曳／
+  // 旋轉／雙擊判斷分毫，這裡的監聽器全部用 passive:true、完全不呼叫
+  // preventDefault()、不搶事件，純粹在旁邊「觀察」同一批事件，壞了也不會
+  // 拖累原本的拖曳手感。
+  //
+  // 用 Set 而不是單一個布林值，是因為兩指旋轉手勢期間會同時有兩根手指按
+  // 在物件上——只要 Set 裡還有任何一根手指，就代表「使用者還在操控它」；
+  // 兩指都放開了、Set 清空，才真正算放開。
+  const dvdTouchHoldPointerIds = new Set();
+
   function dvdTapHintFrame(){
     dvdTapHintRAF = requestAnimationFrame(dvdTapHintFrame);
-    if(!dvdTapHintPointerKnown || !dvdTapHintAllowed()){
+    if(!dvdTapHintAllowed()){
       hideDvdTapHint();
       return;
     }
-    const tolerance = dvdTapHintVisible ? DVD_TAP_HINT_KEEP_TOLERANCE : DVD_TAP_HINT_ENTER_TOLERANCE;
-    if(dvdTapHintPointerOnObject(dvdTapHintPointerX, dvdTapHintPointerY, tolerance)){
+    // 觸控：只要還有手指按在物件上就顯示，不用比對座標——這正是跟滑鼠版
+    // 最大的差異：滑鼠版每影格都要重新判斷「這一刻碰到了沒」，觸控版一旦
+    // 按下就是連續的「持有」狀態，中途物件本身會被抓取邏輯凍結／跟著手指
+    // 移動，不會有滑鼠版那種「移動中掠過」的問題，也就不需要進出場兩個
+    // 不同的容錯門檻。
+    const touchHolding = dvdTouchHoldPointerIds.size > 0;
+    // 滑鼠：維持原本逐影格比對座標的 hover 判斷，只有支援 hover 且已經
+    // 知道滑鼠位置時才需要算，觸控裝置這裡永遠是 false、不會多做任何事。
+    let hoverHit = false;
+    if(supportsHover && dvdTapHintPointerKnown){
+      const expand = dvdTapHintVisible ? DVD_TAP_HINT_KEEP_EXPAND : DVD_TAP_HINT_ENTER_EXPAND;
+      hoverHit = dvdTapHintPointerOnObject(dvdTapHintPointerX, dvdTapHintPointerY, expand);
+    }
+    if(touchHolding || hoverHit){
       if(!dvdTapHintVisible) showDvdTapHint();
-      if(dvdTapHintVisible) positionDvdTapHint(); // 顯示期間逐影格黏著物件走
+      if(dvdTapHintVisible) positionDvdTapHint(); // 顯示期間逐影格黏著物件走（含被拖曳中的情況）
     } else {
       hideDvdTapHint();
     }
   }
 
   function startDvdTapHintLoop(){
-    if(dvdTapHintRAF || !dvdTapHintEl || !supportsHover) return;
+    if(dvdTapHintRAF || !dvdTapHintEl) return;
     dvdTapHintRAF = requestAnimationFrame(dvdTapHintFrame);
   }
   function stopDvdTapHintLoop(){
@@ -15927,36 +15992,67 @@
     hideDvdTapHint();
   }
 
-  if(dvdTapHintEl && supportsHover){
-    // 只記滑鼠：觸控／筆的 pointermove 不需要（也不該）觸發 hover 提示。
-    // passive:true，純粹讀座標、完全不干涉任何預設行為，不會影響捲動或
-    // 既有的抓取／拖曳判斷。
-    window.addEventListener('pointermove', (e) => {
-      if(e.pointerType && e.pointerType !== 'mouse') return;
-      dvdTapHintPointerX = e.clientX;
-      dvdTapHintPointerY = e.clientY;
-      dvdTapHintPointerKnown = true;
+  if(dvdTapHintEl){
+    if(supportsHover){
+      // 只記滑鼠：觸控／筆的 pointermove 不需要（也不該）觸發 hover 提示，
+      // 那條路線交給下面觸控專用的監聽器處理。
+      // passive:true，純粹讀座標、完全不干涉任何預設行為，不會影響捲動或
+      // 既有的抓取／拖曳判斷。
+      window.addEventListener('pointermove', (e) => {
+        if(e.pointerType && e.pointerType !== 'mouse') return;
+        dvdTapHintPointerX = e.clientX;
+        dvdTapHintPointerY = e.clientY;
+        dvdTapHintPointerKnown = true;
+        startDvdTapHintLoop();
+      }, { passive: true });
+      // 滑鼠離開整個視窗（relatedTarget 為 null 才是真的離開，而不是移到
+      // 頁面內某個子元素上）：忘記最後的座標並停掉迴圈，避免滑鼠早就不在
+      // 畫面上了，飄動物件卻自己飄過那個「殘留座標」又把提示叫出來。
+      window.addEventListener('mouseout', (e) => {
+        if(e.relatedTarget) return;
+        dvdTapHintPointerKnown = false;
+        if(dvdTouchHoldPointerIds.size === 0) stopDvdTapHintLoop();
+      });
+      window.addEventListener('blur', () => {
+        dvdTapHintPointerKnown = false;
+        dvdTouchHoldPointerIds.clear(); // 視窗失焦時觸控序列多半也已經中斷，一併清空保底
+        stopDvdTapHintLoop();
+      });
+    }
+    // 觸控／筆：不分 supportsHover（混合輸入裝置——例如支援觸控筆的桌機、
+    // 可插鍵盤滑鼠的平板——手指按著一樣要有反應），只要按下的這一點命中
+    // 飄動物件的容錯熱區，就把這根手指記進「持有中」的 Set。
+    // hit test 用跟既有抓取判斷同一個 dvdHitTest() / DVD_GRAB_PADDING_TOUCH，
+    // 確保「使用者感覺按到了」跟「這裡判定按到了」範圍一致。
+    window.addEventListener('pointerdown', (e) => {
+      if(e.pointerType === 'mouse') return;
+      if(!dvdTapHintAllowed()) return;
+      const rect = dvdBounce.getBoundingClientRect();
+      if(!dvdHitTest(rect, e.clientX, e.clientY, DVD_GRAB_PADDING_TOUCH)) return;
+      dvdTouchHoldPointerIds.add(e.pointerId);
       startDvdTapHintLoop();
     }, { passive: true });
-    // 滑鼠離開整個視窗（relatedTarget 為 null 才是真的離開，而不是移到
-    // 頁面內某個子元素上）：忘記最後的座標並停掉迴圈，避免滑鼠早就不在
-    // 畫面上了，飄動物件卻自己飄過那個「殘留座標」又把提示叫出來。
-    window.addEventListener('mouseout', (e) => {
-      if(e.relatedTarget) return;
-      dvdTapHintPointerKnown = false;
-      stopDvdTapHintLoop();
-    });
-    window.addEventListener('blur', () => {
-      dvdTapHintPointerKnown = false;
-      stopDvdTapHintLoop();
-    });
+    // 放開／手勢被系統取消：不管這根手指原本按在哪裡，一律嘗試從 Set 裡
+    // 移除（不在裡面的話 Set.delete 是安全的 no-op）——比起去反推「這根
+    // 手指是不是按在物件上放開的」，直接無條件移除更簡單也更不會漏接。
+    window.addEventListener('pointerup', (e) => {
+      dvdTouchHoldPointerIds.delete(e.pointerId);
+    }, { passive: true });
+    window.addEventListener('pointercancel', (e) => {
+      dvdTouchHoldPointerIds.delete(e.pointerId);
+    }, { passive: true });
     // 分頁切到背景時把迴圈收掉（瀏覽器本來就會節流 RAF，這裡只是讓狀態
-    // 乾淨一點）；切回來時滑鼠只要一動就會自己重新啟動。
+    // 乾淨一點）；觸控的持有狀態也一併清空——背景時系統多半已經中斷手勢，
+    // 保留舊的 pointerId 沒有意義，切回來後使用者要嘛已經放開、要嘛會重新
+    // 觸發 pointerdown，兩種情況都會自然恢復正確狀態。
     document.addEventListener('visibilitychange', () => {
-      if(document.hidden) stopDvdTapHintLoop();
+      if(document.hidden){
+        dvdTouchHoldPointerIds.clear();
+        stopDvdTapHintLoop();
+      }
     });
     // 視窗尺寸改變 → 提示圖的高度（vw 內插）會跟著變，快取的尺寸失效。
-    // 直接收掉這次顯示，下次滑鼠碰到時 show 會重新量一次最新尺寸。
+    // 直接收掉這次顯示，下次碰到時 show 會重新量一次最新尺寸。
     window.addEventListener('resize', () => { hideDvdTapHint(); });
   }
   // ========================= （double tap）提示 end =========================
