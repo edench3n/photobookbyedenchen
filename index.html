@@ -15866,6 +15866,33 @@
     const gap = Math.max(DVD_TAP_HINT_GAP_MIN, dvdTapHintH * 0.5);
     const hw = dvdTapHintW, hh = dvdTapHintH;
 
+    // ---------- 手機／平板：碰到畫面邊界就讓它自然露出去，不要換邊 ----------
+    // 桌機版下面那個迴圈會在「這一邊擠不下」時自動試下一邊，讓提示永遠留在
+    // 畫面內；但在觸控裝置上，這代表飄動物件一靠近螢幕邊緣，提示就會忽然
+    // 從（例如）右邊跳到左邊或上面，本來鎖定「同一張照片固定同一個位置」
+    // 的體感反而被這種邊界跳動打斷。手機版簡化成：固定用這張照片抽到的
+    // 那一邊（dvdTapHintSideOrder[0]，見 applyDvdTapHintPlacementForCurrentImage()
+    // 抽法），不檢查塞不塞得下、也不把座標夾回視窗內——真的貼到邊緣時就讓
+    // 它自然被瀏覽器視窗邊界裁掉一部分即可，位置本身完全不換、不跳動。
+    if(!supportsHover){
+      const side = dvdTapHintSideOrder[0];
+      let x, y;
+      if(side === 'right'){
+        x = boxRight + gap;
+        y = boxTop + boxH * dvdTapHintFrac - hh / 2;
+      } else if(side === 'left'){
+        x = boxLeft - gap - hw;
+        y = boxTop + boxH * dvdTapHintFrac - hh / 2;
+      } else if(side === 'top'){
+        x = boxLeft + boxW * dvdTapHintFrac - hw / 2;
+        y = boxTop - gap - hh;
+      } else { // bottom
+        x = boxLeft + boxW * dvdTapHintFrac - hw / 2;
+        y = boxBottom + gap;
+      }
+      return { x, y };
+    }
+
     let fallback = null;
     for(let i = 0; i < dvdTapHintSideOrder.length; i++){
       const side = dvdTapHintSideOrder[i];
