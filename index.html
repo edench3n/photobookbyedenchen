@@ -71,6 +71,13 @@
      等於白 preload）。 -->
 <link rel="preload" as="fetch" href="/e-manifest.json" crossorigin>
 <link rel="preload" as="fetch" href="/masks.json" crossorigin fetchpriority="low">
+<!-- 🌟 首頁「滑鼠碰到飄動物件時，旁邊冒出來的（double tap）提示圖」🌟
+     這張圖只有在使用者第一次把滑鼠移到飄動物件上（或飄動物件自己掠過靜止的
+     滑鼠）那一瞬間才會用到，如果等到那時候才開始下載，第一次出現會是空白、
+     等圖到了才忽然冒出來，正好錯過那個要「立刻回應滑鼠」的時機。用
+     rel="preload" 讓瀏覽器解析 HTML 的當下就背景抓好（檔案只有十幾 KB），
+     fetchpriority="low" 確保它不會跟首屏真正要用的照片、字體搶頻寬。 -->
+<link rel="preload" as="image" href="/double-tap-hint.png?v=1" fetchpriority="low">
 <!-- 全站字體 Stack Sans Text：這次要用到 260、350 這種非標準字重數值，
      改成用可變字重（variable font）的範圍語法載入，瀏覽器可以在範圍內
      內插出任意數字的字重，不用侷限在 400/500/700 這些固定字重。
@@ -1465,6 +1472,76 @@
     opacity:0 !important;
     transition:none !important;
   }
+
+  /* ---------- 首頁專用：滑鼠碰到飄動物件時，旁邊冒出來的（double tap）提示 ----------
+     目的：使用者不一定知道飄動物件可以雙擊，這個提示只在「滑鼠真的碰到它」
+     的那一刻出現，碰不到就馬上收掉，不佔任何常駐版面。
+
+     為什麼要拆成外層 .dvd-tap-hint（容器）＋ 內層 .dvd-tap-hint-img（圖片）
+     兩層？理由跟上面 .dvd-bounce / .dvd-bounce-img 拆兩層完全一樣（見該處
+     說明）：外層的 transform 是每一影格由 RAF 迴圈重寫的 translate3d(x,y)，
+     必須「零延遲、逐幀精準」地黏著飄動物件走；內層負責的縮放＋淡入淡出
+     則需要一條 transition 慢慢過渡。兩者如果寫在同一個 transform 上，
+     瀏覽器會把每一次位置更新也當成新的過渡目標，提示圖會變得黏滯、拖在
+     物件後面追不上。拆開之後：位置是逐幀硬寫、縮放/透明度是平滑過渡，
+     兩條軌道互不干擾。
+
+     z-index 刻意比 .dvd-bounce（99999）低一階：即使某些極端情況下（例如
+     飄動物件飄到視窗角落、四邊都擠不下）提示圖被迫貼得很近，它也永遠會
+     被畫在飄動物件「底下」，不會蓋住照片本身。正常情況下 JS 會把它放在
+     去背後實際圖案邊界以外、留一段間距的位置，本來就不會重疊（見 JS
+     computeDvdTapHintPlacement() 的完整說明）。
+
+     pointer-events:none：純視覺提示，完全不參與 hit-test，不會擋掉底下
+     照片的點擊/hover，也不會干擾抓取飄動物件本身的座標判斷。 */
+  .dvd-tap-hint{
+    position:fixed;
+    top:0; left:0;
+    z-index:99998;
+    pointer-events:none;
+    will-change: transform;
+    /* 還沒算出位置之前先丟到畫面外，避免第一幀在左上角閃一下 */
+    transform: translate3d(-9999px,-9999px,0);
+  }
+  .dvd-tap-hint-img{
+    display:block;
+    /* 大小參考設計稿：跟飄動物件的比例大致是「提示圖寬度約等於物件寬度的
+       三分之一」。這裡用高度 + vw 連續內插（不是斷點跳動），桌機滿版時
+       約 30px 高、換算寬度約 169px，跟設計稿量到的比例一致；視窗變窄時
+       等比例縮小，不會在小螢幕上大到蓋掉整個畫面。width:auto 自動跟著
+       等比縮放，不用另外處理。 */
+    height: clamp(19px, 1.9vw, 30px);
+    width:auto;
+    opacity:0;
+    transform: scale(.68);
+    transform-origin: center center;
+    -webkit-user-drag:none;
+    will-change: transform, opacity;
+    /* 出場（變大淡入）：時間刻意很短（.13s），並用一條尾段拉平的曲線
+       cubic-bezier(.2,.9,.25,1)，讓它「一下就到位、收尾很柔」——這是
+       「非常快速但仍然流暢」的關鍵：快的是總時長，順的是曲線收尾，
+       不是靠拉長時間換來的。
+       退場的時間更短（見下面 .dvd-tap-hint-img 沒有 .visible 時的狀態
+       其實共用同一條 transition，實際差異由 JS 切換 class 的時機決定），
+       避免滑鼠已經離開了、提示卻還賴在畫面上。 */
+    transition: opacity .13s cubic-bezier(.2,.9,.25,1),
+                transform .13s cubic-bezier(.2,.9,.25,1);
+  }
+  .dvd-tap-hint.visible .dvd-tap-hint-img{
+    opacity:1;
+    transform: scale(1);
+  }
+  /* 退場（縮小淡出）比進場再快一點，讓「滑鼠離開」的回饋顯得乾脆俐落 */
+  .dvd-tap-hint.leaving .dvd-tap-hint-img{
+    transition: opacity .1s ease-in,
+                transform .1s ease-in;
+  }
+  /* 觸控裝置（沒有滑鼠、沒有 hover 的概念）完全不顯示這個提示：JS 端也有
+     supportsHover 的判斷，這裡只是多一層保險，確保就算未來 JS 條件改動，
+     手機也不會冒出一個永遠觸發不到的元素。 */
+  @media (hover: none){
+    .dvd-tap-hint{ display:none !important; }
+  }
   @media (max-width: 640px){
     /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍，這裡再整體放大 1.3 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間
        ↓再整體縮小約 0.9 倍（使用者反應手機版飄動物件偏大，縮小一點點），區間三個數字等比例乘上 0.9
@@ -1923,6 +2000,14 @@
        等真正的照片庫圖片載入完成後就會換成真實照片（見 JS
        markDvdRealImageReady() 的完整說明），行為不受影響。 -->
   <div class="dvd-bounce dvd-image-pending" id="dvdBounce" draggable="false"><img class="dvd-bounce-img" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" alt="" draggable="false"></div>
+
+  <!-- 首頁「滑鼠碰到飄動物件」時才出現的（double tap）提示圖。
+       完整行為說明見上面 CSS .dvd-tap-hint 與 JS 的 dvd-tap-hint 區塊。
+       src 指向站台根目錄的靜態檔（跟 favicon 一樣的放法），只要把
+       double-tap-hint.png 放進 repo 根目錄即可；?v=1 是快取版本號，之後
+       換圖片時把數字 +1，使用者的瀏覽器才會抓到新的那張。
+       alt 留空 + aria-hidden：它純粹是視覺提示，讓螢幕閱讀器直接略過。 -->
+  <div class="dvd-tap-hint" id="dvdTapHint" aria-hidden="true"><img class="dvd-tap-hint-img" id="dvdTapHintImg" src="/double-tap-hint.png?v=1" alt="" draggable="false" decoding="async"></div>
 
   <header class="fixed-header">
     <div class="header-left" id="backHome">Photobook by edenchen</div>
@@ -15607,6 +15692,275 @@
     }
     step();
   }
+
+  // ==========================================================================
+  // 首頁專用：滑鼠碰到飄動物件時，旁邊冒出來的（double tap）提示
+  // ==========================================================================
+  // 需求：
+  //   1) 只在「首頁」有效——preview 頁、照片詳細頁、照片物理堆疊頁面都完全
+  //      不出現（下面 dvdTapHintAllowed() 一次把所有情境擋掉）。
+  //   2) 兩種觸發方式其實是同一件事：使用者把滑鼠「移到」飄動物件上，或是
+  //      滑鼠停著不動、飄動物件自己「掠過」滑鼠。所以不能只靠 mouseenter /
+  //      mouseover 這類事件（那只有「滑鼠動」才會觸發，物件動、滑鼠不動時
+  //      瀏覽器什麼事件都不會送），必須自己記住滑鼠最後停在哪，然後每一
+  //      影格主動比對一次「這一刻它們有沒有疊在一起」——這正是下面
+  //      dvdTapHintFrame() 存在的理由。
+  //   3) 提示圖出現在飄動物件「當下那張圖片的邊界旁邊」的隨機位置，而且
+  //      不能蓋在圖片實際有內容的地方（見 computeDvdTapHintPlacement()）。
+  //   4) 進場／退場都要非常快、但仍然流暢：變大＋淡入進場、縮小＋淡出退場，
+  //      時間曲線寫在 CSS（見 .dvd-tap-hint-img 的說明），這裡只負責切
+  //      class 的時機。
+  //
+  // 效能考量：這個迴圈只在「已經知道滑鼠在哪」（桌機、使用者至少動過一次
+  // 滑鼠）時才啟動，滑鼠離開視窗／分頁切到背景就自己停下來（見下面
+  // startDvdTapHintLoop / stopDvdTapHintLoop）。每一影格在「沒有碰到」的
+  // 絕大多數時間裡，只做幾個數字比較就 return，成本可以忽略；比較貴的
+  // 去背遮罩取樣（sampleAlphaMaskSolid）與邊界內縮計算
+  // （computeDvdPixelInsets）只在滑鼠真的落在外框矩形內、或提示已經顯示
+  // 出來的那幾影格才會跑到。
+  const dvdTapHintEl = document.getElementById('dvdTapHint');
+  const dvdTapHintImgEl = document.getElementById('dvdTapHintImg');
+
+  // 進場門檻用比較小的容錯（滑鼠要真的碰到圖案本身才算），一旦顯示出來就
+  // 改用比較寬鬆的門檻才判定「離開」——這是刻意做出來的遲滯（hysteresis）：
+  // 去背後的照片邊緣本來就參差不齊，若進出用同一個門檻，滑鼠停在邊緣附近
+  // 時提示會高速閃爍。兩個門檻拉開之後，碰到要準、離開要明顯，觀感穩定。
+  const DVD_TAP_HINT_ENTER_TOLERANCE = 10; // px
+  const DVD_TAP_HINT_KEEP_TOLERANCE = 24;  // px
+  // 提示圖跟「去背後實際圖案邊緣」之間的間距下限，另外還會再取「提示圖本身
+  // 高度的一半」當作動態下限（圖越大、間距跟著等比例拉開），確保在任何螢幕
+  // 尺寸下看起來都是同一種疏密關係。
+  const DVD_TAP_HINT_GAP_MIN = 12;
+  const DVD_TAP_HINT_VIEWPORT_PAD = 10; // 提示圖離視窗邊緣至少留這麼多，不要黏在螢幕邊上
+
+  let dvdTapHintPointerX = 0, dvdTapHintPointerY = 0;
+  let dvdTapHintPointerKnown = false; // 還沒收到任何一次滑鼠移動之前，根本不知道要跟誰比對
+  let dvdTapHintVisible = false;
+  let dvdTapHintRAF = null;
+  let dvdTapHintW = 0, dvdTapHintH = 0; // 提示圖實際的排版尺寸，show 的當下量一次
+  // 這次出現要放在哪一邊：show 的當下隨機決定「四邊的優先順序」，之後每一
+  // 影格都照這個順序挑第一個「塞得下」的邊——所以位置是隨機的（每次碰到
+  // 都可能出現在不同邊、不同高度），但在同一次顯示期間是穩定的，只有在
+  // 飄動物件飄到視窗邊緣、原本那一邊真的擠不下時才會自動換邊。
+  let dvdTapHintSideOrder = ['right', 'bottom', 'left', 'top'];
+  let dvdTapHintFrac = 0.5; // 沿著那一邊的隨機位置（0=貼該邊起點、1=貼該邊終點）
+
+  function dvdTapHintAllowed(){
+    if(!dvdTapHintEl || !dvdBounce) return false;
+    // 觸控裝置沒有 hover 的概念，這個提示本來就觸發不到，直接整組關掉
+    // （CSS 端也有 @media (hover:none) 的保險，見該處說明）。
+    if(!supportsHover) return false;
+    const bodyCls = document.body.classList;
+    // 首頁以外的所有情境一次擋掉：
+    //   preview-active     → Preview 頁
+    //   detail-active      → 點進某張照片的詳細頁
+    //   photo-fall-active  → 照片物理堆疊頁面
+    //   initial-reveal-pending → 進站淡入還沒放行，畫面上什麼都還看不到
+    if(bodyCls.contains('preview-active') ||
+       bodyCls.contains('detail-active') ||
+       bodyCls.contains('photo-fall-active') ||
+       bodyCls.contains('initial-reveal-pending')) return false;
+    // photoFallModeActive / photoFallState 是堆疊模式自己的狀態機（body 上
+    // 的 class 在進場／退場的某些中間影格可能還沒同步），一併檢查，確保
+    // 堆疊模式從按下雙擊那一刻到完全收場為止，全程都不會冒出提示。
+    if(photoFallModeActive || photoFallState !== 'idle') return false;
+    // 飄動物件自己不在畫面上（詳細頁的隱藏狀態、或圖片庫還沒準備好）時，
+    // 它的外框只是一個停在最後位置的「隱形矩形」（見 .dvd-bounce.dvd-hidden
+    // 與 dvd-image-pending 的完整說明），當然不該對它做 hover 提示。
+    if(dvdBounce.classList.contains('dvd-hidden') ||
+       dvdBounce.classList.contains('dvd-image-pending')) return false;
+    // 桌布截圖預覽彈窗、堆疊頁面規則說明圖蓋在最上層時，底下的一切都不該
+    // 再有互動回饋（理由跟其他幾處同款保護一致）。
+    if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return false;
+    if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) return false;
+    return true;
+  }
+
+  // 滑鼠這一刻有沒有真的落在「飄動物件去背後的圖案本身」上。
+  // 先用外框矩形快速排除（絕大多數影格都在這裡就 return false，成本極低），
+  // 真的落在框內才進一步把座標轉回物件的本地未旋轉座標系、用那張圖的 alpha
+  // 遮罩取樣——做法跟撞牆判斷用的 pixelShapesOverlap() 完全同一套（見該處
+  // 說明），所以「看起來碰到了」跟「判定碰到了」永遠一致：滑鼠穿過照片
+  // 去背後的透明空隙時不會誤觸發提示。
+  // 取樣不只取滑鼠那一個點，還取它周圍一圈偏移點，讓邊緣有一點容錯，
+  // 不用把游標精準壓在圖案正中央才會有反應。
+  function dvdTapHintPointerOnObject(px, py, tolerance){
+    if(!dvdW || !dvdH) return false;
+    if(px < dvdX - tolerance || px > dvdX + dvdW + tolerance ||
+       py < dvdY - tolerance || py > dvdY + dvdH + tolerance) return false;
+    const entry = getCachedAlphaMask(dvdActiveImgSrc);
+    if(!entry) return true; // 這張圖的遮罩還沒算好，退回「外框矩形」判斷，行為跟遮罩上線前一樣
+    const cx = dvdX + dvdW / 2, cy = dvdY + dvdH / 2;
+    const theta = -dvdRotationDeg * Math.PI / 180; // 反方向旋轉，把螢幕座標轉回本地未旋轉座標系
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    const t = tolerance, d = tolerance * 0.7;
+    const offsets = [0, 0, t, 0, -t, 0, 0, t, 0, -t, d, d, -d, d, d, -d, -d, -d];
+    for(let i = 0; i < offsets.length; i += 2){
+      const relX = px + offsets[i] - cx, relY = py + offsets[i + 1] - cy;
+      const localX = relX * cosT - relY * sinT + dvdW / 2;
+      const localY = relX * sinT + relY * cosT + dvdH / 2;
+      if(sampleAlphaMaskSolid(entry, localX / dvdW, localY / dvdH)) return true;
+    }
+    return false;
+  }
+
+  // 依照這次隨機決定的四邊優先順序，挑第一個「放得下」的邊，算出提示圖左上角
+  // 應該擺在哪個座標。
+  // 「圖片的邊界」用的不是外框矩形，而是 computeDvdPixelInsets() 算出來的
+  // 「去背後實際圖案的外接範圍」（同一支函式也是撞牆判斷在用的，見該處完整
+  // 說明）——這正是「不要蓋在 png 有圖片的地方」這個要求的關鍵：照片去背後
+  // 四周常常留著大片透明區域，如果貼著外框矩形擺，看起來會離圖案很遠；貼著
+  // 實際圖案邊界擺，才會像設計稿那樣剛好貼在圖形旁邊，而且無論如何都在圖案
+  // 之外、不會壓到任何一個不透明像素。
+  function computeDvdTapHintPlacement(){
+    const insets = computeDvdPixelInsets();
+    const boxLeft = dvdX + insets.left;
+    const boxTop = dvdY + insets.top;
+    const boxRight = dvdX + dvdW - insets.right;
+    const boxBottom = dvdY + dvdH - insets.bottom;
+    const boxW = Math.max(1, boxRight - boxLeft);
+    const boxH = Math.max(1, boxBottom - boxTop);
+
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const pad = DVD_TAP_HINT_VIEWPORT_PAD;
+    const gap = Math.max(DVD_TAP_HINT_GAP_MIN, dvdTapHintH * 0.5);
+    const hw = dvdTapHintW, hh = dvdTapHintH;
+
+    let fallback = null;
+    for(let i = 0; i < dvdTapHintSideOrder.length; i++){
+      const side = dvdTapHintSideOrder[i];
+      let x, y, fits;
+      if(side === 'right'){
+        x = boxRight + gap;
+        y = boxTop + boxH * dvdTapHintFrac - hh / 2;
+        fits = (x + hw) <= (vw - pad);
+      } else if(side === 'left'){
+        x = boxLeft - gap - hw;
+        y = boxTop + boxH * dvdTapHintFrac - hh / 2;
+        fits = x >= pad;
+      } else if(side === 'top'){
+        x = boxLeft + boxW * dvdTapHintFrac - hw / 2;
+        y = boxTop - gap - hh;
+        fits = y >= pad;
+      } else { // bottom
+        x = boxLeft + boxW * dvdTapHintFrac - hw / 2;
+        y = boxBottom + gap;
+        fits = (y + hh) <= (vh - pad);
+      }
+      // 沿著該邊的那個軸向可以自由夾回視窗內（往上下／左右滑一點不會讓它
+      // 蓋到圖案），垂直於該邊的那個軸向則絕對不能夾——夾了就會被推回圖案
+      // 上面，所以上面的 fits 判斷只看那個不能夾的軸。
+      if(side === 'right' || side === 'left'){
+        y = Math.max(pad, Math.min(vh - hh - pad, y));
+      } else {
+        x = Math.max(pad, Math.min(vw - hw - pad, x));
+      }
+      if(fits) return { x, y };
+      if(!fallback) fallback = { x, y }; // 四邊都擠不下時（極端情況）至少有個位置可用
+    }
+    return fallback || { x: boxRight + gap, y: boxTop };
+  }
+
+  function positionDvdTapHint(){
+    const pos = computeDvdTapHintPlacement();
+    // 外層容器只寫 translate3d、完全沒有 transition（見 CSS .dvd-tap-hint
+    // 的說明），所以這裡逐影格改寫位置不會有任何延遲，提示圖會像黏在飄動
+    // 物件旁邊一樣跟著它走；縮放／淡入淡出則是內層圖片自己的 transition
+    // 在負責，兩條軌道互不干擾。
+    dvdTapHintEl.style.transform = 'translate3d(' + Math.round(pos.x) + 'px,' + Math.round(pos.y) + 'px,0)';
+  }
+
+  function showDvdTapHint(){
+    // 提示圖還沒下載/排版完成時 offsetWidth 會是 0，這種情況先不顯示——
+    // 寧可這一次不出現，也不要先擺出一個尺寸是 0 的東西再忽然撐開。
+    // 每次要顯示時重量一次，順便自動跟上視窗寬度改變後的新尺寸（高度是
+    // 用 vw 內插出來的，見 CSS .dvd-tap-hint-img）。
+    dvdTapHintW = dvdTapHintImgEl ? dvdTapHintImgEl.offsetWidth : 0;
+    dvdTapHintH = dvdTapHintImgEl ? dvdTapHintImgEl.offsetHeight : 0;
+    if(!dvdTapHintW || !dvdTapHintH) return;
+    // 這次出現用的隨機擺放：四邊順序洗牌 + 沿邊的隨機位置。刻意把範圍收在
+    // 0.18~0.82 之間，不讓它跑到太靠近圖案的角落，那裡看起來會像沒對齊。
+    dvdTapHintSideOrder = ['right', 'bottom', 'left', 'top'];
+    for(let i = dvdTapHintSideOrder.length - 1; i > 0; i--){
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = dvdTapHintSideOrder[i];
+      dvdTapHintSideOrder[i] = dvdTapHintSideOrder[j];
+      dvdTapHintSideOrder[j] = tmp;
+    }
+    dvdTapHintFrac = 0.18 + Math.random() * 0.64;
+    positionDvdTapHint(); // 先把位置擺好，再開始播進場動畫，避免第一幀從舊位置飛過來
+    dvdTapHintEl.classList.remove('leaving');
+    dvdTapHintEl.classList.add('visible');
+    dvdTapHintVisible = true;
+  }
+
+  function hideDvdTapHint(){
+    if(!dvdTapHintVisible) return;
+    dvdTapHintVisible = false;
+    // leaving 會換上比進場更短的那條 transition（見 CSS），讓「滑鼠離開」
+    // 的回饋乾脆俐落；下次 show 時會先把它拿掉，恢復進場用的曲線。
+    dvdTapHintEl.classList.remove('visible');
+    dvdTapHintEl.classList.add('leaving');
+  }
+
+  function dvdTapHintFrame(){
+    dvdTapHintRAF = requestAnimationFrame(dvdTapHintFrame);
+    if(!dvdTapHintPointerKnown || !dvdTapHintAllowed()){
+      hideDvdTapHint();
+      return;
+    }
+    const tolerance = dvdTapHintVisible ? DVD_TAP_HINT_KEEP_TOLERANCE : DVD_TAP_HINT_ENTER_TOLERANCE;
+    if(dvdTapHintPointerOnObject(dvdTapHintPointerX, dvdTapHintPointerY, tolerance)){
+      if(!dvdTapHintVisible) showDvdTapHint();
+      if(dvdTapHintVisible) positionDvdTapHint(); // 顯示期間逐影格黏著物件走
+    } else {
+      hideDvdTapHint();
+    }
+  }
+
+  function startDvdTapHintLoop(){
+    if(dvdTapHintRAF || !dvdTapHintEl || !supportsHover) return;
+    dvdTapHintRAF = requestAnimationFrame(dvdTapHintFrame);
+  }
+  function stopDvdTapHintLoop(){
+    if(dvdTapHintRAF){ cancelAnimationFrame(dvdTapHintRAF); dvdTapHintRAF = null; }
+    hideDvdTapHint();
+  }
+
+  if(dvdTapHintEl && supportsHover){
+    // 只記滑鼠：觸控／筆的 pointermove 不需要（也不該）觸發 hover 提示。
+    // passive:true，純粹讀座標、完全不干涉任何預設行為，不會影響捲動或
+    // 既有的抓取／拖曳判斷。
+    window.addEventListener('pointermove', (e) => {
+      if(e.pointerType && e.pointerType !== 'mouse') return;
+      dvdTapHintPointerX = e.clientX;
+      dvdTapHintPointerY = e.clientY;
+      dvdTapHintPointerKnown = true;
+      startDvdTapHintLoop();
+    }, { passive: true });
+    // 滑鼠離開整個視窗（relatedTarget 為 null 才是真的離開，而不是移到
+    // 頁面內某個子元素上）：忘記最後的座標並停掉迴圈，避免滑鼠早就不在
+    // 畫面上了，飄動物件卻自己飄過那個「殘留座標」又把提示叫出來。
+    window.addEventListener('mouseout', (e) => {
+      if(e.relatedTarget) return;
+      dvdTapHintPointerKnown = false;
+      stopDvdTapHintLoop();
+    });
+    window.addEventListener('blur', () => {
+      dvdTapHintPointerKnown = false;
+      stopDvdTapHintLoop();
+    });
+    // 分頁切到背景時把迴圈收掉（瀏覽器本來就會節流 RAF，這裡只是讓狀態
+    // 乾淨一點）；切回來時滑鼠只要一動就會自己重新啟動。
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden) stopDvdTapHintLoop();
+    });
+    // 視窗尺寸改變 → 提示圖的高度（vw 內插）會跟著變，快取的尺寸失效。
+    // 直接收掉這次顯示，下次滑鼠碰到時 show 會重新量一次最新尺寸。
+    window.addEventListener('resize', () => { hideDvdTapHint(); });
+  }
+  // ========================= （double tap）提示 end =========================
+
 
   if(document.fonts && document.fonts.ready){
     document.fonts.ready.then(() => {
