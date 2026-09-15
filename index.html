@@ -1536,6 +1536,33 @@
     transition: opacity .1s ease-in,
                 transform .1s ease-in;
   }
+  /* ---------- 修正：「手機雙擊時，提示 png 連續消失又跳出兩次」 ----------
+     雙擊本質上是「按下→放開→（短暫兩指都沒按著）→再按下→放開」，JS 那邊
+     刻意維持最即時的節奏：手指一放開，Set 清空，下一影格立刻叫 hide（不
+     像早期一版那樣額外等一段「觀察期」才決定要不要收起——那樣會讓單純放開
+     一次也感覺卡卡的，跟原本「一放開就立刻有反應」的節奏不一樣，所以拿掉
+     了）。改成從動畫本身下手：桌機上面那條 .1s 退場已經很快，快到「雙擊
+     中間那個空檔」內提示幾乎都已經完全淡到看不見了，這時第二下按下只能
+     重新整段播一次進場，看起來就是「消失、又跳出來」。
+     觸控裝置改用一條比較長的退場時間——不是要讓放開後「拖」一段時間才開始
+     反應（transition 一樣是放開那一刻就立刻起跑，起跑的節奏完全沒變），
+     而是讓「完全消失」這件事本身變慢一點：如果雙擊的第二下剛好在這段還沒
+     淡完的期間內按下，CSS transition 會直接從當下那個淡到一半的透明度／
+     縮放，平滑地轉回「進場」的目標值，視覺上只會看到淡一半又轉回來的連續
+     動作，不會是「先完全消失、再整個跳出來」那種脫節的兩段式閃爍；如果真
+     的沒有第二下、使用者確實放開不玩了，也還是會在這段時間內完整淡出、
+     正常消失，只是比桌機版多花一點時間淡到底，不影響「一放開就開始反應」
+     的即時感。時間抓在雙擊判斷本身用的視窗（見 JS DVD_DOUBLE_CLICK_MS，
+     320ms）附近但稍微收窄一些，兼顧「蓋住大多數真實雙擊間隔」跟「真的放開
+     不玩了時，也不要慢到看起來拖泥帶水」。桌機的滑鼠 hover 退場完全不受
+     影響，維持原本 .1s 的乾脆俐落——滑鼠是連續移動判斷，本來就沒有「兩次
+     觸發中間空一下」這種情境，不需要跟著改。 */
+  @media (hover: none) and (pointer: coarse){
+    .dvd-tap-hint.leaving .dvd-tap-hint-img{
+      transition: opacity .26s ease-in,
+                  transform .26s ease-in;
+    }
+  }
   /* 注意：這裡「不」再用 @media (hover:none) 整組隱藏。觸控裝置（手機／
      平板）現在有自己的觸發方式——手指按住飄動物件的整段期間顯示提示（見
      JS dvdTouchHoldPointerIds 那段的完整說明），不是靠 hover，所以不能
@@ -15976,23 +16003,6 @@
   // 兩指都放開了、Set 清空，才真正算放開。
   const dvdTouchHoldPointerIds = new Set();
 
-  // ---------- 修正：「手機雙擊時，提示 png 連續消失又跳出兩次」----------
-  // 成因：雙擊本質上是「按下→放開→（短暫全部手指都放開）→再按下→放開」，
-  // 中間那段兩指都沒按著的空檔，dvdTouchHoldPointerIds 會被清空一瞬間，
-  // touchHolding 直接變 false，下一影格 hideDvdTapHint() 就把提示收起來；
-  // 緊接著第二下 pointerdown 又把它叫出來——退場（.1s）＋進場（.13s）兩段
-  // 動畫在這麼短的時間內連續各跑一次，看起來就是「同一個提示閃一下、消失、
-  // 又跳出來一次」，視覺上很像重複出現兩次。
-  // 修法：手指放開、Set 清空的那一刻不立刻隱藏，而是給一段「觀察期」
-  // （沿用判斷雙擊本身用的同一個 DVD_DOUBLE_CLICK_MS 320ms 時間窗——這正是
-  // 兩次點擊之間允許的最大間隔，用同一個數字才能確保「只要這一下放開後
-  // 320ms 內又按到，就一定還在觀察期內，提示不會被中途收掉」），這段期間
-  // touchHolding 視同仍然成立、提示維持顯示；真的等滿這段時間都沒等到下一
-  // 根手指按下，才代表使用者已經放開不再操作，這時才真正收掉提示。若期間
-  // 真的等到第二下按下，Set 重新非空，跟一般的「持續按著」沒有任何差異，
-  // 動畫全程只播過一次進場，不會有中途消失又出現的痕跡。
-  let dvdTouchHoldGraceUntil = 0;
-
   function dvdTapHintFrame(){
     dvdTapHintRAF = requestAnimationFrame(dvdTapHintFrame);
     if(!dvdTapHintAllowed()){
@@ -16003,12 +16013,11 @@
     // 最大的差異：滑鼠版每影格都要重新判斷「這一刻碰到了沒」，觸控版一旦
     // 按下就是連續的「持有」狀態，中途物件本身會被抓取邏輯凍結／跟著手指
     // 移動，不會有滑鼠版那種「移動中掠過」的問題，也就不需要進出場兩個
-    // 不同的容錯門檻。
-    // 手指還按著 → 當然成立；Set 剛清空但還在「觀察期」內 → 也視同成立
-    // （見上面 dvdTouchHoldGraceUntil 的完整說明），避免雙擊中間那個空檔
-    // 被提早判定成「放開了」而閃一下。
-    const touchHolding = dvdTouchHoldPointerIds.size > 0 ||
-      (dvdTouchHoldGraceUntil > 0 && performance.now() < dvdTouchHoldGraceUntil);
+    // 不同的容錯門檻。放開就立刻視為「不持有」，維持跟原本一樣的即時節奏
+    // ——雙擊中間那段空檔不會被人為拖長，需要避免的閃爍改成用下面
+    // （CSS .leaving、@media hover:none 那條規則）在動畫層面解決，不動這裡
+    // 的即時判斷。
+    const touchHolding = dvdTouchHoldPointerIds.size > 0;
     // 滑鼠：維持原本逐影格比對座標的 hover 判斷，只有支援 hover 且已經
     // 知道滑鼠位置時才需要算，觸控裝置這裡永遠是 false、不會多做任何事。
     let hoverHit = false;
@@ -16057,7 +16066,6 @@
       window.addEventListener('blur', () => {
         dvdTapHintPointerKnown = false;
         dvdTouchHoldPointerIds.clear(); // 視窗失焦時觸控序列多半也已經中斷，一併清空保底
-        dvdTouchHoldGraceUntil = 0; // 觀察期也一併作廢，避免失焦期間累積的舊時間戳回來後還讓提示誤判成該顯示
         stopDvdTapHintLoop();
       });
     }
@@ -16079,17 +16087,9 @@
     // 手指是不是按在物件上放開的」，直接無條件移除更簡單也更不會漏接。
     window.addEventListener('pointerup', (e) => {
       dvdTouchHoldPointerIds.delete(e.pointerId);
-      // 最後一根手指也放開了（Set 清空）：不是立刻隱藏，而是開一段觀察期，
-      // 讓「雙擊中間那個兩指都沒按著」的空檔不會被誤判成放開（完整理由見
-      // dvdTouchHoldGraceUntil 宣告處的說明）。中途還有其他手指按著（Set
-      // 還沒清空）就不需要、也不該動這個值。
-      if(dvdTouchHoldPointerIds.size === 0) dvdTouchHoldGraceUntil = performance.now() + DVD_DOUBLE_CLICK_MS;
     }, { passive: true });
     window.addEventListener('pointercancel', (e) => {
       dvdTouchHoldPointerIds.delete(e.pointerId);
-      // pointercancel（手勢被系統中途取消，例如捲動接管）跟正常放開一樣視為
-      // 「這根手指不再算數」，但不給觀察期——手勢都被取消了，不太可能緊接著
-      // 又是一次有意義的第二下點擊，直接讓下一影格照 Set 清空與否正常判斷。
     }, { passive: true });
     // 分頁切到背景時把迴圈收掉（瀏覽器本來就會節流 RAF，這裡只是讓狀態
     // 乾淨一點）；觸控的持有狀態也一併清空——背景時系統多半已經中斷手勢，
@@ -16098,7 +16098,6 @@
     document.addEventListener('visibilitychange', () => {
       if(document.hidden){
         dvdTouchHoldPointerIds.clear();
-        dvdTouchHoldGraceUntil = 0; // 理由同 blur：避免切回分頁後這個舊時間戳還沒過期，誤讓提示顯示一下
         stopDvdTapHintLoop();
       }
     });
