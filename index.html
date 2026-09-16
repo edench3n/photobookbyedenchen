@@ -3206,12 +3206,55 @@
   // 直的、還是正方的，理論上佔的可視面積都會被拉到差不多大小，不會再有
   // 橫式明顯小、直式明顯大的落差。長寬比極端的照片（例如很長的全景照）
   // 會夾在 0.4~2.5 之間，避免被拉成一條極細的長條。
-  const GRID_IMG_BOX_RATIO = 0.42; // 首頁縮圖整體再縮小一點：原本沿用舊版 CSS 的 0.52，
-                                     // 使用者反應想要整體再縮小，調低這個比例即可讓每張
-                                     // 照片的目標面積一起等比縮小（面積跟這個比例的平方成
-                                     // 正比），不影響上面「依真實長寬比分配寬高」的邏輯。
+  const GRID_IMG_BOX_RATIO = 0.47; // 首頁縮圖整體大小：使用者反應想要整體再放大一點點，
+                                     // 從 0.42 調高到 0.47（面積跟這個比例的平方成正比），
+                                     // 不影響上面「依真實長寬比分配寬高」的邏輯。
   const GRID_IMG_ASPECT_MIN = 0.4;
   const GRID_IMG_ASPECT_MAX = 2.5;
+  // ---------- 每張照片隨機「有大有小」的面積變化 ----------
+  // 使用者希望畫面上的照片不要全部一樣大，要隨機參差；反應第一版的落差
+  // 還不夠明顯，所以這裡分兩層：① 每張照片都有的基礎隨機浮動（範圍拉得
+  // 比第一版更大）；② 另外從整批照片裡，每隔固定張數挑一張「刻意加碼」
+  // 放得更大，當作視覺上的重點照片。如果單純用 Math.random()，每次重新
+  // 排版（視窗縮放、字體載入完成、橫直切換…都會呼叫 resizeAllGridImages()
+  // 重新套用一次尺寸）都會重新抽一次亂數，同一張照片的大小就會在使用者
+  // 眼前忽大忽小地跳動，看起來像 bug。改成用「照片在 photos 陣列裡的索引」
+  // 當種子、用固定公式算出 0~1 之間的偽隨機數（sin 亂數是常見的無狀態
+  // hash 手法）——同一張照片、同一個索引，不管重算幾次都會得到完全一樣
+  // 的隨機值，大小穩定不跳動，但不同照片彼此之間仍然看起來隨機、大小
+  // 不一。散落排版（scatterStep()／relaxScatterSlots()）本來就是依照片
+  // 各自算出來的實際大小去分配間距、避免互相疊死，所以這裡的隨機大小
+  // 差異（包含被加碼放大的那些）會自然反映在畫面疏密上，不需要額外處理。
+  const GRID_IMG_VARIANCE_MIN = 0.6;  // 一般照片的基礎面積下限
+  const GRID_IMG_VARIANCE_MAX = 1.55; // 一般照片的基礎面積上限（比第一版拉開更多，落差更明顯）
+  // 「刻意放大」的重點照片：不是每張都比大小，而是整批裡每
+  // GRID_IMG_FEATURE_INTERVAL 張，固定挑其中一張出來額外加碼放大。用
+  // 「照片索引」分組挑選，散落排版本身又會把每張照片洗到隨機位置，兩者
+  // 疊加起來，這些被加碼放大的照片自然會平均散落在整個頁面上，不會擠成
+  // 一團，也不會固定出現在畫面同一個角落。
+  const GRID_IMG_FEATURE_INTERVAL = 6;        // 每幾張裡挑一張出來加碼放大
+  const GRID_IMG_FEATURE_BOOST_MIN = 1.9;     // 加碼放大的額外倍率下限（疊乘在基礎隨機值上）
+  const GRID_IMG_FEATURE_BOOST_MAX = 2.7;     // 上限
+  function gridItemSizeVarianceFactor(index){
+    const seed = Math.sin((index + 1) * 12.9898) * 43758.5453;
+    const frac = seed - Math.floor(seed); // 0~1 之間、依 index 固定不變的偽隨機值
+    let variance = GRID_IMG_VARIANCE_MIN + frac * (GRID_IMG_VARIANCE_MAX - GRID_IMG_VARIANCE_MIN);
+    // 用另一組獨立的 hash 常數決定「這一組（每 GRID_IMG_FEATURE_INTERVAL
+    // 張）裡面，是第幾張被選為重點照片」——刻意不要每組都選第 0 張，不然
+    // 加碼放大的照片在畫面上會有規律地固定落在同一種相對位置，看起來不夠
+    // 隨機。groupStart 相同的照片（同一組）會算出同一個 featuredOffset，
+    // 確保每一組真的都恰好選出一張。
+    const groupStart = Math.floor(index / GRID_IMG_FEATURE_INTERVAL) * GRID_IMG_FEATURE_INTERVAL;
+    const groupSeed = Math.sin((groupStart + 1) * 78.233) * 12543.987;
+    const groupFrac = groupSeed - Math.floor(groupSeed);
+    const featuredOffset = Math.floor(groupFrac * GRID_IMG_FEATURE_INTERVAL);
+    if((index - groupStart) === featuredOffset){
+      const boostSeed = Math.sin((index + 1) * 39.425) * 9821.318;
+      const boostFrac = boostSeed - Math.floor(boostSeed);
+      variance *= GRID_IMG_FEATURE_BOOST_MIN + boostFrac * (GRID_IMG_FEATURE_BOOST_MAX - GRID_IMG_FEATURE_BOOST_MIN);
+    }
+    return variance;
+  }
   // ---------- 「格子」這個概念現在只剩下「算尺寸的基準」 ----------
   // 首頁照片改成隨機散落之後（見 CSS .grid 那段說明），畫面上已經沒有任何
   // 一個真的存在的方形格子可以量了——原本 renderGrid()／resizeAllGridImages()
@@ -3241,11 +3284,17 @@
   // 依照片的長寬比與格子邊長，算出這張照片該顯示多大（維持原本「每張照片
   // 目標面積相同」的邏輯，一個字都沒改，只是抽成可以單獨呼叫的函式，讓
   // 散落排版、標題對齊那邊都能共用同一份算式）。
-  function gridImageSizeFor(photo, cellSide){
+  // 依照片的長寬比、格子邊長、以及這張照片自己的隨機面積係數，算出這張
+  // 照片該顯示多大（維持原本「每張照片目標面積相同、再乘上隨機係數」的
+  // 邏輯，抽成可以單獨呼叫的函式，讓散落排版、標題對齊那邊都能共用同一份
+  // 算式）。index 用來算 gridItemSizeVarianceFactor()，讓同一張照片每次
+  // 重算大小都拿到一樣的隨機值，不會跳動。
+  function gridImageSizeFor(photo, cellSide, index){
     const rawAspect = (photo && photo.aspect) ? photo.aspect : 1; // 沒有量到寬高比就退回正方形，維持原本行為
     const aspect = Math.min(GRID_IMG_ASPECT_MAX, Math.max(GRID_IMG_ASPECT_MIN, rawAspect));
     const boxSide = cellSide * GRID_IMG_BOX_RATIO;
-    const targetArea = boxSide * boxSide; // 以「正方形照片會佔的面積」當成每張照片共同的目標面積
+    const variance = gridItemSizeVarianceFactor(index || 0); // 每張照片固定的隨機面積係數，讓照片有大有小
+    const targetArea = boxSide * boxSide * variance; // 以「正方形照片會佔的面積」再乘上隨機係數，當成這張照片的目標面積
     // area = w*h，aspect = w/h → h = sqrt(area/aspect)，w = h*aspect
     const h = Math.sqrt(targetArea / aspect);
     return { w: h * aspect, h: h };
@@ -3255,7 +3304,8 @@
     const thumbWrap = item.querySelector('.thumb-wrap');
     const img = thumbWrap ? thumbWrap.querySelector('img') : null;
     if(!thumbWrap || !img) return;
-    const size = gridImageSizeFor(photos[Number(item.dataset.index)], cellSide);
+    const index = Number(item.dataset.index);
+    const size = gridImageSizeFor(photos[index], cellSide, index);
     img.style.width = size.w + 'px';
     img.style.height = size.h + 'px';
     // 散落排版要用「這張照片有多大」來算位置與邊界，順手記在元素身上，
@@ -3284,7 +3334,7 @@
     const gap = gridGapPx();
     const gridLeft = grid.getBoundingClientRect().left;
     const col = dataIndex % cols;
-    const size = gridImageSizeFor(photo, cellSide);
+    const size = gridImageSizeFor(photo, cellSide, dataIndex);
     const cellLeft = gridLeft + col * (cellSide + gap);
     return {
       left: cellLeft + (cellSide - size.w) / 2, // 照片在格子裡是置中的
@@ -4240,7 +4290,7 @@
       // 用照片自己的尺寸換算一個「等效半徑」：大張的照片本來就該佔比較多
       // 空間，推開的距離跟著它自己的大小走，最後看起來的「留白」才會均勻，
       // 而不是大小張一視同仁、大張的周圍反而顯得擠。
-      const size = gridImageSizeFor(photos[i], cellSide);
+      const size = gridImageSizeFor(photos[i], cellSide, i);
       radii[i] = Math.hypot(size.w, size.h) / 2;
       halfW[i] = size.w / 2;
       halfH[i] = size.h / 2;
@@ -7804,6 +7854,35 @@
   // 不會有任何功能性的問題，只是精細撞牆的時間點稍微晚一點點。
   const PF_ALPHA_MASK_ROWS_PER_CHUNK = DVD_LOW_POWER_DEVICE ? 6 : 12; // 沒有 requestIdleCallback 時，每批固定處理的「列」數，抓一個經驗上足夠短、不會讓單批卡住太久的數字
   const PF_ALPHA_MASK_IDLE_TIME_MARGIN_MS = 3; // 跟 renderGrid() 的 GRID_IDLE_TIME_MARGIN_MS 同一個道理，留一點緩衝給瀏覽器自己排的其他工作
+  // ---------- 從 0/1 遮罩格算出「輪廓像素」座標（正規化成 0..1）----------
+  // 抽成獨立函式的原因：即時運算（buildAlphaMaskFromSourceChunked() 內的
+  // finishMask()）跟離線預算好、從 masks.json 查表讀回來的路徑
+  // （requestAlphaMask() 裡 precomputedEMasks 那段）都需要「輪廓點」這份
+  // 資料給 computeDvdPixelInsets() 用，兩邊共用同一套演算法，才能保證
+  // 不管是即時算的、還是查表查到的，撞牆判斷拿到的輪廓精細度完全一致。
+  // 這裡也是「離線資料圖片撞牆時隔著一段透明區域才撞到」這個回報的修法
+  // 關鍵：如果目前部署的 masks.json 是在 build-masks.js 補上 boundary
+  // 欄位之前就產生的舊版本，pre.boundary 會是 undefined／空陣列——查表
+  // 路徑原本遇到這種情況只會直接退回空陣列，等於這些圖片的撞牆判斷永遠
+  // 退回矩形外框、感覺就是「隔著透明區域才撞到」。現在改成用已經解碼出來
+  // 的 0/1 遮罩格「現場」補算一次輪廓點（演算法跟這裡完全一樣），不必
+  // 等 masks.json 重新產生，所有圖片都能拿到精確的圖案輪廓。
+  function computeMaskBoundaryPoints(mask, maskW, maskH){
+    const boundaryPts = [];
+    for(let y = 0; y < maskH; y++){
+      const rowBase = y * maskW;
+      for(let x = 0; x < maskW; x++){
+        if(mask[rowBase + x] !== 1) continue;
+        const left = x > 0 ? mask[rowBase + x - 1] : 0;
+        const right = x < maskW - 1 ? mask[rowBase + x + 1] : 0;
+        const up = y > 0 ? mask[rowBase - maskW + x] : 0;
+        const down = y < maskH - 1 ? mask[rowBase + maskW + x] : 0;
+        if(left === 1 && right === 1 && up === 1 && down === 1) continue; // 四周都是實心＝內部像素，不可能是最外緣，跳過
+        boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
+      }
+    }
+    return new Float32Array(boundaryPts);
+  }
   function buildAlphaMaskFromSourceChunked(source, naturalW, naturalH, callback){
     if(!naturalW || !naturalH){ callback(null); return; }
     const fullScale = Math.min(1, PF_ALPHA_MASK_FULL_CAP_DIM / Math.max(naturalW, naturalH));
@@ -7893,21 +7972,8 @@
       // 掃過已經縮小完成的 maskW×maskH 網格（最大 72×72＝5184 格，效能
       // 較弱裝置只有 48×48＝2304 格），運算量遠小於上面掃描中繼解析度
       // 那段，維持一次做完，不需要額外分批。
-      const boundaryPts = [];
-      for(let y = 0; y < maskH; y++){
-        const rowBase = y * maskW;
-        for(let x = 0; x < maskW; x++){
-          if(mask[rowBase + x] !== 1) continue;
-          const left = x > 0 ? mask[rowBase + x - 1] : 0;
-          const right = x < maskW - 1 ? mask[rowBase + x + 1] : 0;
-          const up = y > 0 ? mask[rowBase - maskW + x] : 0;
-          const down = y < maskH - 1 ? mask[rowBase + maskW + x] : 0;
-          if(left === 1 && right === 1 && up === 1 && down === 1) continue; // 四周都是實心＝內部像素，不可能是最外緣，跳過
-          boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
-        }
-      }
       callback({
-        mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts),
+        mask, w: maskW, h: maskH, boundary: computeMaskBoundaryPoints(mask, maskW, maskH),
         // 像素級可見範圍（見上面「額外記錄」那段完整說明），正規化成 0..1：
         // +1 是因為 pxMaxX/pxMaxY 記的是「最後一顆有畫到東西的像素索引」，
         // 要算到這顆像素的右／下邊緣才是它真正涵蓋到的範圍，跟一般
@@ -8045,11 +8111,19 @@
     if(precomputedId && precomputedEMasks && precomputedEMasks.has(precomputedId)){
       const pre = precomputedEMasks.get(precomputedId);
       if(pre && pre.mask && pre.w && pre.h){
+        const decodedMask = decodeMaskBits(pre.mask, pre.w * pre.h);
+        // pre.boundary 查得到就直接用（build-masks.js 新版已經算好）；查不到
+        // （舊版 masks.json，還沒補上這個欄位）就用已經解碼好的 0/1 遮罩格
+        // 現場補算一次，理由見上面 computeMaskBoundaryPoints() 的完整說明——
+        // 不這樣做的話，這些圖片的撞牆判斷永遠會退回矩形外框。
+        const boundary = (pre.boundary && pre.boundary.length)
+          ? Float32Array.from(pre.boundary)
+          : computeMaskBoundaryPoints(decodedMask, pre.w, pre.h);
         finish({
-          mask: decodeMaskBits(pre.mask, pre.w * pre.h),
+          mask: decodedMask,
           w: pre.w,
           h: pre.h,
-          boundary: (pre.boundary && pre.boundary.length) ? Float32Array.from(pre.boundary) : new Float32Array(0),
+          boundary,
           fullBBox: pre.fullBBox || null,
         });
         return;
@@ -9535,80 +9609,48 @@
   // 對應的像素遮罩用；每次換圖（見 setDvdBounceImageSrc()）都會同步更新。
   let dvdActiveImgSrc = '';
 
-  // ---------- 撞螢幕邊界也改用「實際圖案像素」判斷，不是外框的空白 ----------
-  // 上面 requestAlphaMask()／pixelShapesOverlap() 那套「像素遮罩 vs 像素
-  // 遮罩」原本只用在飄動物件跟頁面內照片（首頁縮圖／詳情頁大圖）的碰撞
-  // 判斷；跟螢幕四個邊界的撞牆，原本仍然單純拿「整個裁切後的矩形外框」去
-  // 判斷——去背裁切只保證外框本身沒有多餘的四周留白，外框「內部」（尤其
-  // 是圖案本身是異形、鏤空造型，或飄動時帶有旋轉角度）仍然可能留有大片
-  // 透明區域，造成「肉眼看到的圖案明明還沒真的碰到螢幕邊緣，就已經反彈」
-  // 的落差感——這正是「撞擊依舊是用周圍空白在撞擊邊界」這個回報的成因。
+  // ---------- 撞螢幕邊界改用「圖片真實的矩形邊界」，不再依賴像素遮罩 ----------
+  // 這裡之前試過用「去背像素遮罩的輪廓點」來算撞牆邊界，理論上應該更貼合
+  // 圖案的真實外緣，但實際上這條路線有好幾個天生的脆弱點：① 遮罩是非同步
+  // 建立的（不管是即時算的 buildAlphaMaskFromSourceChunked()，還是查表用的
+  // 離線 masks.json），剛換上新圖、遮罩還沒就緒的那幾影格，只能先暫時
+  // 退回矩形外框；② 遮罩本身是縮到 72×72（甚至更小）格子的低解析度取樣，
+  // 輪廓天生就是「格子精度」而不是像素精度，旋轉的時候這個誤差會被放大；
+  // ③ 完全依賴離線 masks.json 有沒有正確重新產生過 boundary 欄位。使用者
+  // 實測後回報「依舊不是用圖片真實四邊形邊界在撞擊」，代表這幾個脆弱點
+  // 加起來，實際觀感還是跟「圖片真正的矩形邊緣」對不齊。
   //
-  // 這裡補上：沿用同一份已經在算物件間碰撞用的像素遮罩，取出圖案的
-  // 「輪廓像素」（見 buildAlphaMaskFromSource() 裡新增的 boundary 說明），
-  // 套用目前這一影格的旋轉角度，算出圖案本身實際的上下左右最外緣，相對
-  // 外框邊緣各自內縮了多少距離（inset）。撞牆邊界檢查時，把這個內縮距離
-  // 加回允許的活動範圍——外框可以比原本多飄出螢幕 inset 這麼多，直到
-  // 圖案本身的像素真的碰到螢幕邊緣，才會觸發反彈，不再是外框一碰到就彈開。
-  // 每一影格重新算一次，是因為飄動物件會持續旋轉（見 dvdRotationDeg／
-  // stepDvdRotation()），最外緣的位置會隨旋轉角度即時改變，沒辦法只算
-  // 一次就沿用。運算量只跟圖案「輪廓」的像素數量成正比（見上面 boundary
-  // 的說明，遠小於整張遮罩的面積），每影格重算一次不會造成效能負擔。
-  // 遮罩還沒準備好（例如剛換上新圖，requestAlphaMask() 是非同步的、還沒
-  // 跑完）就傳回全 0 的 inset，等同暫時退回原本「矩形外框」的行為，不會
-  // 等待、也不會讓撞牆判斷暫時失靈。
+  // 這裡的圖片本來就是規則的矩形（撞牆時唯一會變的只有旋轉角度
+  // dvdRotationDeg，不會變形），要算「這個矩形被旋轉 theta 度之後，
+  // 相對於螢幕座標軸的真正外接範圍」完全可以用三角函數直接算出精確解，
+  // 不需要透過取樣、非同步、有解析度誤差的像素遮罩去「猜」——這樣的
+  // 邊界永遠 100% 貼合圖片實際的四個角，不管遮罩準不準備好、準不準，
+  // 兩者完全無關，也不會再受離線資料是否重新產生過的影響。
+  //
+  // 幾何推導：矩形未旋轉時半寬高是 halfW/halfH，四個角相對中心點的座標
+  // 分別是 (±halfW, ±halfH)。旋轉 theta 度之後，這四個角在螢幕座標軸上的
+  // x／y 分量最大值分別是 halfW*|cosθ| + halfH*|sinθ|（x 方向）跟
+  // halfW*|sinθ| + halfH*|cosθ|（y 方向）——這就是「旋轉後矩形」在螢幕
+  // 座標軸上真正的半寬、半高（正是使用者要的「四邊形的真實邊界」）。跟
+  // 未旋轉時的 halfW/halfH 相減，就是這一刻四邊各自該內縮（或凸出）多少
+  // 距離；角度是 0／90／180…（沒有真的轉）時，兩者相等，inset 剛好是 0，
+  // 完全退回原本「矩形碰矩形」的行為，不會影響沒有旋轉時的手感。
   function computeDvdPixelInsets(){
-    const entry = getCachedAlphaMask(dvdActiveImgSrc);
-    if(!entry || !entry.boundary || !entry.boundary.length || !dvdW || !dvdH){
+    if(!dvdW || !dvdH){
       return { left: 0, right: 0, top: 0, bottom: 0 };
     }
-    const pts = entry.boundary;
-    const theta = dvdRotationDeg * Math.PI / 180; // 跟 CSS rotate() 同方向，直接拿本地座標旋轉即可換算成目前螢幕方向下的偏移
-    const cosT = Math.cos(theta), sinT = Math.sin(theta);
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for(let i = 0; i < pts.length; i += 2){
-      const lx = (pts[i] - 0.5) * dvdW; // 相對外框中心點的本地座標（尚未旋轉）
-      const ly = (pts[i + 1] - 0.5) * dvdH;
-      const rx = lx * cosT - ly * sinT; // 旋轉之後，相對外框中心點的座標
-      const ry = lx * sinT + ly * cosT;
-      if(rx < minX) minX = rx;
-      if(rx > maxX) maxX = rx;
-      if(ry < minY) minY = ry;
-      if(ry > maxY) maxY = ry;
-    }
-    if(minX > maxX || minY > maxY){
-      return { left: 0, right: 0, top: 0, bottom: 0 };
-    }
-    // 換算成「外框四邊各自內縮了多少距離」。
-    //
-    // ---------- 修正：「圖片已經跑出邊界才有反彈」的真正殘餘成因 ----------
-    // 這裡原本用 Math.max(0, …) 把結果強制夾成不小於 0，理由寫的是「旋轉
-    // 不會讓圖案的像素跑到外框範圍以外」——這句話只有在「外框」指的是
-    // getBoundingClientRect() 那種隨旋轉一起撐大的外接矩形時才成立；但這裡
-    // minX/maxX 是拿 dvdW/dvdH（offsetWidth/offsetHeight，永遠是未旋轉的
-    // 原始寬高，理由見 measureDvdSize() 的說明）當半寬高在換算 inset，兩者
-    // 不是同一個框。圖案的可視像素只要夠靠近去背後的四個角（絕大多數照片
-    // 裁切完都會有像素貼到至少某個角落附近），旋轉 45 度左右時，那個角上
-    // 的像素離中心的距離會比 halfW/halfH 更遠——也就是 minX 真的可能小於
-    // -halfW（或 maxX 大於 halfW），算出來的 inset 本來就應該是負的：
-    // 代表圖案此刻的實際輪廓，比「未旋轉時的框邊」還要更往外凸出。
-    // 把這種負值夾成 0，等於告訴下面 stepDvdBounce()「框邊碰到螢幕邊界時
-    // 才反彈就好」，但實際上圖案的像素在框邊碰到之前，就已經先一步凸出
-    // 螢幕外了——這正是「圖片已經跑出邊界才有反彈」在像素遮罩上線之後
-    // 依然存在的根本原因：問題不是遮罩不準，而是這裡把「應該更早反彈」
-    // 的負值訊號整個丟棄了。
-    // 修法：不再夾成 0，讓 inset 可以是負值，交給下面 stepDvdBounce()／
-    // clampDvdIntoViewport() 的 minX/maxX 算式自然把允許的活動範圍收緊
-    // （負的 inset 會讓邊界往內縮，逼反彈提早在框邊碰到螢幕邊界之前觸發，
-    // 跟圖案肉眼看到的實際邊緣同步）。極端浮點數誤差可能讓數值出現微小的
-    // 正負抖動，這裡不用特別處理，量級遠小於一個像素，不影響觀感。
+    const theta = dvdRotationDeg * Math.PI / 180; // 跟 CSS rotate() 同方向
+    const cosT = Math.abs(Math.cos(theta)), sinT = Math.abs(Math.sin(theta));
     const halfW = dvdW / 2, halfH = dvdH / 2;
-    return {
-      left: minX + halfW,
-      right: halfW - maxX,
-      top: minY + halfH,
-      bottom: halfH - maxY
-    };
+    const rotatedHalfW = halfW * cosT + halfH * sinT; // 旋轉後，矩形四個角在螢幕 x 軸方向的真正半寬
+    const rotatedHalfH = halfW * sinT + halfH * cosT; // 旋轉後，矩形四個角在螢幕 y 軸方向的真正半高
+    // insetX/insetY <= 0：旋轉後的矩形一定跟未旋轉時一樣大或更往外凸出
+    // （角旋出去了），從來不會比未旋轉時更小——跟上面像素遮罩那條路線
+    // 「inset 可以是負值」的結論完全一致，只是這裡是精確算出來的，不是
+    // 用取樣猜的。
+    const insetX = halfW - rotatedHalfW;
+    const insetY = halfH - rotatedHalfH;
+    return { left: insetX, right: insetX, top: insetY, bottom: insetY };
   }
 
   // ---------- 撞牆震動 ----------
