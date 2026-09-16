@@ -12859,6 +12859,42 @@
     try{
       if(!pfItems.length && !pfDvdItem) return; // 畫面上什麼都沒有，沒什麼好擷取的
 
+      // ---------- 修正：「長按進桌布截圖預覽彈窗、回到堆疊頁面後，移動
+      // 某幾張照片會完全穿過其他照片，看起來完全沒有碰撞反應」----------
+      // 成因：長按判定成立、真正呼叫到這裡擷取畫面，靠的是我們自己那組
+      // pointerdown/pointerup/pointercancel 候選邏輯
+      // （pfLongPressCandidatePointerId），跟 Matter.Mouse／MouseConstraint
+      // 自己另外綁在 photoFallStage 上的 mousedown/touchstart 監聽器，是
+      // 兩條完全獨立、彼此互不知情的事件路徑（見下面 pointercancel 監聽器
+      // 裡「長按 PNG 沒反應」那段完整說明：同一根手指按下的世界座標，
+      // 同時也會被 Matter 自己判定成「抓到了一顆物理 body」，用一條
+      // stiffness 0.5 的彈簧把它拉向手指）。使用者長按的如果剛好是某張
+      // PNG（不是空白背景），這張照片這一刻已經是 pfMouseConstraint.body、
+      // 正被那條彈簧拉著。真正放開手指時，Matter 內建的 Mouse 模組只認
+      // `touchend`／`mouseup` 這兩種事件才會清掉 `.body`——完全不認得
+      // `touchcancel`。跟下面 pointercancel 監聽器說明過的同一個成因（主
+      // 執行緒被物理運算塞爆時，瀏覽器可能提前送出 touchcancel 而不是
+      // touchend）如果剛好在這裡發生，Matter 自己的 Mouse 模組就永遠收不到
+      // 「放開」的訊號，pfMouseConstraint.body 從此卡死指向這張照片，之後
+      // 每一步物理更新還是繼續把它硬拉回長按那一刻手指最後停留的座標——
+      // 這股恆定的彈簧力遠大於其他照片碰撞時的推力，使用者之後不管怎麼
+      // 拖這張照片，位置每一影格都會被彈簧立刻拉回原點，肉眼看起來就是
+      // 「完全不跟其他照片產生碰撞」，其實是被這條隱形彈簧釘死在原地，不是
+      // 碰撞判斷本身壞掉。真正命中長按判定成立、確定要跳出桌布預覽彈窗的
+      // 這一刻，使用者的手指顯然已經完成這次操作、不可能還在「拖曳」，這裡
+      // 主動比照 startPhotoFallEngine() 內 pfMouseButtonGuard 同一套收尾
+      // 邏輯，強制清空 pfMouseConstraint.body／重設 mouse.button，不用再等
+      // Matter 自己那條不可靠的 touchend／mouseup 判斷，從源頭避免卡死；
+      // 同時保險叫醒這顆 body（萬一它剛好也已經睡著），確保接下來使用者
+      // 真的伸手去拖它時，一開始就是完全正常、會跟其他照片碰撞的狀態。
+      if(pfMouseConstraint && pfMouseConstraint.body){
+        if(window.Matter && window.Matter.Sleeping) window.Matter.Sleeping.set(pfMouseConstraint.body, false);
+        pfMouseConstraint.body = null;
+        if(pfMouseConstraint.mouse) pfMouseConstraint.mouse.button = -1;
+        photoFallStage.classList.remove('grabbing');
+        pfDragging = false;
+      }
+
       // 收集目前每個「已經真的載入完成、看得到」的物件：圖片元素本身
       // （直接沿用畫面上現有的 <img>，不重新下載）、物理世界目前的中心點
       // 跟角度、以及顯示用的 box 尺寸（用來換算 object-fit:contain 之後
