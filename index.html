@@ -8308,7 +8308,33 @@
         }
       }
     }
-    const cellW = w / gridW, cellH = h / gridH;
+    // ---------- 修正：「掉落照片撞牆／撞其他照片時，實際圖案跟碰撞邊緣
+    // 之間隔著一段透明」 ----------
+    // 成因：畫面上顯示這張圖的 <img> 用的是 object-fit:contain（見上面
+    // CSS .photo-fall-item img 的說明）——這格容器的寬高（也就是這裡收到
+    // 的 w／h 參數，itemW／itemH）只是依「面積＋概略長寬比」概算出來的，
+    // 很少剛好精準等於這張圖真正的長寬比（真正的比例要看 srcW/srcH）。
+    // object-fit:contain 會把圖片等比例縮到「剛好整張塞進容器、其中一軸
+    // 貼齊，另一軸留白置中」，所以視覺上圖案實際佔用的範圍，通常比整個
+    // 容器 w×h 小一圈。下面原本直接拿整個 w×h 當分母去換算每一格的像素
+    // 座標，等於是把遮罩「硬拉伸貼滿整個容器」，而不是貼合圖片實際顯示
+    // 出來的那個（通常更小一點的）範圍——算出來的碰撞體因此會比使用者
+    // 肉眼看到的圖案大一圈，物件根本還沒真的碰到看得見的圖案，碰撞體的
+    // 邊緣就先撞到牆／其他物件了，感覺就是「隔著一段透明才撞到」。而且
+    // 概算長寬比幾乎不會剛好精準命中每一張圖真正的比例，這個落差每張圖
+    // 都會有，這正是「全部都這樣」的成因。
+    // 修法：用跟 CSS object-fit:contain 完全同一套公式（沿用下面
+    // pfWallpaperContainFit() 現成的算法，確保視覺呈現、碰撞判斷兩邊
+    // 算出來的結果永遠一致），先算出圖片實際會顯示在容器裡的「縮小後」
+    // 尺寸（contentW/contentH），遮罩格子的像素座標改用這個縮小後的尺寸
+    // 去換算，不再用整個外框 w×h。因為 contain 本來就是置中對齊，內容的
+    // 中心點永遠跟容器中心點重合，中心點座標系不用另外處理，只要把用來
+    // 換算格子大小、中心偏移量的分母從 w/h 換成 contentW/contentH，算出來
+    // 的碰撞體範圍就會精準貼合使用者實際看到的圖案範圍，不再比視覺上的
+    // 圖案大一圈。
+    const fit = pfWallpaperContainFit(w, h, srcW, srcH);
+    const contentW = fit.w, contentH = fit.h;
+    const cellW = contentW / gridW, cellH = contentH / gridH;
     const rects = [];
     for(let gy = 0; gy < gridH; gy++){
       let runStart = -1;
@@ -8317,8 +8343,8 @@
         if(solid && runStart === -1) runStart = gx;
         if(!solid && runStart !== -1){
           rects.push({
-            cx: (runStart + gx) / 2 * cellW - w / 2,
-            cy: (gy + 0.5) * cellH - h / 2,
+            cx: (runStart + gx) / 2 * cellW - contentW / 2,
+            cy: (gy + 0.5) * cellH - contentH / 2,
             w: (gx - runStart) * cellW,
             h: cellH,
           });
@@ -9640,11 +9666,51 @@
     if(!dvdW || !dvdH){
       return { left: 0, right: 0, top: 0, bottom: 0 };
     }
-    const theta = dvdRotationDeg * Math.PI / 180; // 跟 CSS rotate() 同方向
-    const cosT = Math.abs(Math.cos(theta)), sinT = Math.abs(Math.sin(theta));
     const halfW = dvdW / 2, halfH = dvdH / 2;
-    const rotatedHalfW = halfW * cosT + halfH * sinT; // 旋轉後，矩形四個角在螢幕 x 軸方向的真正半寬
-    const rotatedHalfH = halfW * sinT + halfH * cosT; // 旋轉後，矩形四個角在螢幕 y 軸方向的真正半高
+    const theta = dvdRotationDeg * Math.PI / 180; // 跟 CSS rotate() 同方向
+
+    // ---------- 修正：「撞螢幕邊界時，隔著一段透明區域才撞到」 ----------
+    // 成因：下面舊版的算法假設整個 .dvd-bounce 矩形框都是「實心」的——
+    // 但這個框是去背圖裁到「只剩最小外接矩形」之後的框（見 trimTransparentImage()
+    // 的說明），框內部本身通常還留著大片透明區域（只要圖案本身不是矩形，
+    // 例如飄動的「e」、樹枝、任何不規則輪廓的去背照片，一定會有這個落差）。
+    // 撞牆判斷只看「這個矩形框」有沒有貼到螢幕邊緣，不管框裡的圖案本身有
+    // 沒有真的貼到邊緣，肉眼就會看到「隔著一段透明才撞到」——這正是這次
+    // 回報的成因，跟「撞頁面內的圖片」用的 pixelShapesOverlap()（有拿真正
+    // 的像素遮罩去比對）是兩套不同標準，這裡原本完全沒有用到遮罩。
+    // 修法：如果這張圖的像素遮罩已經就緒（getCachedAlphaMask 查得到、且
+    // 有算出輪廓點 boundary），直接拿這些「圖案真正的最外緣座標」套用
+    // 目前的旋轉角度，算出這一刻圖案在螢幕 x/y 軸上實際能到達的最大範圍，
+    // 拿來當作 inset，而不是假設整個矩形都是實心的。輪廓點是建立遮罩時
+    // 掃出來的正規化座標（0~1，對應未旋轉時的圖片本地座標，見
+    // computeMaskBoundaryPoints()），這裡換算回「以中心點為原點」的
+    // px 座標，再用標準旋轉矩陣轉成螢幕座標系，取絕對值的最大值即為
+    // 這一刻真正的半寬／半高。
+    const maskEntry = getCachedAlphaMask(dvdActiveImgSrc);
+    if(maskEntry && maskEntry.boundary && maskEntry.boundary.length >= 2){
+      const pts = maskEntry.boundary;
+      const cosT = Math.cos(theta), sinT = Math.sin(theta);
+      let maxAbsX = 0, maxAbsY = 0;
+      for(let i = 0; i < pts.length; i += 2){
+        const lx = (pts[i] - 0.5) * dvdW;
+        const ly = (pts[i + 1] - 0.5) * dvdH;
+        const sx = lx * cosT - ly * sinT;
+        const sy = lx * sinT + ly * cosT;
+        const ax = Math.abs(sx), ay = Math.abs(sy);
+        if(ax > maxAbsX) maxAbsX = ax;
+        if(ay > maxAbsY) maxAbsY = ay;
+      }
+      const insetX = halfW - maxAbsX;
+      const insetY = halfH - maxAbsY;
+      return { left: insetX, right: insetX, top: insetY, bottom: insetY };
+    }
+
+    // 遮罩還沒準備好（剛換上新圖、背景建立中，或這張圖沒有遮罩可用）——
+    // 優雅退回舊版「假設整個矩形都是實心」的算法，等遮罩就緒的那一影格
+    // 會自動切換成上面的精確版本，不會卡住、也不會讓功能壞掉。
+    const cosAbs = Math.abs(Math.cos(theta)), sinAbs = Math.abs(Math.sin(theta));
+    const rotatedHalfW = halfW * cosAbs + halfH * sinAbs; // 旋轉後，矩形四個角在螢幕 x 軸方向的真正半寬
+    const rotatedHalfH = halfW * sinAbs + halfH * cosAbs; // 旋轉後，矩形四個角在螢幕 y 軸方向的真正半高
     // insetX/insetY <= 0：旋轉後的矩形一定跟未旋轉時一樣大或更往外凸出
     // （角旋出去了），從來不會比未旋轉時更小——跟上面像素遮罩那條路線
     // 「inset 可以是負值」的結論完全一致，只是這裡是精確算出來的，不是
