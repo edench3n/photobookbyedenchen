@@ -6,11 +6,20 @@
 <meta name="color-scheme" content="light only">
 <title>photobook by edenchen</title>
 
+<!-- 🌟 Google 等搜尋引擎搜尋結果下方的說明文字（meta description）🌟
+     原本整個 <head> 沒有這個標籤，搜尋引擎找不到就會自己從頁面上的可見文字
+     東拼西湊出一段摘要——這正是搜尋結果那段「Photobook by edenchen. Preview.
+     Collab at edenchenworks@gmail.com @edench3n. Collab at
+     edenchenworks@gmail.com @edench3n. 2026 Sep 12 17 00 04. Akihabara,
+     Tokyo.」（重複、夾雜時鐘/地點文字，讀起來不像一句完整介紹）的成因。
+     加上這個標籤，明確告訴搜尋引擎要顯示哪一段文字，不再讓它自己亂拼。 -->
+<meta name="description" content="Photographs and Shapes by edenchen | Collab at edenchenworks@gmail.com @edench3n">
+
 <!-- 🌟 分享預覽（LINE / Facebook / Threads 等）用的 Open Graph 標籤 🌟 -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="edenchen">
 <meta property="og:title" content="edenchen">
-<meta property="og:description" content="edenchen">
+<meta property="og:description" content="Photographs and Shapes by edenchen | Collab at edenchenworks@gmail.com @edench3n">
 <meta property="og:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png?v=5">
 <!-- 給爬蟲的尺寸提示：數值故意設小（正方形、200x200），大部分平台（包含 LINE）
      在圖片本身是正方形且尺寸不大時，會把它當「小縮圖／小 icon」排版，
@@ -26,7 +35,7 @@
      og-image.png 的說明）來決定顯示大小。 🌟 -->
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="edenchen">
-<meta name="twitter:description" content="edenchen">
+<meta name="twitter:description" content="Photographs and Shapes by edenchen | Collab at edenchenworks@gmail.com @edench3n">
 <meta name="twitter:image" content="https://raw.githubusercontent.com/edench3n/photobookbyedenchen/main/og-image.png?v=5">
 
 
@@ -36,9 +45,12 @@
      Android / PWA manifest 使用。四張圖來源都是同一張向量風格圖（單色
      圖形裁成正方形後縮放），只有分享預覽用的 og-image.png 是另一張
      實際照片，兩邊互不影響。 -->
-<link rel="icon" href="/favicon-32x32.png?v=3" sizes="32x32" type="image/png">
-<link rel="icon" href="/favicon-16x16.png?v=3" sizes="16x16" type="image/png">
-<link rel="icon" href="/favicon-48x48.png?v=3" sizes="48x48" type="image/png">
+<!-- v4：三張 favicon 換成黑底版本（原本圖案本身是黃色，透明背景在淺色頁面
+     ／搜尋結果的白底上幾乎融成一片看不清楚），版本號同步加一，讓瀏覽器
+     跟 Google 別再沿用舊快取的白底版本。 -->
+<link rel="icon" href="/favicon-32x32.png?v=4" sizes="32x32" type="image/png">
+<link rel="icon" href="/favicon-16x16.png?v=4" sizes="16x16" type="image/png">
+<link rel="icon" href="/favicon-48x48.png?v=4" sizes="48x48" type="image/png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2" sizes="180x180">
 <link rel="manifest" href="/site.webmanifest?v=2">
 
@@ -1725,7 +1737,18 @@
   .pf-rules-overlay{
     position:fixed;
     inset:0;
-    z-index:1600; /* 蓋過堆疊舞台(950)跟 fixed-header(1000)即可，反正不會跟飄動的 e(99999)／桌布預覽彈窗(999999) 同時出現 */
+    /* 修正：原本只設 1600（蓋過堆疊舞台 950／fixed-header 1000），當初的假設
+       「規則圖不會跟飄動的 e(99999) 同時出現」其實不成立——進入堆疊模式時
+       #dvdBounce 會被直接接進物理世界當成 pfDvdItem（見 JS 該處說明），本身
+       仍保留平常「全站最高」的 z-index:99999，並沒有隨著堆疊模式進入而被
+       降下來（唯一會把它壓低的規則是 body.pf-dvd-covering .dvd-bounce，只在
+       按下 Preview、照片蓋下來那段動畫期間才生效，跟這裡「剛進站顯示規則圖」
+       的時機完全無關）。結果就是規則圖顯示期間，如果飄動的 e 剛好飄到畫面上
+       某個位置，99999 比這裡的 1600 高，e 會直接蓋在規則圖上面，擋住說明文字。
+       改成 100000，只要比飄動的 e(99999) 高一階即可：規則圖一定蓋過它，同時
+       仍然低於桌布預覽彈窗(999999)，兩者原本「不會同時出現」的前提不受影響、
+       疊放順序也還是合理的。 */
+    z-index:100000;
     display:none;
     align-items:center;
     justify-content:center;
@@ -11147,7 +11170,7 @@
       // 使用者接下來做了什麼完全無關——如果使用者在計時器觸發之前，已經
       // 點了某張剛掉下來的照片、開著照片詳情頁（openDetailFromPhotoFallItem()
       // → detail-active），這裡原本還是會照樣呼叫 showPfRulesOverlay()，
-      // 讓 .pf-rules-overlay（z-index:1600，跟 .photo-fall-stage 是各自
+      // 讓 .pf-rules-overlay（z-index:100000，跟 .photo-fall-stage 是各自
       // 獨立的兩個 <div>，不受「detail-active 時把 .photo-fall-stage 壓到
       // detail-page 之下」那條 CSS 規則保護，見該規則旁的完整說明）疊在
       // detail-page（z-index:50）最上層、pointer-events:auto 把整頁點擊
@@ -13564,7 +13587,7 @@
     detailFromPhotoFall = true;
     // 修正：進照片詳情頁前先把規則說明圖收掉、待觸發的計時器也一併取消
     // （見 scheduleFallSettledRulesOverlay() 內對 detail-active 的說明）：
-    // 不這麼做的話，萬一說明圖這時候已經顯示中，它 z-index:1600、
+    // 不這麼做的話，萬一說明圖這時候已經顯示中，它 z-index:100000、
     // pointer-events:auto，會直接疊在接下來要開啟的 detail-page（z-index:50）
     // 最上層，把 download／上一頁按鈕的點擊整個擋掉。
     cancelFallSettledRulesOverlay();
