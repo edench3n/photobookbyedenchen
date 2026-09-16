@@ -14844,6 +14844,30 @@
   //     previewPage 自己原本的 click 監聽器處理，行為完全不變。
   window.addEventListener('click', (e) => {
     if(!previewOpening) return;
+    // ---------- 修正：「剛進站還在 preview 蓋下來的動畫期間，抓取飄動的 e
+    // 丟出去、放開滑鼠時，會誤觸這裡、把 preview 關掉跳回首頁」----------
+    // 成因：這個監聽器掛在 window 身上、且用 capture 階段（見上面原本的
+    // 說明），目的是讓「preview 蓋下來動畫還沒播完時，點畫面下半部（還沒
+    // 被蓋到、露出來的其實是首頁網格）」也能正常觸發關閉——但也因為掛在
+    // window 上，判斷式只看 previewOpening，完全不管這次 click 實際點在
+    // 什麼元素上。飄動的 e（#dvdBounce）雖然不在 previewPage 的 DOM 樹裡、
+    // 點在它上面的 click 本來就不會冒泡進 previewPage 自己的 click 監聽器
+    // （見上面那段說明），但 window 層級的 capture 監聽器不靠 DOM 冒泡
+    // 判斷，任何位置的 click（包含點在飄動的 e 或牠的 double-tap 提示圖
+    // 上）都躲不掉，這裡才會被誤判成「使用者想關閉 preview」。
+    // 使用者反應的操作正是：長按抓住飄動的 e、拖曳丟出去、放開滑鼠——
+    // pointerup 之後瀏覽器/系統偶爾還是會在同一個元素上補發一次 click
+    // （不管 dvdPointerDown() 裡有沒有呼叫 e.preventDefault()，Mac 版
+    // Chrome 在「長按拖曳放開」這種情境下觸發 click 的時機本來就不完全
+    // 可靠，不能只靠那邊的 preventDefault 擋掉），click 的目標就是飄動的
+    // e 本身或牠的提示圖，結果被這裡誤判成「點在畫面上」而關掉 preview。
+    // 修法：click 的目標（或其任何祖先）只要是飄動的 e（#dvdBounce）或牠的
+    // double-tap 提示圖（#dvdTapHint），一律當作「使用者在跟飄動物件互動」，
+    // 直接放行、不攔截、不關閉 preview——跟飄動物件本身抓取／丟出去的手感
+    // 完全無關的其他點擊（畫面空白處、網格縮圖等）則完全不受影響，行為
+    // 維持原樣。
+    if(dvdBounce && dvdBounce.contains(e.target)) return;
+    if(dvdTapHintEl && dvdTapHintEl.contains(e.target)) return;
     e.stopPropagation();
     closePreviewPage();
   }, true);
