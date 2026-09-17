@@ -3746,6 +3746,22 @@
       // 總共只需要「一次寫→一次讀」這一個交界會觸發一次強制重排，不管
       // 網格有幾百張照片，強制重排的次數都固定是 1 次，不會再隨照片數量
       // 線性增加。
+      // ---------- 修正：「照片撞擊邊界好像有一點超出去邊界外面」 ----------
+      // 成因：magnetFalloff() 算出來的放大倍率只看「滑鼠離這張照片多近」，
+      // 完全不知道這張照片自己離 .grid 的邊界還剩多少空間。放大是以縮圖
+      // 中心點為準往四周均勻長出去的（img.style.transform = scale(...)，
+      // 縮放中心點預設就是元素自己的中心），而每張照片「平常沒被放大」時
+      // 的位置，本來就已經被散落排版夾到緊貼 .grid 邊緣（見上面
+      // relaxScatterSlots() 收尾那段「夾回畫布範圍內」的說明）——所以只要
+      // 滑鼠恰好靠近一張本來就貼著邊緣的照片，放大倍率一長，圖片就會整個
+      // 凸出 .grid 的邊界外，看起來像「撞到邊界卻還被推出去」。
+      // 修法：每一影格額外量一次 .grid 目前的邊界（跟下面讀 wrapRect 一樣，
+      // 都放在「只讀不寫」的這個階段，不會多引發任何強制重排），算出這張
+      // 照片朝四個方向各自還剩多少空間，換算成「不會凸出邊界」的放大倍率
+      // 上限，直接把 target 夾在這個上限之下。跟 magnetFalloff() 原本的
+      // 效果比，只有在照片真的貼近邊緣、且滑鼠也剛好靠得夠近時才會被這個
+      // 上限攔下來，其餘情況（照片離邊界還有餘裕）完全感覺不出差異。
+      const gridRect = grid ? grid.getBoundingClientRect() : null;
       const magnetPending = [];
       getMagnetItems().forEach(({ item, thumbWrap, img, idx }) => {
         if(!img || !img.classList.contains('loaded')) return;
@@ -3763,6 +3779,17 @@
           // 讓爬升期的目標值突然衝滿，達到「從沒有到有，慢慢長出引力」
           // 的效果。爬滿之後 rampFactor 恆為 1，跟原本行為完全相同。
           target = 1 + (fullTarget - 1) * rampFactor;
+
+          // 放大不能凸出 .grid 邊界：分別算出左右／上下兩個方向「比較窄
+          // 的那一邊」還剩多少空間，除以半寬／半高，換算成這個方向能撐到
+          // 的最大倍率，兩個方向取比較小的那個（任何一邊撐到底就要停）。
+          if(gridRect && wrapRect.width > 0 && wrapRect.height > 0){
+            const roomX = Math.min(wrapRect.left - gridRect.left, gridRect.right - wrapRect.right);
+            const roomY = Math.min(wrapRect.top - gridRect.top, gridRect.bottom - wrapRect.bottom);
+            const maxScaleX = 1 + Math.max(0, roomX) / (wrapRect.width / 2);
+            const maxScaleY = 1 + Math.max(0, roomY) / (wrapRect.height / 2);
+            target = Math.min(target, maxScaleX, maxScaleY);
+          }
         }
 
         let current = magnetScaleState.get(item);
