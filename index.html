@@ -4042,6 +4042,220 @@
     };
   }
 
+  // ---------- 首頁「手機/平板傾斜」飄浮視差 ----------
+  // 上面桌機那一整套飄浮視差（FLOAT_* 那段）是靠滑鼠在視窗裡的位置驅動；
+  // 觸控裝置沒有滑鼠游標，這裡改成讀取裝置的方向感測器
+  // （DeviceOrientationEvent 的 beta/gamma），讓「拿著手機慢慢傾斜」這個
+  // 動作取代滑鼠移動——效果本身（每張照片依自己的 floatDepth 各自飄動、
+  // 貼近 .grid 邊緣時會被夾住、不會被推出邊界外）盡量比照桌機版，維持
+  // 兩邊「飄」起來的視覺手感一致，只是輸入來源從滑鼠換成傾斜角度。
+  //
+  // 用 !supportsHover 再排除一次：極少數同時有精準滑鼠又有觸控的裝置
+  // （觸控筆電、外接滑鼠的平板），維持「有滑鼠就用滑鼠那一套」的行為，
+  // 避免兩套飄浮視差同時搶著寫同一個 .thumb-wrap.style.transform、互相
+  // 打架、覆蓋掉對方的位移。純觸控裝置（手機、沒接滑鼠的平板）才會走
+  // 這裡；跟上面 supportsHover 那個區塊是兩套完全獨立、互不干涉的實作，
+  // 各自維護各自的 rAF 迴圈跟狀態，不會互相影響。
+  if(supportsTouch && !supportsHover && grid){
+
+    // 沿用桌機版 FLOAT_* 的數值，讓兩邊「飄」起來的幅度、速度感一致；
+    // 之後想微調觸控版的手感，改這幾個數字即可，不會動到桌機版。
+    const TILT_DEPTH_MIN = 0.12;
+    const TILT_DEPTH_MAX = 2.4;
+    const TILT_MAX_OFFSET = 60;     // 傾斜到達有效範圍邊緣時，depth=1 的照片能被推開的距離
+    const TILT_RESPONSE_MS = 320;   // 追向目標位移的反應時間常數，跟桌機版 FLOAT_RESPONSE_MS 一致
+    const TILT_SETTLE_EPS = 0.05;
+    // 傾斜多少度（相對下面的基準角度）就達到飄浮視差的最大強度。手機平常
+    // 拿在手上本來就會有一點自然晃動、持握角度也因人而異，這個數字刻意
+    // 不抓太小——太敏感的話光是手部細微的自然晃動就會讓照片一直在飄，
+    // 體感會很躁；22 度大約是「手腕明顯左右轉一下」的程度，需要的話之後
+    // 可以再微調，不影響其餘邏輯。
+    const TILT_SENSITIVITY_DEG = 22;
+
+    let tiltNormX = 0, tiltNormY = 0; // 目前的目標視差方向與強度（-1~1），跟桌機版 floatNormX/floatNormY 是同一個概念
+    // 第一次收到感測器讀數時的角度，當作「使用者現在自然拿著手機的角度」
+    // 這個基準點，之後都只算跟這個基準點的差值——不校準的話，隨便一個人
+    // 手機平常就有的自然傾斜角度（不會是絕對水平）會被誤判成「已經傾斜
+    // 到底」，畫面一進站照片就會全部飄到某一側去，而不是先靜止在中間，
+    // 等使用者真的動手傾斜才跟著動。
+    let tiltBaseline = null;
+    let tiltOrientationBound = false; // deviceorientation 監聽器是否已經掛上，避免重複掛
+
+    // 依目前螢幕方向（直向/橫向，以及橫向的兩種朝向）把 beta/gamma 換算成
+    // 跟畫面座標系一致的 x/y——手機轉成橫向時，beta/gamma 對應的物理軸會
+    // 跟直向時互換，不換算的話橫向拿手機「左右傾」會變成帶動照片上下飄，
+    // 感覺整個方向都是錯的。
+    function readTiltXY(e){
+      const angle = (screen.orientation && typeof screen.orientation.angle === 'number')
+        ? screen.orientation.angle
+        : (typeof window.orientation === 'number' ? window.orientation : 0);
+      const beta = e.beta || 0;   // 前後傾（螢幕面朝上放平大約是 0，往自己這邊立起來變大）
+      const gamma = e.gamma || 0; // 左右傾（拿正是 0，往右傾是正值）
+      switch(angle){
+        case 90:  return { x: -beta, y: gamma };
+        case -90:
+        case 270: return { x: beta, y: -gamma };
+        case 180: return { x: -gamma, y: -beta };
+        default:  return { x: gamma, y: beta }; // 直向（0 度）
+      }
+    }
+
+    function handleDeviceOrientation(e){
+      if(e.beta == null && e.gamma == null) return; // 部分裝置/情境會回傳整包都是 null 的空事件，直接略過
+      const xy = readTiltXY(e);
+      if(!tiltBaseline){
+        tiltBaseline = xy; // 第一次收到讀數只拿來校準基準角度，這一影格不產生任何位移
+        return;
+      }
+      const dx = xy.x - tiltBaseline.x;
+      const dy = xy.y - tiltBaseline.y;
+      tiltNormX = scatterClamp(dx / TILT_SENSITIVITY_DEG, -1, 1);
+      tiltNormY = scatterClamp(dy / TILT_SENSITIVITY_DEG, -1, 1);
+    }
+
+    function startTiltListening(){
+      if(tiltOrientationBound || !('DeviceOrientationEvent' in window)) return;
+      tiltOrientationBound = true;
+      window.addEventListener('deviceorientation', handleDeviceOrientation, { passive: true });
+    }
+
+    // ---------- iOS 13+ 的動作/方向權限 ----------
+    // iOS 13 之後的 Safari 把 DeviceOrientationEvent 歸類成需要使用者明確
+    // 授權才能讀取的感測器，且這個授權請求（requestPermission()）一定要
+    // 在使用者手勢（點一下）的呼叫堆疊「當下」同步呼叫——晚一點再呼叫
+    // （例如藏在某個非同步流程完成之後才呼叫）瀏覽器會直接擋掉，系統
+    // 授權彈窗根本不會跳出來。這裡掛一個一次性的 click 監聽器，使用者
+    // 在頁面上第一次點按（不限點在哪裡，含點照片本身）就順勢請求一次；
+    // 不是這套權限模型的裝置（多數 Android、較舊版本的 iOS）完全不需要
+    // 這一步，一進站就可以直接開始監聽，不用等使用者點擊。
+    // 使用者如果拒絕：安靜地放棄，飄浮視差在這台裝置上就是不會生效，
+    // 不彈出任何提示打擾使用者，也完全不影響網站其他功能——跟檔案裡其他
+    // 「查不到就優雅退回」的機制（例如像素遮罩、masks.json 查不到時的
+    // 退場）是同一種精神。
+    if(typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+      document.addEventListener('click', () => {
+        DeviceOrientationEvent.requestPermission().then(state => {
+          if(state === 'granted') startTiltListening();
+        }).catch(() => {});
+      }, { passive: true, once: true });
+    } else {
+      startTiltListening();
+    }
+
+    // ---------- 每一影格：把目前的傾斜方向套到每張照片的飄浮視差上 ----------
+    // 邏輯、平滑追值、邊界夾制都盡量比照桌機版飄浮視差（見上面 supportsHover
+    // 區塊裡「修正：飄浮視差把貼著邊緣的照片推出 .grid 邊界外」那段的完整
+    // 說明，這裡是同一個問題、同一套解法，只是輸入來源換成傾斜角度）——
+    // 不套用邊界夾制的話，手機版一樣會重現「照片跑出邊界外」那個問題，
+    // 沒理由只修桌機版、放著觸控版繼續壞。
+    let tiltItemsCache = null;
+    function getTiltItems(){
+      if(!tiltItemsCache){
+        const nodeList = grid.querySelectorAll('.grid-item');
+        if(nodeList.length){
+          const raw = Array.from(nodeList).map(item => {
+            const thumbWrap = item.querySelector('.thumb-wrap');
+            const img = thumbWrap ? thumbWrap.querySelector('img') : null;
+            const st = scatterStates.get(item);
+            const area = (st && st.w && st.h) ? st.w * st.h : 0;
+            return { item, thumbWrap, img, area };
+          });
+          let minArea = Infinity, maxArea = -Infinity;
+          raw.forEach(({ area }) => {
+            if(area <= 0) return;
+            if(area < minArea) minArea = area;
+            if(area > maxArea) maxArea = area;
+          });
+          const hasRange = Number.isFinite(minArea) && Number.isFinite(maxArea) && maxArea > minArea;
+          tiltItemsCache = raw.map(({ item, thumbWrap, img, area }) => {
+            const norm = (hasRange && area > 0) ? (area - minArea) / (maxArea - minArea) : 0.5;
+            const floatDepth = TILT_DEPTH_MIN + norm * (TILT_DEPTH_MAX - TILT_DEPTH_MIN);
+            return { item, thumbWrap, img, floatDepth };
+          });
+        }
+      }
+      return tiltItemsCache || [];
+    }
+
+    // 跟桌機版 floatOffsetState 分開存：兩者理論上不會同時運作（見上面
+    // !supportsHover 的排除說明），分開存只是保守起見，避免極端的混合輸入
+    // 裝置上兩套萬一都跑到時，互相覆蓋、讀到對方寫的殘留位移值。
+    const tiltOffsetState = new WeakMap();
+    let tiltLastFrameTime = null;
+
+    function tiltFrame(now){
+      requestAnimationFrame(tiltFrame);
+
+      // 跟桌機版磁吸/飄浮迴圈同一個節流精神：只有真的在首頁格子畫面、
+      // 且放大進場動畫／照片堆疊模式都沒在播放時才需要跑，preview/detail
+      // 頁或動畫播放中完全看不到網格，不必要每一影格白白算一次、白白動用
+      // 陀螺儀讀數。
+      if(gridRevealInFlight || photoFallModeActive ||
+         previewPage.classList.contains('active') || detailPage.classList.contains('active')){
+        tiltLastFrameTime = now;
+        return;
+      }
+
+      if(tiltLastFrameTime == null) tiltLastFrameTime = now;
+      const dt = Math.min(64, now - tiltLastFrameTime); // 上限同其他 rAF 迴圈：分頁切走再切回來、或掉幀時，不要一次追趕跳一大段
+      tiltLastFrameTime = now;
+      const smoothFactor = 1 - Math.exp(-dt / TILT_RESPONSE_MS);
+
+      const gridRect = grid.getBoundingClientRect();
+      getTiltItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
+        if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
+
+        let targetX = tiltNormX * TILT_MAX_OFFSET * floatDepth;
+        let targetY = tiltNormY * TILT_MAX_OFFSET * floatDepth;
+
+        // 邊界夾制：量出這張照片「原始、還沒被傾斜視差推過」的位置
+        // （目前的 wrapRect 減掉上一影格已經套用的位移），再跟 .grid
+        // 邊界比較，換算出這一影格 targetX/targetY 各自允許落在的合法
+        // 區間，避免貼著邊緣的照片被推出畫面外。
+        const prev = tiltOffsetState.get(item);
+        const prevX = prev ? prev.x : 0;
+        const prevY = prev ? prev.y : 0;
+        const wrapRect = thumbWrap.getBoundingClientRect();
+        if(wrapRect.width > 0 && wrapRect.height > 0){
+          const baseLeft = wrapRect.left - prevX;
+          const baseRight = wrapRect.right - prevX;
+          const baseTop = wrapRect.top - prevY;
+          const baseBottom = wrapRect.bottom - prevY;
+          const minX = gridRect.left - baseLeft;
+          const maxX = gridRect.right - baseRight;
+          const minY = gridRect.top - baseTop;
+          const maxY = gridRect.bottom - baseBottom;
+          if(minX <= maxX) targetX = scatterClamp(targetX, minX, maxX);
+          if(minY <= maxY) targetY = scatterClamp(targetY, minY, maxY);
+        }
+
+        let cur = prev;
+        if(!cur){ cur = { x: 0, y: 0 }; tiltOffsetState.set(item, cur); }
+        cur.x += (targetX - cur.x) * smoothFactor;
+        cur.y += (targetY - cur.y) * smoothFactor;
+
+        const settled = Math.abs(cur.x - targetX) < TILT_SETTLE_EPS && Math.abs(cur.y - targetY) < TILT_SETTLE_EPS
+          && Math.abs(targetX) < TILT_SETTLE_EPS && Math.abs(targetY) < TILT_SETTLE_EPS;
+        const hadTransform = !!thumbWrap.style.transform;
+        if(settled && !hadTransform) return;
+        if(settled){
+          thumbWrap.style.transform = '';
+          cur.x = 0; cur.y = 0;
+        } else {
+          thumbWrap.style.transform = `translate3d(${cur.x.toFixed(2)}px, ${cur.y.toFixed(2)}px, 0)`;
+        }
+      });
+    }
+
+    requestAnimationFrame(tiltFrame);
+
+    // 分頁切到背景時重設時間戳，避免切回來一次補一大段跳動——跟檔案裡
+    // 其他 rAF 迴圈（stepDvdBounce／magnetFrame）同一個做法。
+    document.addEventListener('visibilitychange', () => {
+      if(!document.hidden) tiltLastFrameTime = null;
+    });
+  }
+
   // 圖片載入完成時，如果編號正處於「待補」狀態（見 prepareGridRevealState()
   // 內對 dataset.revealPending 的完整說明：放大進場動畫觸發時這張圖片還沒
   // 載入完成，編號被延後處理），這裡負責把編號真正定位、淡入補上。
