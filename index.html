@@ -4201,7 +4201,24 @@
       tiltLastFrameTime = now;
       const smoothFactor = 1 - Math.exp(-dt / TILT_RESPONSE_MS);
 
+      // ---------- 修正：手機/平板捲動時飄浮視差會卡住／感覺停掉 ----------
+      // 成因：這裡原本跟桌機版 magnetFrame() 不一樣，是「逐張」讀
+      // wrapRect（getBoundingClientRect，讀）又立刻寫 thumbWrap.style.transform
+      // （寫）——同一輪迴圈裡讀、寫、讀、寫交替，每一次「寫」都會讓瀏覽器
+      // 上一輪量到的版面資訊失效，逼得緊接在後面的「讀」必須先同步跑一次
+      // 完整的頁面重新排版（forced synchronous layout），也就是經典的
+      // layout thrashing——跟桌機版 magnetFrame() 開頭那段長註解修的是
+      // 同一種成因（那裡已經拆成讀/寫兩階段解決過），這裡當初新增陀螺儀
+      // 版本時沒有比照套用，照片一多（上百張）這筆成本每影格都要重複付。
+      // 平常閒置時主執行緒扛得住感覺不出來，但使用者正在捲動的當下，
+      // 瀏覽器的合成執行緒本來就在忙著處理捲動本身，主執行緒被這些強制
+      // 重排卡住，tiltFrame() 幾乎搶不到執行時間，肉眼看起來就像「捲動時
+      // 飄浮視差整個停掉」，放開手指、捲動結束後才會一次追上來。
+      // 修法：跟桌機版同一個精神，拆成「只讀不寫」→「只寫不讀」兩階段，
+      // 不再逐張穿插，把每一影格的強制重排次數固定壓到最多 1 次，不隨
+      // 照片數量線性增加。
       const gridRect = grid.getBoundingClientRect();
+      const tiltPending = [];
       getTiltItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
         if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
 
@@ -4230,20 +4247,31 @@
         }
 
         let cur = prev;
-        if(!cur){ cur = { x: 0, y: 0 }; tiltOffsetState.set(item, cur); }
-        cur.x += (targetX - cur.x) * smoothFactor;
-        cur.y += (targetY - cur.y) * smoothFactor;
+        if(!cur) cur = { x: 0, y: 0 }; // 還沒進過 WeakMap 的新項目，先在記憶體算，收尾寫階段才統一 set 回去
+        const nx = cur.x + (targetX - cur.x) * smoothFactor;
+        const ny = cur.y + (targetY - cur.y) * smoothFactor;
 
-        const settled = Math.abs(cur.x - targetX) < TILT_SETTLE_EPS && Math.abs(cur.y - targetY) < TILT_SETTLE_EPS
+        const settled = Math.abs(nx - targetX) < TILT_SETTLE_EPS && Math.abs(ny - targetY) < TILT_SETTLE_EPS
           && Math.abs(targetX) < TILT_SETTLE_EPS && Math.abs(targetY) < TILT_SETTLE_EPS;
         const hadTransform = !!thumbWrap.style.transform;
-        if(settled && !hadTransform) return;
+        if(settled && !hadTransform){
+          tiltOffsetState.set(item, cur);
+          return; // 已經是原始位置、也沒有殘留 transform，這張不用進寫階段
+        }
+        tiltPending.push({ item, thumbWrap, cur, nx, ny, settled });
+      });
+
+      // 寫階段：把這一輪所有照片的 transform（含歸零）一次寫完，這一輪
+      // 完全不讀取任何版面資訊，不會被上面已經讀好的 wrapRect/gridRect 弄髒。
+      tiltPending.forEach(({ item, thumbWrap, cur, nx, ny, settled }) => {
         if(settled){
           thumbWrap.style.transform = '';
           cur.x = 0; cur.y = 0;
         } else {
-          thumbWrap.style.transform = `translate3d(${cur.x.toFixed(2)}px, ${cur.y.toFixed(2)}px, 0)`;
+          cur.x = nx; cur.y = ny;
+          thumbWrap.style.transform = `translate3d(${nx.toFixed(2)}px, ${ny.toFixed(2)}px, 0)`;
         }
+        tiltOffsetState.set(item, cur);
       });
     }
 
