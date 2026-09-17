@@ -452,7 +452,14 @@
        transform 不會觸發版面重排（只走合成執行緒），拖曳／甩動時每一影格
        都要改一次位置，用 transform 才能維持 60fps 的流暢度。 */
     transform: translate3d(0, 0, 0);
-    touch-action: manipulation;
+    /* 原本是 manipulation（保留瀏覽器原生捲動＋雙指縮放，手指按到照片一樣
+       只會捲頁面，拖曳完全交給桌機滑鼠）。現在手機也要能像桌機滑鼠一樣
+       自由拖著照片移動（見下面 attachScatterDrag() 內 pointerdown 的說明），
+       所以改成 none：手指一按在照片上，瀏覽器就完全不介入（不搶去當成
+       捲動或雙指縮放手勢），控制權整個交給 JS 的 Pointer Events 拖曳邏輯。
+       沒按在照片上的空白網格區域不受影響，還是可以正常手指捲動頁面——
+       這條規則只套用在 .grid-item 這個盒子本身，不影響 .grid 容器。 */
+    touch-action: none;
     cursor: grab;
   }
   /* 正在被滑鼠拖著走的那一張：游標換成「抓住」的手勢，並暫時提示瀏覽器
@@ -4739,8 +4746,22 @@
 
   function attachScatterDrag(item){
     item.addEventListener('pointerdown', (e) => {
-      if(e.pointerType === 'touch') return;      // 手機／平板的手指維持原本捲動行為，見上面說明
-      if(e.button !== undefined && e.button !== 0) return; // 只接左鍵
+      // 原本這裡會擋掉 touch（e.pointerType === 'touch' 直接 return），
+      // 讓手機／平板的手指維持原生捲動行為，拖曳只給桌機滑鼠用。現在改成
+      // 手機也要能像桌機滑鼠一樣自由拖著照片移動，所以拿掉這個判斷——
+      // 手指按到照片一律當成拖曳的開始，跟滑鼠左鍵走同一套邏輯（放手時的
+      // 甩動慣性、末速度計算都是共用同一份程式碼，見下面 scatterDragMove()／
+      // computeScatterFlingVelocity()，完全不需要另外為觸控寫一套）。
+      // 能夠這樣做的前提是上面 CSS 已經把 .grid-item 的 touch-action 改成
+      // none（見該處說明）：瀏覽器不會再搶著把這次觸控當成捲動手勢處理，
+      // 所以這裡不需要、也不能再靠 pointerType 分流。
+      if(e.button !== undefined && e.button !== 0) return; // 只接左鍵（觸控事件的 button 一律是 0，不受影響）
+      // 飄動的 e 疊在這張照片上面、這一下又剛好會被它的抓取判斷命中：
+      // 直接放棄，不開始照片拖曳，把這一下讓給飄動字（見上面
+      // dvdWouldClaimPointer() 的完整說明，貫徹「飄動物件在上層、優先抓到
+      // 飄動物件」的規則）。事件不呼叫 stopPropagation，照樣正常冒泡到
+      // window，飄動字自己那組 pointerdown 監聽器會接手完成抓取。
+      if(dvdWouldClaimPointer(e)) return;
       if(photoFallModeActive) return;            // 照片物理堆疊模式期間首頁縮圖是收起來的，不該還能被抓
       if(detailPage.classList.contains('active') || previewPage.classList.contains('active')) return;
       if(scatterActiveDrag) endScatterDrag(null); // 保險：上一次拖曳沒收乾淨，先收掉再開新的
@@ -10829,6 +10850,32 @@
   const DVD_GRAB_PADDING_TOUCH = 26;   // px，觸控手指額外可命中的邊界寬度（比滑鼠寬一些）
   function dvdHitTest(rect, x, y, padding){
     return !(x < rect.left - padding || x > rect.right + padding || y < rect.top - padding || y > rect.bottom + padding);
+  }
+  // ---------- 修正：「飄動的 e 疊在照片上面時，長按會同時抓到兩個」 ----------
+  // 成因：飄動的 e（#dvdBounce）是 pointer-events:none，「抓取它」這件事
+  // 完全靠下面 window 層級的 pointerdown 監聽器自己用 getBoundingClientRect()
+  // 手動比對座標，跟 DOM 原生的 hit-test／z-index 疊層完全無關（見該處開頭
+  // 的完整說明）。也正因為 pointer-events:none，瀏覽器原生 hit-test 找到的
+  // 「真正的目標元素」永遠是疊在它底下那張可以互動的 .grid-item 照片——
+  // 這一下 pointerdown 因此會先在目標階段（target phase）觸發照片自己掛在
+  // 身上的 pointerdown 監聽器（attachScatterDrag() 裡的那個，開始照片拖曳），
+  // 事件才接著冒泡到 window，window 這組才判定「命中飄動字」、另外再啟動
+  // 一次飄動字的抓取——同一下長按，兩套邏輯各自獨立判定「我被抓住了」，
+  // 使用者因此感覺兩個東西同時被抓到。
+  // 修法：抽出跟 window pointerdown 開頭完全同一套「這一下算不算抓到飄動
+  // 的 e」判斷（守門條件＋矩形命中測試），讓照片自己的拖曳判斷也能呼叫；
+  // 只要飄動的 e 這一下會被判定為「命中」，照片這邊就直接放棄、不開始拖曳
+  // ——事件照樣往上冒泡，交給 window 那組正常抓取飄動字，貫徹「飄動物件
+  // 疊在上層，優先抓到飄動物件」的規則。反過來，只要飄動的 e 這一下不會
+  // 被判定命中（例如隱藏中、被彈窗蓋住、根本沒疊到），這裡回傳 false，
+  // 照片拖曳完全不受影響，跟原本行為一致。
+  function dvdWouldClaimPointer(e){
+    if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) return false;
+    if(dvdBounce.classList.contains('dvd-hidden')) return false;
+    if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return false;
+    const rect = dvdBounce.getBoundingClientRect();
+    const padding = e.pointerType === 'mouse' ? DVD_GRAB_PADDING_DESKTOP : DVD_GRAB_PADDING_TOUCH;
+    return dvdHitTest(rect, e.clientX, e.clientY, padding);
   }
   // 手機觸控版修正：.dvd-bounce 本身是 pointer-events:none（見上面 CSS
   // 該處的完整說明），所以手指實際落下時，瀏覽器 hit-test 抓到的一路都是
