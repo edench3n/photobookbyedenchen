@@ -3847,6 +3847,13 @@
       // 上限攔下來，其餘情況（照片離邊界還有餘裕）完全感覺不出差異。
       const gridRect = grid ? grid.getBoundingClientRect() : null;
       const magnetPending = [];
+      // 供下面「飄浮視差寫階段」夾住 targetX/targetY 用：key 是 item，值是這一影格
+      // 允許飄浮視差位移落在的合法區間 { minX, maxX, minY, maxY }（相對於這張照片
+      // 「原始、還沒被飄浮視差推動過」的位置）。只有在 magnetActive 且量得到
+      // wrapRect 的這一輪才會寫入（下面同一個 forEach 裡，跟磁吸放大共用同一次
+      // getBoundingClientRect()，不會多引發一次強制重排）——完整成因見下面該處的
+      // 說明。
+      const floatRoomByItem = new Map();
       getMagnetItems().forEach(({ item, thumbWrap, img, idx }) => {
         if(!img || !img.classList.contains('loaded')) return;
 
@@ -3873,6 +3880,38 @@
             const maxScaleX = 1 + Math.max(0, roomX) / (wrapRect.width / 2);
             const maxScaleY = 1 + Math.max(0, roomY) / (wrapRect.height / 2);
             target = Math.min(target, maxScaleX, maxScaleY);
+          }
+
+          // ---------- 修正：「飄浮視差把貼著邊緣的照片推出 .grid 邊界外」 ----------
+          // 成因跟上面磁吸放大完全一樣的道理，只是換成下面第二輪 forEach 的
+          // 飄浮視差位移（thumbWrap 的 translate3d）：它算出來的 targetX/targetY
+          // 只看滑鼠在整個視窗裡的位置＋這張照片自己的 floatDepth，完全不知道
+          // 這張照片離 .grid 邊界還剩多少空間。散落排版（relaxScatterSlots()）
+          // 本來就會把照片夾到緊貼 .grid 邊緣，一旦飄浮視差再疊加一段位移
+          // （尤其 FLOAT_MAX_OFFSET／FLOAT_DEPTH_MAX 調大之後，位移量可以到
+          // 一百多 px），貼著邊緣的照片就會被整個推出 .grid 邊界外，看起來
+          // 就是「照片跑出去邊界外了」。
+          // 修法：這裡的 wrapRect 已經是磁吸放大量好的（不多一次強制重排），
+          // 拿掉「上一影格已經套用的飄浮視差位移」（floatOffsetState 存的
+          // prevOffset）就能反推回這張照片「原始、還沒被飄浮視差推過」的
+          // 位置，再跟 gridRect 比較，算出這一影格 targetX/targetY 各自允許
+          // 落在的合法區間，寫進 floatRoomByItem，交給下面第二輪飄浮視差寫
+          // 階段夾住——只有真的貼近邊緣、飄浮視差又剛好把它往邊界外推的
+          // 情況才會被攔下來，其餘情況（離邊界還有餘裕）完全感覺不出差異。
+          const prevFloatOffset = floatOffsetState.get(item);
+          const prevOffsetX = prevFloatOffset ? prevFloatOffset.x : 0;
+          const prevOffsetY = prevFloatOffset ? prevFloatOffset.y : 0;
+          if(gridRect && wrapRect.width > 0 && wrapRect.height > 0){
+            const baseLeft = wrapRect.left - prevOffsetX;
+            const baseRight = wrapRect.right - prevOffsetX;
+            const baseTop = wrapRect.top - prevOffsetY;
+            const baseBottom = wrapRect.bottom - prevOffsetY;
+            floatRoomByItem.set(item, {
+              minX: gridRect.left - baseLeft,
+              maxX: gridRect.right - baseRight,
+              minY: gridRect.top - baseTop,
+              maxY: gridRect.bottom - baseBottom
+            });
           }
         }
 
@@ -3914,8 +3953,17 @@
       const floatNormY = magnetActive ? scatterClamp((magnetMouseY - window.innerHeight / 2) / (window.innerHeight / 2), -1, 1) : 0;
       getMagnetItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
         if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
-        const targetX = floatNormX * FLOAT_MAX_OFFSET * floatDepth;
-        const targetY = floatNormY * FLOAT_MAX_OFFSET * floatDepth;
+        let targetX = floatNormX * FLOAT_MAX_OFFSET * floatDepth;
+        let targetY = floatNormY * FLOAT_MAX_OFFSET * floatDepth;
+        // 夾住這一影格允許的位移範圍（見上面讀階段 floatRoomByItem 的完整
+        // 說明）：min > max 代表這張照片本身量到的空間有異常（例如剛好在
+        // 版面還沒穩定的那一影格量到寬度是 0），保底不夾、維持原本行為，
+        // 不要因為一次量測異常反而把正常的位移鎖死。
+        const room = floatRoomByItem.get(item);
+        if(room){
+          if(room.minX <= room.maxX) targetX = scatterClamp(targetX, room.minX, room.maxX);
+          if(room.minY <= room.maxY) targetY = scatterClamp(targetY, room.minY, room.maxY);
+        }
         let cur = floatOffsetState.get(item);
         if(!cur){ cur = { x: 0, y: 0 }; floatOffsetState.set(item, cur); }
         cur.x += (targetX - cur.x) * floatSmoothFactor;
