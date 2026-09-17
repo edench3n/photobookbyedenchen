@@ -3609,15 +3609,18 @@
     // 全域視差，會變成「拖著一張照片跑，其他照片全部跟著同一個座標飄」，
     // 看起來會很混亂，不是想要的效果，所以維持跟磁吸放大一致、觸控完全
     // 不受影響。
-    const FLOAT_DEPTH_MIN = 0.35;   // 每張照片隨機抽一個 depth（下限），對應 Parallax
-                                     // Floating 原本 FloatingElement 的 depth prop
-    const FLOAT_DEPTH_MAX = 1;      // depth 上限，depth 越大跟著滑鼠飄的幅度越大——
-                                     // 每張各自抽一個介於上下限之間的值，才會有原本
-                                     // React 版範例裡「每個元素飄移幅度不同」的層次感
-    const FLOAT_MAX_OFFSET = 22;    // px，滑鼠移到視窗最邊緣時，depth=1 的照片最多
-                                     // 能被推開的距離。刻意收得比較小——這裡是攝影
-                                     // 作品的縮圖網格，效果只是想要一點「呼吸感」，
-                                     // 不是原本範例那種大幅度飄浮，太大會干擾閱讀照片
+    const FLOAT_DEPTH_MIN = 0.12;   // depth 下限：對應「畫面裡印得最小」的那張照片
+                                     // （視覺上感覺最遠），幾乎快貼齊 0，跟著滑鼠移動
+                                     // 的幅度非常小
+    const FLOAT_DEPTH_MAX = 2.4;    // depth 上限：對應「畫面裡印得最大」的那張照片
+                                     // （視覺上感覺最近），移動幅度是下限的 20 倍——
+                                     // 使用者反應想要深度差異更明顯，這裡刻意拉開
+                                     // min/max 的差距，不再是原本 0.35~1 那種差別不大
+                                     // 的隨機值
+    const FLOAT_MAX_OFFSET = 60;    // px，滑鼠移到視窗最邊緣時，depth=1 的照片能被
+                                     // 推開的距離。使用者反應想要整體幅度更大，從原本
+                                     // 22 調高到 60（依上面 depth 上限 2.4，畫面最大
+                                     // 那張照片實際最多可以飄到 144px 左右）
     const FLOAT_RESPONSE_MS = 320;  // 追向目標位移的反應時間常數，比磁吸放大的
                                      // MAGNET_RESPONSE_MS(140) 更慢、更「飄」，取的是
                                      // Parallax Floating 原本 easingFactor 預設值
@@ -3625,6 +3628,7 @@
                                      // 貼手的即時感刻意做出差異
     const FLOAT_SETTLE_EPS = 0.05;  // px，目前值/目標值都幾乎是 0 時視為完全靜止，
                                      // 停止繼續寫入 style
+
 
     // 首頁縮圖「放大進場」動畫播完的那一刻，引力「強度」（不是縮放值本身）
     // 從 0 緩慢爬升到 100% 所花的時間。原本只把 magnetScaleState 重設回 1
@@ -3674,15 +3678,38 @@
       if(!magnetItemsCache){
         const nodeList = grid.querySelectorAll('.grid-item');
         if(nodeList.length){
-          magnetItemsCache = Array.from(nodeList).map(item => {
+          // 飄浮視差（見上面 FLOAT_* 常數／magnetFrame() 內的說明）用的
+          // depth：不再是每張隨機亂抽，改成直接對應「這張照片實際顯示
+          // 出來的面積」——面積來自 scatterStates（applyGridItemImageSize()
+          // 依 aspect＋隨機面積係數算出來的 st.w/st.h，散落排版本來就會用
+          // 到，這裡只是直接讀现成的數字，不用再另外量 DOM）。
+          // 邏輯對應真實世界的透視感：照片本身印得越大＝視覺上感覺離觀者
+          // 越「近」，越近的物體在視差移動時位移量本來就該越大；印得越小
+          // ＝越「遠」，位移量該越小。所以面積最大的那張直接吃滿
+          // FLOAT_DEPTH_MAX，面積最小的那張只吃 FLOAT_DEPTH_MIN，中間的
+          // 依面積線性內插。
+          // 用「min-max 正規化」而不是寫死面積的絕對數字：正規化後的比例
+          // 在視窗尺寸改變、格子邊長跟著重新縮放時完全不變（所有照片的
+          // 面積會一起等比例縮放，min/max 也跟著等比例縮放，兩者相除的
+          // 比例不受影響），不需要在 resize 時重新計算一次。
+          const raw = Array.from(nodeList).map(item => {
             const thumbWrap = item.querySelector('.thumb-wrap');
             const idx = item.querySelector('.idx');
-            // 飄浮視差（見上面 FLOAT_* 常數／magnetFrame() 內的說明）用的
-            // depth：只在快取第一次建立時抽一次，之後每一影格都直接沿用
-            // 同一個值，同一張照片的飄移幅度全程固定，不會每影格重新抽籤
-            // 亂跳。
-            const floatDepth = FLOAT_DEPTH_MIN + Math.random() * (FLOAT_DEPTH_MAX - FLOAT_DEPTH_MIN);
-            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx, floatDepth };
+            const st = scatterStates.get(item);
+            const area = (st && st.w && st.h) ? st.w * st.h : 0;
+            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx, area };
+          });
+          let minArea = Infinity, maxArea = -Infinity;
+          raw.forEach(({ area }) => {
+            if(area <= 0) return; // 尺寸還沒算出來的照片（極端情況）不參與正規化範圍
+            if(area < minArea) minArea = area;
+            if(area > maxArea) maxArea = area;
+          });
+          const hasRange = Number.isFinite(minArea) && Number.isFinite(maxArea) && maxArea > minArea;
+          magnetItemsCache = raw.map(({ item, thumbWrap, img, idx, area }) => {
+            const norm = (hasRange && area > 0) ? (area - minArea) / (maxArea - minArea) : 0.5; // 量不到範圍（例如整批都還沒設定尺寸）就先給中間值保底
+            const floatDepth = FLOAT_DEPTH_MIN + norm * (FLOAT_DEPTH_MAX - FLOAT_DEPTH_MIN);
+            return { item, thumbWrap, img, idx, floatDepth };
           });
         }
       }
