@@ -3586,6 +3586,46 @@
     const MAGNET_SETTLE_EPS = 0.0008; // 目前值/目標值都幾乎等於原始大小時，視為已完全
                                        // 靜止，停止繼續寫入 style、省不必要的重繪
 
+    // ---------- 首頁攝影照片的「飄浮視差」(parallax floating) ----------
+    // 概念移植自 fancy-components 的 Parallax Floating（React + Framer
+    // Motion 元件：每個子元素各自帶一個 depth 值，跟著滑鼠/觸控位置做視差
+    // 位移，depth 越大移動幅度越大）。這裡整個網站是純手刻的 vanilla JS，
+    // 沒有 React/Framer Motion 這套 runtime，所以不是照抄那份元件原始碼，
+    // 而是把同一套「依 depth 值＋滑鼠位置算目標位移→指數平滑(lerp)追過去」
+    // 的邏輯，改寫成這裡慣用的、掛在 magnetFrame() 這個既有 rAF 迴圈裡的
+    // 寫法——不額外多開一個常駐迴圈（見上面 magnetFrame() 開頭那段「多一個
+    // 永遠不關的迴圈會直接墊高每一輪 RAF 執行時間」的說明，這裡完全沿用
+    // 同一個顧慮），也直接沿用同一份 magnetMouseX/magnetMouseY/magnetActive
+    // 滑鼠狀態，不用再多掛一組事件監聽器。
+    //
+    // 效果只加在 .thumb-wrap 這一層：外層 .grid-item 的 transform 是散落
+    // 物理／拖曳位置專用（見 writeScatterTransform()），內層 img 的
+    // transform 是磁吸放大專用（見上面 magnetFalloff() 那段），.thumb-wrap
+    // 目前完全沒有人用，三層各自只負責一件事、互不覆寫，這裡不會跟既有任何
+    // 效果打架。
+    //
+    // 只在 supportsHover（桌機滑鼠）環境套用，跟磁吸放大同一個判斷：觸控
+    // 裝置上「手指位置」同時也是拖曳照片本身的輸入來源，如果套用同一套
+    // 全域視差，會變成「拖著一張照片跑，其他照片全部跟著同一個座標飄」，
+    // 看起來會很混亂，不是想要的效果，所以維持跟磁吸放大一致、觸控完全
+    // 不受影響。
+    const FLOAT_DEPTH_MIN = 0.35;   // 每張照片隨機抽一個 depth（下限），對應 Parallax
+                                     // Floating 原本 FloatingElement 的 depth prop
+    const FLOAT_DEPTH_MAX = 1;      // depth 上限，depth 越大跟著滑鼠飄的幅度越大——
+                                     // 每張各自抽一個介於上下限之間的值，才會有原本
+                                     // React 版範例裡「每個元素飄移幅度不同」的層次感
+    const FLOAT_MAX_OFFSET = 22;    // px，滑鼠移到視窗最邊緣時，depth=1 的照片最多
+                                     // 能被推開的距離。刻意收得比較小——這裡是攝影
+                                     // 作品的縮圖網格，效果只是想要一點「呼吸感」，
+                                     // 不是原本範例那種大幅度飄浮，太大會干擾閱讀照片
+    const FLOAT_RESPONSE_MS = 320;  // 追向目標位移的反應時間常數，比磁吸放大的
+                                     // MAGNET_RESPONSE_MS(140) 更慢、更「飄」，取的是
+                                     // Parallax Floating 原本 easingFactor 預設值
+                                     // (0.05，偏慢、偏平滑) 那種手感，跟磁吸放大那種
+                                     // 貼手的即時感刻意做出差異
+    const FLOAT_SETTLE_EPS = 0.05;  // px，目前值/目標值都幾乎是 0 時視為完全靜止，
+                                     // 停止繼續寫入 style
+
     // 首頁縮圖「放大進場」動畫播完的那一刻，引力「強度」（不是縮放值本身）
     // 從 0 緩慢爬升到 100% 所花的時間。原本只把 magnetScaleState 重設回 1
     // （見 resetMagnetScaleForReveal），但那只解決了「用到凍結前殘留舊數字」
@@ -3609,6 +3649,7 @@
     let magnetActive = false;   // 滑鼠目前是否在視窗內、有提供有效座標
     let magnetLastFrameTime = null;
     const magnetScaleState = new WeakMap(); // item -> 目前實際套用的縮放值
+    const floatOffsetState = new WeakMap(); // item -> 飄浮視差目前實際套用的 {x, y} 位移（見上面 FLOAT_* 常數的說明）
     // null = 引力目前是滿強度（平常狀態，一般 hover 時都是這樣）；非 null
     // 時代表「引力強度」還在爬升中，值是爬升起點的時間戳，跟 rAF 傳進
     // magnetFrame() 的 now 用同一個時間基準（都是 performance.now()），
@@ -3636,7 +3677,12 @@
           magnetItemsCache = Array.from(nodeList).map(item => {
             const thumbWrap = item.querySelector('.thumb-wrap');
             const idx = item.querySelector('.idx');
-            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx };
+            // 飄浮視差（見上面 FLOAT_* 常數／magnetFrame() 內的說明）用的
+            // depth：只在快取第一次建立時抽一次，之後每一影格都直接沿用
+            // 同一個值，同一張照片的飄移幅度全程固定，不會每影格重新抽籤
+            // 亂跳。
+            const floatDepth = FLOAT_DEPTH_MIN + Math.random() * (FLOAT_DEPTH_MAX - FLOAT_DEPTH_MIN);
+            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx, floatDepth };
           });
         }
       }
@@ -3707,6 +3753,7 @@
                                                             // 或掉幀時，不要讓追趕的那一步跳太大
       magnetLastFrameTime = now;
       const smoothFactor = 1 - Math.exp(-dt / MAGNET_RESPONSE_MS);
+      const floatSmoothFactor = 1 - Math.exp(-dt / FLOAT_RESPONSE_MS); // 飄浮視差專用，比磁吸放大更慢、更飄（見 FLOAT_RESPONSE_MS 說明）
 
       // 「引力強度」爬升係數：0 代表這一刻引力完全不生效（不管滑鼠多近，
       // 目標值都固定是 1，等同原始大小），1 代表引力已經是平常的滿強度。
@@ -3824,6 +3871,38 @@
         } else {
           magnetScaleState.set(item, current);
           img.style.transform = `scale(${current.toFixed(4)})`;
+        }
+      });
+
+      // 飄浮視差寫階段：跟上面磁吸放大的寫階段合併在同一輪，維持「集中寫、
+      // 集中讀」的節奏，不會多引發額外的強制重排。這裡不需要另外的讀階段
+      // ——目標位移只依賴滑鼠在整個視窗裡的位置（floatNormX/floatNormY）跟
+      // 每張照片自己固定的 floatDepth，完全不用讀取任何版面尺寸，所以直接
+      // 在同一輪迴圈裡讀（算目標值）＋寫（套用 transform）也不會弄髒版面
+      // 資訊，跟磁吸放大那套「先讀 wrapRect 再寫」必須拆開的情況不一樣。
+      // 寫在 .thumb-wrap 上，跟磁吸放大寫在內層 img 上的 transform 是兩個
+      // 完全獨立的元素，彼此不會互相覆蓋。
+      const floatNormX = magnetActive ? scatterClamp((magnetMouseX - window.innerWidth / 2) / (window.innerWidth / 2), -1, 1) : 0;
+      const floatNormY = magnetActive ? scatterClamp((magnetMouseY - window.innerHeight / 2) / (window.innerHeight / 2), -1, 1) : 0;
+      getMagnetItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
+        if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
+        const targetX = floatNormX * FLOAT_MAX_OFFSET * floatDepth;
+        const targetY = floatNormY * FLOAT_MAX_OFFSET * floatDepth;
+        let cur = floatOffsetState.get(item);
+        if(!cur){ cur = { x: 0, y: 0 }; floatOffsetState.set(item, cur); }
+        cur.x += (targetX - cur.x) * floatSmoothFactor;
+        cur.y += (targetY - cur.y) * floatSmoothFactor;
+        const settled = Math.abs(cur.x - targetX) < FLOAT_SETTLE_EPS && Math.abs(cur.y - targetY) < FLOAT_SETTLE_EPS
+          && Math.abs(targetX) < FLOAT_SETTLE_EPS && Math.abs(targetY) < FLOAT_SETTLE_EPS;
+        // hadTransform：跟磁吸放大同一個省電邏輯——已經完全靜止、且本來
+        // 就沒有殘留 inline transform 的照片，不用每影格都再寫一次空字串。
+        const hadTransform = !!thumbWrap.style.transform;
+        if(settled && !hadTransform) return;
+        if(settled){
+          thumbWrap.style.transform = '';
+          cur.x = 0; cur.y = 0;
+        } else {
+          thumbWrap.style.transform = `translate3d(${cur.x.toFixed(2)}px, ${cur.y.toFixed(2)}px, 0)`;
         }
       });
 
