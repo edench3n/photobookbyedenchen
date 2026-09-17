@@ -4436,10 +4436,6 @@
     for(let i = 0; i < cols * rows; i++) cells.push(i);
     scatterShuffle(cells);
 
-    const zOrder = [];
-    for(let i = 0; i < n; i++) zOrder.push(i + 1);
-    scatterShuffle(zOrder); // 疊放的前後順序也每次重抽，不會永遠是同一張壓在最上面
-
     // 第一步：洗牌 + 抖動，抽出每張照片的「起點」
     const step = cellSide + gap;
     const centers = new Array(n);
@@ -4465,6 +4461,24 @@
       // 每張照片各自的「個人空間」倍率，見上面 SCATTER_SPACING_JITTER_MIN 的說明
       weights[i] = SCATTER_SPACING_JITTER_MIN + Math.random() * (SCATTER_SPACING_JITTER_MAX - SCATTER_SPACING_JITTER_MIN);
     }
+
+    // 疊放順序（z-index）：不再隨機洗牌，改成直接對應「這張照片顯示出來
+    // 的面積」——跟飄浮視差（見 magnetFrame() 內 FLOAT_* 那段的完整說明）
+    // 用的是同一套「印得越大＝視覺上越近」的物理直覺：越近的東西理所當然
+    // 疊在越遠的東西上面，所以面積小（視覺上比較遠）的照片排在堆疊底層，
+    // 面積大（比較近）的排在最上層——飄浮視差負責「近的飄得比較多」，
+    // 這裡負責「近的蓋在遠的上面」，兩套效果用同一套物理規則，畫面整體
+    // 才會有一致的立體感，不會出現「感覺比較近的那張卻被壓在下面」這種
+    // 跟直覺打架的情況。
+    // 用 halfW[i]*halfH[i]（跟面積成正比，省去再乘一次 4 的算式）排序；
+    // Array.prototype.sort 是穩定排序，面積剛好相同的兩張會維持原本陣列
+    // 順序（也就是上面已經洗過牌的 cells 順序），不會每次都固定同一張
+    // 疊上面。
+    const areaOrder = [];
+    for(let i = 0; i < n; i++) areaOrder.push(i);
+    areaOrder.sort((a, b) => (halfW[a] * halfH[a]) - (halfW[b] * halfH[b]));
+    const zOrder = new Array(n);
+    areaOrder.forEach((origIndex, rank) => { zOrder[origIndex] = rank + 1; });
 
     // 第二步：鬆弛，把疏密推平（見上面 SCATTER_RELAX_PASSES 那段完整說明）
     relaxScatterSlots(centers, radii, weights, halfW, halfH, n);
