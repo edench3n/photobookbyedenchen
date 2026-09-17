@@ -381,7 +381,31 @@
   #galleryPage{
     position:relative;
     min-height:100vh;
-    padding: calc(var(--header-h)) var(--edge) 140px var(--edge);
+    padding: 0; /* 原本是 calc(var(--header-h)) var(--edge) 140px var(--edge)：
+      這段固定留白就是照片邊緣永遠碰不到頁面邊界的直接原因——#galleryPage 有
+      padding，.grid 這塊「畫布」的實際大小＝#galleryPage 扣掉四邊 padding後
+      的內容框，散落演算法（assignScatterSlots/relaxScatterSlots）算座標、
+      夾範圍（scatterClamp）全部都是相對於這個縮水後的畫布，物理上不可能有
+      任何一張照片跑到 padding 這幾段留白裡——不管亂數怎麼抽都一樣，這不是
+      機率問題，是這塊區域根本不屬於 .grid。上／下（120px／140px）留白最大，
+      所以最明顯；左右（--edge，48px）留白比較小，感覺沒那麼誇張，但成因
+      完全相同。
+      對照組：飄動物件（#dvdBounce / .photo-fall-stage 那批照片）完全不會
+      有這個問題，因為它們的邊界判斷是直接讀 window.innerWidth /
+      window.innerHeight（見 JS 內多處 boundary 計算，例如 maxLeft =
+      window.innerWidth - boxW - margin 這類算式），這是「真正的視窗尺寸」，
+      跟 #galleryPage 有沒有 padding 完全無關，所以它們可以精準撞到畫面
+      四個邊界。
+      拿掉這裡的 padding 之後，.grid 的可用範圍就是 #galleryPage 完整的內容
+      框（跟視窗同寬、高度隨照片張數計算），散落演算法不用改一行，算出來的
+      座標本來就會涵蓋到 0 和最大值（scatterClamp 兩端），照片自然就能貼齊
+      到四個邊界。唯一的副作用：上排標題文字（.fixed-header，z-index:1000、
+      背景透明）如果照片剛好散落到最上面，視覺上會被文字疊在照片前面，這跟
+      飄動物件本來就會在標題底下滑過去是同一種效果、同一套 z-index 關係，
+      並不會遮住標題或讓標題消失。如果不希望照片跟標題文字重疊，需要的是
+      「只在標題那一小塊區域排除」的做法（比照 hover 預覽已經在用的
+      safeExclude 排除區塊模式），而不是像現在這樣整段留白，需要的話我可以
+      再加上去。 */
     transition: opacity .5s ease, filter .5s ease;
   }
   /* ---------- 首頁照片編排：從「CSS Grid 規則網格」改成「完全隨機散落」 ----------
