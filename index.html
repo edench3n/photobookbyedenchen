@@ -485,6 +485,21 @@
     position:relative; /* .idx 現在改成絕對定位，left / top 都由 JS 依「照片本身」
                            實際渲染出來的邊界即時算出 */
   }
+  /* 手機/平板陀螺儀飄浮視差（見 JS supportsTouch && !supportsHover 那段）
+     改用 CSS transition 做位移平滑，不再靠 JS rAF 迴圈每影格手動算 lerp、
+     寫 transform——CSS transition 的插值是瀏覽器合成執行緒（compositor
+     thread）自己算的，跟主執行緒是否正忙（例如使用者正在觸控捲動、瀏覽器
+     把主執行緒資源優先讓給捲動手勢本身，導致主執行緒 JS 大幅延遲或整段
+     停擺）完全無關；就算主執行緒被捲動卡住一段時間，已經在跑的這段過渡
+     動畫還是會繼續在畫面上滑順進行，不會像 JS 手動 lerp 那樣直接整個卡住
+     不動、等主執行緒恢復才「跳」一下追上去。只加在這個 class 底下（JS
+     只在真的是「純觸控、沒有滑鼠 hover」裝置才會幫 .grid 加上這個
+     class），桌機磁吸放大／散落拖曳／飄浮視差（img/.grid-item 上各自的
+     transform）完全不受影響。 */
+  .tilt-parallax .grid-item .thumb-wrap{
+    transition: transform .34s cubic-bezier(.22,.61,.36,1);
+    will-change: transform;
+  }
   .grid-item img{
     /* 尺寸現在完全由 JS 的 sizeGridItemImage() 依「面積」算出來、直接寫入
        inline style.width/height（見該函式的完整說明）。這裡的 max-width/
@@ -4058,12 +4073,16 @@
   // 各自維護各自的 rAF 迴圈跟狀態，不會互相影響。
   if(supportsTouch && !supportsHover && grid){
 
+    // 讓 .thumb-wrap 的 transform 過渡交給 CSS（見上面 .tilt-parallax
+    // 那條規則的完整說明），這裡只負責加上這個 class 當開關——只有真的
+    // 判斷成「純觸控、沒有滑鼠 hover」的裝置才會走到這個 if 區塊，安全。
+    grid.classList.add('tilt-parallax');
+
     // 沿用桌機版 FLOAT_* 的數值，讓兩邊「飄」起來的幅度、速度感一致；
     // 之後想微調觸控版的手感，改這幾個數字即可，不會動到桌機版。
     const TILT_DEPTH_MIN = 0.12;
     const TILT_DEPTH_MAX = 2.4;
     const TILT_MAX_OFFSET = 60;     // 傾斜到達有效範圍邊緣時，depth=1 的照片能被推開的距離
-    const TILT_RESPONSE_MS = 320;   // 追向目標位移的反應時間常數，跟桌機版 FLOAT_RESPONSE_MS 一致
     const TILT_SETTLE_EPS = 0.05;
     // 傾斜多少度（相對下面的基準角度）就達到飄浮視差的最大強度。手機平常
     // 拿在手上本來就會有一點自然晃動、持握角度也因人而異，這個數字刻意
@@ -4111,6 +4130,7 @@
       const dy = xy.y - tiltBaseline.y;
       tiltNormX = scatterClamp(dx / TILT_SENSITIVITY_DEG, -1, 1);
       tiltNormY = scatterClamp(dy / TILT_SENSITIVITY_DEG, -1, 1);
+      scheduleTiltApply();
     }
 
     function startTiltListening(){
@@ -4177,46 +4197,28 @@
       return tiltItemsCache || [];
     }
 
-    // 跟桌機版 floatOffsetState 分開存：兩者理論上不會同時運作（見上面
-    // !supportsHover 的排除說明），分開存只是保守起見，避免極端的混合輸入
-    // 裝置上兩套萬一都跑到時，互相覆蓋、讀到對方寫的殘留位移值。
+    // 這裡存的是「上一次實際寫進 style 的目標值」（陀螺儀位移＋下面捲動
+    // 風力疊加後的合計），給邊界夾制、settled 判斷當基準用——不是逐影格
+    // 平滑追蹤用的「目前值」，平滑過渡整個交給 CSS transition（見上面
+    // .tilt-parallax 規則）。
     const tiltOffsetState = new WeakMap();
-    let tiltLastFrameTime = null;
+    // 純陀螺儀算出來、已經做過邊界夾制的位移，不含下面捲動風力的疊加值。
+    // 捲動風力（tiltNudgeY）每一影格都會變，如果邊界夾制／settled 判斷
+    // 也拿「陀螺儀＋風力」的合計當基準，風力衰減的抖動會反過來一直觸發
+    // 陀螺儀那邊「以為傾斜角度變了」的誤判；分開存，兩邊各自只認自己
+    // 那一份輸入的變化。
+    const tiltGyroOffsetState = new WeakMap();
+    let tiltApplyScheduled = false;
 
-    function tiltFrame(now){
-      requestAnimationFrame(tiltFrame);
-
-      // 跟桌機版磁吸/飄浮迴圈同一個節流精神：只有真的在首頁格子畫面、
-      // 且放大進場動畫／照片堆疊模式都沒在播放時才需要跑，preview/detail
-      // 頁或動畫播放中完全看不到網格，不必要每一影格白白算一次、白白動用
-      // 陀螺儀讀數。
+    function applyTiltNow(){
+      // preview/detail 頁或放大進場／照片堆疊動畫播放中完全看不到網格，
+      // 這幾種情況下收到的感測器讀數直接略過，不做任何量測或寫入。
       if(gridRevealInFlight || photoFallModeActive ||
-         previewPage.classList.contains('active') || detailPage.classList.contains('active')){
-        tiltLastFrameTime = now;
-        return;
-      }
+         previewPage.classList.contains('active') || detailPage.classList.contains('active')) return;
 
-      if(tiltLastFrameTime == null) tiltLastFrameTime = now;
-      const dt = Math.min(64, now - tiltLastFrameTime); // 上限同其他 rAF 迴圈：分頁切走再切回來、或掉幀時，不要一次追趕跳一大段
-      tiltLastFrameTime = now;
-      const smoothFactor = 1 - Math.exp(-dt / TILT_RESPONSE_MS);
-
-      // ---------- 修正：手機/平板捲動時飄浮視差會卡住／感覺停掉 ----------
-      // 成因：這裡原本跟桌機版 magnetFrame() 不一樣，是「逐張」讀
-      // wrapRect（getBoundingClientRect，讀）又立刻寫 thumbWrap.style.transform
-      // （寫）——同一輪迴圈裡讀、寫、讀、寫交替，每一次「寫」都會讓瀏覽器
-      // 上一輪量到的版面資訊失效，逼得緊接在後面的「讀」必須先同步跑一次
-      // 完整的頁面重新排版（forced synchronous layout），也就是經典的
-      // layout thrashing——跟桌機版 magnetFrame() 開頭那段長註解修的是
-      // 同一種成因（那裡已經拆成讀/寫兩階段解決過），這裡當初新增陀螺儀
-      // 版本時沒有比照套用，照片一多（上百張）這筆成本每影格都要重複付。
-      // 平常閒置時主執行緒扛得住感覺不出來，但使用者正在捲動的當下，
-      // 瀏覽器的合成執行緒本來就在忙著處理捲動本身，主執行緒被這些強制
-      // 重排卡住，tiltFrame() 幾乎搶不到執行時間，肉眼看起來就像「捲動時
-      // 飄浮視差整個停掉」，放開手指、捲動結束後才會一次追上來。
-      // 修法：跟桌機版同一個精神，拆成「只讀不寫」→「只寫不讀」兩階段，
-      // 不再逐張穿插，把每一影格的強制重排次數固定壓到最多 1 次，不隨
-      // 照片數量線性增加。
+      // 讀階段：跟桌機版 magnetFrame() 同一個精神，先把所有需要的版面
+      // 資訊（.grid 邊界＋每張照片目前的 wrapRect）一次讀完，不穿插任何
+      // 寫入，避免逼出強制同步重排。
       const gridRect = grid.getBoundingClientRect();
       const tiltPending = [];
       getTiltItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
@@ -4226,18 +4228,18 @@
         let targetY = tiltNormY * TILT_MAX_OFFSET * floatDepth;
 
         // 邊界夾制：量出這張照片「原始、還沒被傾斜視差推過」的位置
-        // （目前的 wrapRect 減掉上一影格已經套用的位移），再跟 .grid
-        // 邊界比較，換算出這一影格 targetX/targetY 各自允許落在的合法
-        // 區間，避免貼著邊緣的照片被推出畫面外。
-        const prev = tiltOffsetState.get(item);
-        const prevX = prev ? prev.x : 0;
-        const prevY = prev ? prev.y : 0;
+        // （目前的 wrapRect 減掉上一次已經套用的完整位移，含捲動風力），
+        // 再跟 .grid 邊界比較，換算出這一次 targetX/targetY 各自允許落在
+        // 的合法區間，避免貼著邊緣的照片被推出畫面外。
+        const prevApplied = tiltOffsetState.get(item);
+        const prevAppliedX = prevApplied ? prevApplied.x : 0;
+        const prevAppliedY = prevApplied ? prevApplied.y : 0;
         const wrapRect = thumbWrap.getBoundingClientRect();
         if(wrapRect.width > 0 && wrapRect.height > 0){
-          const baseLeft = wrapRect.left - prevX;
-          const baseRight = wrapRect.right - prevX;
-          const baseTop = wrapRect.top - prevY;
-          const baseBottom = wrapRect.bottom - prevY;
+          const baseLeft = wrapRect.left - prevAppliedX;
+          const baseRight = wrapRect.right - prevAppliedX;
+          const baseTop = wrapRect.top - prevAppliedY;
+          const baseBottom = wrapRect.bottom - prevAppliedY;
           const minX = gridRect.left - baseLeft;
           const maxX = gridRect.right - baseRight;
           const minY = gridRect.top - baseTop;
@@ -4246,42 +4248,150 @@
           if(minY <= maxY) targetY = scatterClamp(targetY, minY, maxY);
         }
 
-        let cur = prev;
-        if(!cur) cur = { x: 0, y: 0 }; // 還沒進過 WeakMap 的新項目，先在記憶體算，收尾寫階段才統一 set 回去
-        const nx = cur.x + (targetX - cur.x) * smoothFactor;
-        const ny = cur.y + (targetY - cur.y) * smoothFactor;
+        const prevGyro = tiltGyroOffsetState.get(item);
+        const prevGyroX = prevGyro ? prevGyro.x : 0;
+        const prevGyroY = prevGyro ? prevGyro.y : 0;
+        const wasSettled = !prevGyro || (Math.abs(prevGyroX) < TILT_SETTLE_EPS && Math.abs(prevGyroY) < TILT_SETTLE_EPS);
+        const nowSettled = Math.abs(targetX) < TILT_SETTLE_EPS && Math.abs(targetY) < TILT_SETTLE_EPS;
+        if(wasSettled && nowSettled && tiltNudgeY === 0) return; // 陀螺儀跟風力都沒東西可動，不用寫
+        if(!wasSettled && !nowSettled &&
+           Math.abs(targetX - prevGyroX) < TILT_SETTLE_EPS && Math.abs(targetY - prevGyroY) < TILT_SETTLE_EPS &&
+           tiltNudgeY === 0) return; // 陀螺儀角度變化太小、也沒有風力要疊加，不值得重新寫一次 style
 
-        const settled = Math.abs(nx - targetX) < TILT_SETTLE_EPS && Math.abs(ny - targetY) < TILT_SETTLE_EPS
-          && Math.abs(targetX) < TILT_SETTLE_EPS && Math.abs(targetY) < TILT_SETTLE_EPS;
-        const hadTransform = !!thumbWrap.style.transform;
-        if(settled && !hadTransform){
-          tiltOffsetState.set(item, cur);
-          return; // 已經是原始位置、也沒有殘留 transform，這張不用進寫階段
-        }
-        tiltPending.push({ item, thumbWrap, cur, nx, ny, settled });
+        tiltPending.push({ item, thumbWrap, floatDepth, targetX, targetY, nowSettled });
       });
 
-      // 寫階段：把這一輪所有照片的 transform（含歸零）一次寫完，這一輪
-      // 完全不讀取任何版面資訊，不會被上面已經讀好的 wrapRect/gridRect 弄髒。
-      tiltPending.forEach(({ item, thumbWrap, cur, nx, ny, settled }) => {
-        if(settled){
-          thumbWrap.style.transform = '';
-          cur.x = 0; cur.y = 0;
-        } else {
-          cur.x = nx; cur.y = ny;
-          thumbWrap.style.transform = `translate3d(${nx.toFixed(2)}px, ${ny.toFixed(2)}px, 0)`;
-        }
-        tiltOffsetState.set(item, cur);
+      // 寫階段：把這一輪所有需要更新的照片目標值一次寫完，交給 CSS
+      // transition 自己去過渡，這裡完全不讀取任何版面資訊。純陀螺儀值
+      // 存進 tiltGyroOffsetState，實際寫進畫面的則是再疊上目前捲動風力
+      // （tiltNudgeY，見下面「手機/平板捲動時的飄浮視差」那段）之後的
+      // 合計，讓兩邊來源可以同時反映在同一個 transform 上、互不覆蓋。
+      tiltPending.forEach(({ item, thumbWrap, floatDepth, targetX, targetY, nowSettled }) => {
+        tiltGyroOffsetState.set(item, nowSettled ? { x: 0, y: 0 } : { x: targetX, y: targetY });
+        writeTiltTransform(item, thumbWrap, targetX, targetY + tiltNudgeY * floatDepth);
       });
     }
 
-    requestAnimationFrame(tiltFrame);
+    function scheduleTiltApply(){
+      if(tiltApplyScheduled) return;
+      tiltApplyScheduled = true;
+      requestAnimationFrame(() => {
+        tiltApplyScheduled = false;
+        applyTiltNow();
+      });
+    }
 
-    // 分頁切到背景時重設時間戳，避免切回來一次補一大段跳動——跟檔案裡
-    // 其他 rAF 迴圈（stepDvdBounce／magnetFrame）同一個做法。
-    document.addEventListener('visibilitychange', () => {
-      if(!document.hidden) tiltLastFrameTime = null;
-    });
+    // 實際把「陀螺儀位移＋捲動風力」的合計寫進 .thumb-wrap 的 transform，
+    // 並更新 tiltOffsetState（給上面邊界夾制當「目前已經套用的完整位移」
+    // 基準用）。settled（陀螺儀跟風力都幾乎是 0）時清空 inline transform，
+    // 讓瀏覽器不用再為這張照片維持一個不必要的合成圖層。
+    function writeTiltTransform(item, thumbWrap, x, y){
+      const settled = Math.abs(x) < TILT_SETTLE_EPS && Math.abs(y) < TILT_SETTLE_EPS;
+      if(settled){
+        thumbWrap.style.transform = '';
+        tiltOffsetState.set(item, { x: 0, y: 0 });
+      } else {
+        thumbWrap.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)`;
+        tiltOffsetState.set(item, { x, y });
+      }
+    }
+
+    // ---------- 手機/平板捲動時的飄浮視差：疊加一股「捲動風力」 ----------
+    // 單靠陀螺儀事件沒辦法保證捲動當下持續有反應——使用者手指正在拖曳
+    // 捲動的那段期間，瀏覽器可能連 deviceorientation 事件本身都不送（見
+    // 上面 applyTiltNow() 前那段完整說明），這不是網頁 JS 這層能完全
+    // 覆蓋掉的限制。這裡改用「捲動了多少」本身當額外的驅動來源：捲動
+    // 事件在使用者手指滑動的當下本來就會持續觸發，不太會被瀏覽器擋掉，
+    // 比照檔案裡飄動字母那套 applyGridScrollNudge() 的物理模型——捲動
+    // 只負責疊加一筆瞬時「風速」，不直接動位置；真正的位移是這股風速
+    // 每影格按 dt 疊進 tiltNudgeY，風速本身再按 dt 為基準指數衰減慢慢
+    // 歸零，不管捲動量多突然，位移都會被攤平成一段平滑曲線。
+    //
+    // 跟陀螺儀怎麼「合體」：每一影格寫進畫面的 Y 位移＝陀螺儀那份
+    // （tiltGyroOffsetState，只在收到新的 deviceorientation 讀數時更新）
+    // ＋這裡的風力位移（tiltNudgeY，每影格都在變）。捲動當下風力持續
+    // 更新、畫面持續有動靜；捲動一停，風力照樣是連續的指數衰減、慢慢
+    // 滑回 0，不是「捲動中」跟「捲動後」兩段互相獨立、切換瞬間銜接不上
+    // 的關係，銜接處感覺不到硬切換，跟陀螺儀之間的過渡是連續的。
+    const TILT_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例，量級沿用飄動字母那套
+    const TILT_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單次疊加的風速上限 (px/s)
+    const TILT_SCROLL_NUDGE_DECAY_PER_SEC = 4.5; // 衰減係數：比飄動字母的 6.5 稍慢一點，
+                                                   // 捲動停下後風力多飄一下再歸零，跟陀螺儀的
+                                                   // 銜接感覺更像「慢慢交棒」而不是硬停
+    const TILT_NUDGE_SETTLE_EPS = 0.05; // px/s，風速小到這個程度視為完全靜止，停止繼續跑衰減迴圈
+
+    let tiltScrollLastY = window.scrollY;
+    let tiltNudgeVY = 0;   // 目前累積的「風速」殘留值 (px/s)，每影格自然衰減
+    let tiltNudgeY = 0;    // 風速累積出來、目前套用在畫面上的實際位移 (px)
+    let tiltNudgeRafRunning = false;
+    let tiltNudgeLastFrameTime = null;
+
+    function onTiltGridScroll(){
+      const scrollY = window.scrollY;
+      const delta = scrollY - tiltScrollLastY;
+      tiltScrollLastY = scrollY;
+      if(delta === 0) return;
+      // 往下捲時頁面內容視覺上往上移動，這裡取負號讓風向跟內容捲動的
+      // 實際視覺方向一致，跟 applyGridScrollNudge() 同一個理由。
+      const impulse = Math.max(-TILT_SCROLL_NUDGE_MAX_IMPULSE, Math.min(TILT_SCROLL_NUDGE_MAX_IMPULSE, -delta * TILT_SCROLL_NUDGE_IMPULSE));
+      tiltNudgeVY += impulse;
+      ensureTiltNudgeLoop();
+    }
+    window.addEventListener('scroll', onTiltGridScroll, { passive: true });
+
+    function ensureTiltNudgeLoop(){
+      if(tiltNudgeRafRunning) return;
+      tiltNudgeRafRunning = true;
+      tiltNudgeLastFrameTime = null;
+      requestAnimationFrame(tiltNudgeFrame);
+    }
+
+    function tiltNudgeFrame(now){
+      // preview/detail 頁或動畫播放中：風力歸零、整段迴圈直接停掉，等
+      // 使用者真的回到首頁格子畫面、下一次捲動事件才會重新啟動——跟
+      // 桌機/其他 rAF 迴圈同一個「看不到就不跑」的節流精神。
+      if(gridRevealInFlight || photoFallModeActive ||
+         previewPage.classList.contains('active') || detailPage.classList.contains('active')){
+        tiltNudgeVY = 0;
+        tiltNudgeY = 0;
+        tiltNudgeRafRunning = false;
+        return;
+      }
+
+      if(tiltNudgeLastFrameTime == null) tiltNudgeLastFrameTime = now;
+      const dtMs = Math.min(64, now - tiltNudgeLastFrameTime); // 上限同其他 rAF 迴圈，避免掉幀後一次追趕跳一大段
+      const dt = dtMs / 1000;
+      tiltNudgeLastFrameTime = now;
+
+      tiltNudgeY += tiltNudgeVY * dt;
+      tiltNudgeVY *= Math.exp(-TILT_SCROLL_NUDGE_DECAY_PER_SEC * dt); // 指數衰減，dt 為基準，掉幀也不影響衰減的實際速度
+
+      const settling = Math.abs(tiltNudgeVY) < TILT_NUDGE_SETTLE_EPS;
+      if(settling){
+        tiltNudgeVY = 0;
+        if(Math.abs(tiltNudgeY) < TILT_SETTLE_EPS) tiltNudgeY = 0;
+      }
+
+      // 寫階段：只把「陀螺儀位移＋這一影格的風力」重新合成、寫進畫面，
+      // 完全不讀取任何版面資訊（邊界夾制交給上面 applyTiltNow() 在陀螺儀
+      // 真的更新時處理，這裡只是疊加風力，維持這個迴圈本身足夠輕量、
+      // 就算捲動當下主執行緒吃緊也儘量不添亂）。
+      getTiltItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
+        if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
+        const gyro = tiltGyroOffsetState.get(item);
+        const gyroX = gyro ? gyro.x : 0;
+        const gyroY = gyro ? gyro.y : 0;
+        writeTiltTransform(item, thumbWrap, gyroX, gyroY + tiltNudgeY * floatDepth);
+      });
+
+      // 風力已經完全靜止、且沒有陀螺儀位移需要維持時，這個迴圈才真的
+      // 停下來；只要還在衰減中，就繼續排下一影格。
+      if(tiltNudgeVY === 0 && tiltNudgeY === 0){
+        tiltNudgeRafRunning = false;
+        return;
+      }
+      requestAnimationFrame(tiltNudgeFrame);
+    }
   }
 
   // 圖片載入完成時，如果編號正處於「待補」狀態（見 prepareGridRevealState()
