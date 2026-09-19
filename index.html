@@ -385,9 +385,29 @@
     transition: opacity .5s ease, filter .5s ease;
   }
   .grid{
-    display:grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: var(--gap) var(--gap);
+    /* ★ 兩側對齊、每排張數依照片比例自然變化的「Justified Row」排法 ★
+       （參考 Mesura 首頁：每一排第一張貼齊左邊界、最後一張貼齊右邊界，
+       中間的照片平均散開；直式照片窄、橫式照片寬，所以每一排塞得下的張數
+       不同，不是固定欄數。）
+       做法是最成熟的純 CSS 方案：Flexbox 換行 + justify-content:space-between。
+         · flex-wrap:wrap        —— 一排塞不下就自動換行，每排張數由照片實際寬度決定
+         · space-between         —— 每一排剩下的空間平均分在照片之間，兩端貼齊邊界
+         · column-gap            —— 照片之間的「最小」間距，用來控制一排大約放幾張
+         · .grid::after 填充元素  —— 讓「最後一排」靠左排列，不會被拉散到兩端
+       每個格子的寬度 = 照片自己的寬度（見 .thumb-wrap），高度固定為同一個列高，
+       所以每一排的垂直節奏一致、照片垂直置中，跟參考圖一樣。
+       --grid-cell 是「原本 5／3／2 欄版面下單一正方形格子的邊長」，照片顯示大小
+       （JS 的 applyGridItemImageSize()）跟這裡的列高、間距全部以它為基準，所以照片
+       大小跟以前完全一樣。這裡先用 CSS 估算一個預設值，JS 在排版時會用實際量到的
+       容器寬度覆寫成精準值（見 getGridCellSide()）。 */
+    --grid-cols: 5;
+    --grid-gap-ratio: 0.55; /* 最小間距 ÷ 格子邊長：桌機 0.55（每排 5～6 張），平板／手機另外調小，見下方斷點 */
+    --grid-cell: calc((100vw - 2 * var(--edge) - (var(--grid-cols) - 1) * var(--gap)) / var(--grid-cols));
+    display:flex;
+    flex-wrap:wrap;
+    justify-content:space-between;
+    align-items:center;
+    column-gap: calc(var(--grid-cell) * var(--grid-gap-ratio)); /* 照片之間的最小水平間距（比例越大，每排張數越少） */
     /* 編號現在改成貼在「照片實際下方一點點」，不再是貼齊整個正方形格子的
        下緣——縮圖用 max-height:52% 置中顯示，照片下緣跟格子下緣之間本來
        就留有一段沒被照片佔用的空間（至少 24% 格高），編號會落在這段空間
@@ -395,13 +415,24 @@
        用同一個 var(--gap) 即可。 */
     row-gap: var(--gap);
   }
+  /* 讓最後一排靠左排列：這個 0 寬度的填充元素只會出現在最後一行，並吃掉那一行
+     所有剩餘空間，於是 space-between 只作用在「已經排滿的前幾排」，最後一排不會
+     被硬拉開到兩端。 */
+  .grid::after{
+    content:'';
+    flex: 1 1 0;
+  }
   .grid-item{
     position:relative;
     touch-action: manipulation;
+    flex: 0 0 auto; /* 寬度由照片本身決定，不放大也不縮小 */
   }
   .grid-item .thumb-wrap{
-    width:100%;
-    aspect-ratio: 1 / 1;
+    /* 寬度＝照片自己的寬度（width:auto 讓格子貼合照片，兩端對齊才會貼到照片邊緣，
+       header 的對齊 JS 量的也是照片邊緣）；高度固定為同一個列高，0.7 倍格子邊長
+       足以容納最極端的直式照片（面積換算後最高約 0.66 倍），照片在裡面垂直置中。 */
+    width:auto;
+    height: calc(var(--grid-cell) * 0.7);
     overflow:visible;
     display:flex;
     align-items:center;
@@ -419,8 +450,9 @@
        max-width 這一條真的生效，等於變成「用寬度上限決定大小」，見上面
        sizeGridItemImage() 註解的完整說明）；JS 算出來的寬高本來就已經是
        依面積換算過的正確值，這裡不需要、也不應該再額外收得更緊。 */
-    max-width:100%;
-    max-height:100%;
+    max-width:none; /* 格子寬度現在是「跟著照片走」，百分比上限會變成循環定義，改為不設限，尺寸完全由 JS 決定 */
+    max-height:none;
+    flex: 0 0 auto;
     width:auto;
     height:auto;
     object-fit:contain;
@@ -489,11 +521,15 @@
 
   /* 照片欄數：5 欄（桌機滿版）→ 3 欄 → 2 欄。header 現在固定用 Flexbox（見上），
      不會再跟著這兩個 breakpoint 切換排版模式，兩者互不影響。 */
+  /* 平板／手機的最小間距比例刻意調小：格子邊長（--grid-cell）本身就比桌機小，
+     照片相對於一排寬度的比例卻更大，如果沿用桌機的 0.55，一排只放得下 2～3 張，
+     兩端對齊（space-between）就會變成「兩張貼兩側、中間一大片空白」。調小之後
+     平板一排約 4 張、手機一排約 3 張，照片之間的空隙才會跟桌機一樣均勻。 */
   @media (max-width: 1100px){
-    .grid{ grid-template-columns: repeat(3, 1fr); }
+    .grid{ --grid-cols: 3; --grid-gap-ratio: 0.3; }
   }
   @media (max-width: 640px){
-    .grid{ grid-template-columns: repeat(2, 1fr); }
+    .grid{ --grid-cols: 2; --grid-gap-ratio: 0.25; }
     :root{ --header-h: 140px; --edge: 20px; }
 
     /* 手機版改成兩排：第一排是「Photobook by edenchen」與「Preview」左右
@@ -2700,8 +2736,28 @@
 
     const targetImg = grid.querySelector(`.grid-item[data-index="${targetDataIndex}"] img`);
     if(!targetImg) return; // 目標照片還沒渲染出來，先不顯示這個標籤，等它真的渲染出來再算
-    const imgRect = getStableImgRect(targetImg); // 用「未 hover 放大」的原始邊界，見上面說明
-    if(!imgRect.width) return; // 圖片還沒渲染出寬度，先不調，等 load 事件再算一次
+    // ★ 首頁改成兩側對齊的 Justified Row 排法之後，照片實際落在哪裡由各排的張數決定，
+    // 不再是固定的 5 欄。但上方 header 三塊文字（001／002／004）必須維持「原本 5 欄版面
+    // 下」的位置，所以這裡不再量照片實際位置，改成「重現原本 5 欄版面下，這張照片
+    // 會出現的位置」：第 N 張在第 N 欄（0 起算），格子左邊 = 容器左邊 + N * (格寬 + 間距)，
+    // 照片在格子裡水平置中，所以照片左邊 = 格子左邊 + (格寬 - 照片寬) / 2。
+    // 這跟改版前 getStableImgRect() 量到的數字完全相同（照片寬度是 JS 依面積算好寫進去
+    // 的，不受 hover 放大影響），header 因此維持原位。
+    const imgW = targetImg.offsetWidth;
+    if(!imgW) return; // 圖片還沒算出寬度，先不調，等 load 事件再算一次
+    const cellSide = calcGridCellSide();
+    if(!cellSide) return;
+    const gridGap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap')) || 0;
+    // 例外：001（targetDataIndex 0，也就是左側「photobook by edenchen」那塊）改成直接
+    // 對齊「首頁照片牆統一的最左側」——Justified Row 排法下，每一排第一張照片的左邊都
+    // 貼齊容器左邊界，所以標題最左側就是對齊下面所有照片共同的那條左邊線。
+    const gridLeft = grid.getBoundingClientRect().left;
+    const imgRect = {
+      width: imgW,
+      left: targetDataIndex === 0
+        ? gridLeft
+        : gridLeft + targetDataIndex * (cellSide + gridGap) + (cellSide - imgW) / 2
+    };
 
     // 讀回目前已經套用的偏移量，還原出「沒有微調時」原本的左邊界，再算出新的
     // 偏移量——因為對應元素的 left 沒有 CSS transition（見 CSS 註解），這裡讀到
@@ -3156,6 +3212,26 @@
                                      // 正比），不影響上面「依真實長寬比分配寬高」的邏輯。
   const GRID_IMG_ASPECT_MIN = 0.4;
   const GRID_IMG_ASPECT_MAX = 2.5;
+  // 「原本 5／3／2 欄版面下，單一正方形格子的邊長」。首頁現在改成兩側對齊的
+  // Justified Row 排法（見 CSS .grid），格子寬度不再是固定欄寬、而是跟著各自照片
+  // 的寬度走，所以不能再像以前那樣「量第一個格子的寬度」當基準——這裡直接用容器
+  // 實際寬度、跟原本一模一樣的欄數（≤640px 2 欄、≤1100px 3 欄、其餘 5 欄）和間距
+  // 算出同一個數字，照片顯示大小因此跟改版前完全一致。
+  // 算出來的值也同步寫進 CSS 變數 --grid-cell，CSS 的列高、照片最小間距都以它為準。
+  function calcGridCellSide(){
+    if(!grid) return 0;
+    const containerW = grid.clientWidth;
+    if(!containerW) return 0;
+    const vw = window.innerWidth;
+    const cols = vw <= 640 ? 2 : (vw <= 1100 ? 3 : 5);
+    const gapPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap')) || 0;
+    return (containerW - (cols - 1) * gapPx) / cols;
+  }
+  function getGridCellSide(){
+    const side = calcGridCellSide();
+    if(side) grid.style.setProperty('--grid-cell', side + 'px');
+    return side;
+  }
   function applyGridItemImageSize(item, cellSide){
     if(!item || !cellSide) return; // 格子還沒有版面尺寸（例如尚未實際渲染），先不動，等下一次觸發再算
     const thumbWrap = item.querySelector('.thumb-wrap');
@@ -3181,8 +3257,7 @@
     if(!item) return;
     const thumbWrap = item.querySelector('.thumb-wrap');
     if(!thumbWrap) return;
-    const cellSide = thumbWrap.getBoundingClientRect().width; // 正方形格子，寬=高，量寬即可
-    applyGridItemImageSize(item, cellSide);
+    applyGridItemImageSize(item, getGridCellSide());
   }
 
   // 視窗尺寸改變（換欄數、橫直切換、雙指縮放結束…）會讓每張照片的格子
@@ -3197,8 +3272,7 @@
     if(!grid) return;
     const items = grid.querySelectorAll('.grid-item');
     if(!items.length) return;
-    const firstWrap = items[0].querySelector('.thumb-wrap');
-    const cellSide = firstWrap ? firstWrap.getBoundingClientRect().width : 0;
+    const cellSide = getGridCellSide();
     items.forEach(item => applyGridItemImageSize(item, cellSide));
   }
 
@@ -3898,8 +3972,7 @@
         // CSS），所有格子理論上完全一樣寬，只需要在「第一批」量一次「第
         // 一個」格子的寬度，之後每一批都直接沿用，不用每批各自重新量測。
         if(cellSide === null){
-          const firstWrap = batchItems[0].querySelector('.thumb-wrap');
-          cellSide = firstWrap ? firstWrap.getBoundingClientRect().width : 0;
+          cellSide = getGridCellSide();
         }
         batchItems.forEach(item => applyGridItemImageSize(item, cellSide));
       }
@@ -11825,7 +11898,9 @@
     // 寬高也會跟著等比例一起縮小。桌機／平板版（0.52）不受影響。
     const PHOTO_FALL_TILE_RATIO = isDetailMobile() ? 0.54 : 0.52;
     const sampleItem = grid.querySelector('.grid-item');
-    const cellSize = sampleItem ? sampleItem.getBoundingClientRect().width : Math.min(vw / 5, 260);
+    // 首頁格子寬度現在是跟著各自照片走（Justified Row），不能再量第一個格子當基準，
+    // 改用 getGridCellSide()（跟原本 5／3／2 欄下的單格邊長同一個數字）。
+    const cellSize = (sampleItem && getGridCellSide()) || Math.min(vw / 5, 260);
     const tileSize = Math.round(cellSize * PHOTO_FALL_TILE_RATIO);
     // 上面這個 tileSize 原本直接拿來當每張掉落照片「正方形」的邊長，導致不管
     // 照片實際是直的、橫的、還是正方的，全部都被硬擠成同一個正方形——這正是
