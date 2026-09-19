@@ -381,124 +381,33 @@
   #galleryPage{
     position:relative;
     min-height:100vh;
-    padding: 0; /* 原本是 calc(var(--header-h)) var(--edge) 140px var(--edge)：
-      這段固定留白就是照片邊緣永遠碰不到頁面邊界的直接原因——#galleryPage 有
-      padding，.grid 這塊「畫布」的實際大小＝#galleryPage 扣掉四邊 padding後
-      的內容框，散落演算法（assignScatterSlots/relaxScatterSlots）算座標、
-      夾範圍（scatterClamp）全部都是相對於這個縮水後的畫布，物理上不可能有
-      任何一張照片跑到 padding 這幾段留白裡——不管亂數怎麼抽都一樣，這不是
-      機率問題，是這塊區域根本不屬於 .grid。上／下（120px／140px）留白最大，
-      所以最明顯；左右（--edge，48px）留白比較小，感覺沒那麼誇張，但成因
-      完全相同。
-      對照組：飄動物件（#dvdBounce / .photo-fall-stage 那批照片）完全不會
-      有這個問題，因為它們的邊界判斷是直接讀 window.innerWidth /
-      window.innerHeight（見 JS 內多處 boundary 計算，例如 maxLeft =
-      window.innerWidth - boxW - margin 這類算式），這是「真正的視窗尺寸」，
-      跟 #galleryPage 有沒有 padding 完全無關，所以它們可以精準撞到畫面
-      四個邊界。
-      拿掉這裡的 padding 之後，.grid 的可用範圍就是 #galleryPage 完整的內容
-      框（跟視窗同寬、高度隨照片張數計算），散落演算法不用改一行，算出來的
-      座標本來就會涵蓋到 0 和最大值（scatterClamp 兩端），照片自然就能貼齊
-      到四個邊界。唯一的副作用：上排標題文字（.fixed-header，z-index:1000、
-      背景透明）如果照片剛好散落到最上面，視覺上會被文字疊在照片前面，這跟
-      飄動物件本來就會在標題底下滑過去是同一種效果、同一套 z-index 關係，
-      並不會遮住標題或讓標題消失。如果不希望照片跟標題文字重疊，需要的是
-      「只在標題那一小塊區域排除」的做法（比照 hover 預覽已經在用的
-      safeExclude 排除區塊模式），而不是像現在這樣整段留白，需要的話我可以
-      再加上去。 */
+    padding: calc(var(--header-h)) var(--edge) 140px var(--edge);
     transition: opacity .5s ease, filter .5s ease;
   }
-  /* ---------- 首頁照片編排：從「CSS Grid 規則網格」改成「完全隨機散落」 ----------
-     原本這裡是 grid-template-columns: repeat(5, 1fr) 的等寬網格，每張照片
-     乖乖待在自己的格子裡。現在改成：.grid 只當一塊「畫布」（position:relative
-     的定位基準），每一張 .grid-item 都是 position:absolute、位置由 JS 的
-     layoutScatterPhotos() 在「每次進站當下」用亂數重新決定一次（所以每次
-     重新整理都會不一樣），照片彼此可以自由交疊，還可以用滑鼠拖著走、甩出去
-     （見 JS 的 attachScatterDrag() / scatterStep()）。
-     畫布本身的高度（inline style.height）也由 layoutScatterPhotos() 算出來，
-     沿用「原本那個網格會佔多高」的同一套算式，所以整頁可捲動的長度、密度
-     跟改版前完全一致，不會忽然變得很空或爆長。
-     ⚠️ 上排標題文字（photobook by edenchen / Preview / Collab…）的水平位置
-     完全不受這次改動影響：那三個標籤原本是去量「第 1/2/4 張縮圖」實際渲染
-     出來的左邊緣來對齊，照片位置一變成隨機，標籤當然會跟著亂跑——所以 JS
-     那邊改成用 virtualGridImgRect()「用原本那套網格算式算出理論上的位置」，
-     算出來的數字跟改版前一模一樣，標籤位置因此一格也不會動。 */
   .grid{
-    position:relative; /* 底下每張 .grid-item 絕對定位的定位基準 */
-    display:block;
-    /* 🌟 關鍵：自己開一個獨立的堆疊環境（stacking context）🌟
-       散落之後每張照片都會被指派一個 z-index（用來決定誰疊在誰上面、拖曳中
-       那張要浮到最上面），數字會一路長到「照片總數」甚至更高。如果 .grid
-       沒有自己的堆疊環境，這些 z-index 會直接跟全站其他元素在同一個層級比
-       大小——照片數量一多，就會壓過照片詳細頁（z-index:50）、上一頁箭頭
-       （55）這些本來應該蓋在它們上面的東西，變成「進了大圖頁，首頁照片還
-       浮在最上面」。加上 isolation:isolate（搭配 z-index:0 當作舊瀏覽器的
-       備援寫法）之後，所有照片的 z-index 都只在 .grid 這個盒子「內部」比
-       大小，對外永遠只算一層，跟改版前完全一樣，不會影響任何既有的層級關係。 */
-    z-index:0;
-    isolation:isolate;
-    /* height 由 JS 寫入 inline style（見 computeScatterStage()） */
+    display:grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: var(--gap) var(--gap);
+    /* 編號現在改成貼在「照片實際下方一點點」，不再是貼齊整個正方形格子的
+       下緣——縮圖用 max-height:52% 置中顯示，照片下緣跟格子下緣之間本來
+       就留有一段沒被照片佔用的空間（至少 24% 格高），編號會落在這段空間
+       裡，不會超出格子本身的高度範圍，所以不需要再額外加大列距，跟欄距
+       用同一個 var(--gap) 即可。 */
+    row-gap: var(--gap);
   }
   .grid-item{
-    position:absolute;
-    left:0;
-    top:0;
-    /* 絕對定位＋width:auto 本來就會「縮到內容大小」，這裡明確寫成 max-content
-       只是把這件事講死，避免某些瀏覽器在「外層寬度由內容決定、內層 img 又寫著
-       max-width:100%」這種互相依賴的情況下算出 0 寬度（.grid-item 的盒子＝照片
-       的盒子，是拖曳命中範圍與邊界判斷的依據，不能有任何模稜兩可）。 */
-    width:max-content;
-    /* 實際位置一律用 transform: translate3d(x, y, 0) 表示，不用 left/top：
-       transform 不會觸發版面重排（只走合成執行緒），拖曳／甩動時每一影格
-       都要改一次位置，用 transform 才能維持 60fps 的流暢度。 */
-    transform: translate3d(0, 0, 0);
-    /* 原本是 manipulation（保留瀏覽器原生捲動＋雙指縮放，手指按到照片一樣
-       只會捲頁面，拖曳完全交給桌機滑鼠）。現在手機也要能像桌機滑鼠一樣
-       自由拖著照片移動（見下面 attachScatterDrag() 內 pointerdown 的說明），
-       所以改成 none：手指一按在照片上，瀏覽器就完全不介入（不搶去當成
-       捲動或雙指縮放手勢），控制權整個交給 JS 的 Pointer Events 拖曳邏輯。
-       沒按在照片上的空白網格區域不受影響，還是可以正常手指捲動頁面——
-       這條規則只套用在 .grid-item 這個盒子本身，不影響 .grid 容器。 */
-    touch-action: none;
-    cursor: grab;
+    position:relative;
+    touch-action: manipulation;
   }
-  /* 正在被滑鼠拖著走的那一張：游標換成「抓住」的手勢，並暫時提示瀏覽器
-     幫它獨立一層合成圖層（只在真的會動的期間才加，避免上百張照片同時
-     掛著 will-change 造成圖層爆炸、反而更吃效能）。 */
-  .grid-item.pf-dragging{ cursor: grabbing; }
-  .grid-item.pf-moving{ will-change: transform; }
   .grid-item .thumb-wrap{
-    /* 原本是「正方形格子」（width:100% + aspect-ratio:1/1），照片用
-       object-fit:contain 置中顯示在格子裡。現在照片已經不住在格子裡了，
-       外框直接縮成照片本身的大小即可——這樣 .grid-item 的盒子＝照片的
-       盒子，拖曳時的命中範圍、甩動時的邊界判斷才會跟眼睛看到的照片一致，
-       不會有一大圈看不見的空白也能被抓到。
-       其餘（flex 置中、overflow:visible、position:relative）維持原樣，
-       依賴這些的既有邏輯（positionGridIdxItem()、getStableImgRect()、
-       磁吸放大的中心點計算…）全部不受影響。 */
-    width:auto;
-    height:auto;
+    width:100%;
+    aspect-ratio: 1 / 1;
     overflow:visible;
     display:flex;
     align-items:center;
     justify-content:center;
     position:relative; /* .idx 現在改成絕對定位，left / top 都由 JS 依「照片本身」
                            實際渲染出來的邊界即時算出 */
-  }
-  /* 手機/平板陀螺儀飄浮視差（見 JS supportsTouch && !supportsHover 那段）
-     改用 CSS transition 做位移平滑，不再靠 JS rAF 迴圈每影格手動算 lerp、
-     寫 transform——CSS transition 的插值是瀏覽器合成執行緒（compositor
-     thread）自己算的，跟主執行緒是否正忙（例如使用者正在觸控捲動、瀏覽器
-     把主執行緒資源優先讓給捲動手勢本身，導致主執行緒 JS 大幅延遲或整段
-     停擺）完全無關；就算主執行緒被捲動卡住一段時間，已經在跑的這段過渡
-     動畫還是會繼續在畫面上滑順進行，不會像 JS 手動 lerp 那樣直接整個卡住
-     不動、等主執行緒恢復才「跳」一下追上去。只加在這個 class 底下（JS
-     只在真的是「純觸控、沒有滑鼠 hover」裝置才會幫 .grid 加上這個
-     class），桌機磁吸放大／散落拖曳／飄浮視差（img/.grid-item 上各自的
-     transform）完全不受影響。 */
-  .tilt-parallax .grid-item .thumb-wrap{
-    transition: transform .34s cubic-bezier(.22,.61,.36,1);
-    will-change: transform;
   }
   .grid-item img{
     /* 尺寸現在完全由 JS 的 sizeGridItemImage() 依「面積」算出來、直接寫入
@@ -580,12 +489,11 @@
 
   /* 照片欄數：5 欄（桌機滿版）→ 3 欄 → 2 欄。header 現在固定用 Flexbox（見上），
      不會再跟著這兩個 breakpoint 切換排版模式，兩者互不影響。 */
-  /* 照片欄數的兩個斷點（1100 / 640）現在只剩下 JS 那邊的 gridColumnCount()
-     在用——首頁照片已經是隨機散落、不再有「欄」的概念，但「一格有多大」
-     這個基準（gridCellSide()）還是沿用同一套算式來決定每張照片的顯示大小
-     與整塊畫布的高度，所以斷點本身維持不變，只是不再需要（也不能）在 CSS
-     這邊改 grid-template-columns。 */
+  @media (max-width: 1100px){
+    .grid{ grid-template-columns: repeat(3, 1fr); }
+  }
   @media (max-width: 640px){
+    .grid{ grid-template-columns: repeat(2, 1fr); }
     :root{ --header-h: 140px; --edge: 20px; }
 
     /* 手機版改成兩排：第一排是「Photobook by edenchen」與「Preview」左右
@@ -1677,12 +1585,10 @@
     /* 手機版在原本 1.8 倍的基礎上再放大 1.2 倍，這裡再整體放大 1.3 倍：桌機/平板維持原本大小不變，只調整這個 breakpoint 底下的高度區間
        ↓再整體縮小約 0.9 倍（使用者反應手機版飄動物件偏大，縮小一點點），區間三個數字等比例乘上 0.9
        ↓使用者反應手機版還是偏大一點，再整體縮小約 0.9 倍（區間三個數字在上一輪 0.9 倍的基礎上再乘 0.9，
-       等於相對最早的基準縮小到約 0.81 倍）
-       ↓再整體縮小約 0.85 倍（區間三個數字在上一輪的基礎上再乘 0.85，
-       等於相對最早的基準縮小到約 0.6885 倍），維持同一套等比例縮放的做法，不影響其他任何邏輯 */
+       等於相對最早的基準縮小到約 0.81 倍），維持同一套等比例縮放的做法，不影響其他任何邏輯 */
     .dvd-bounce-img{
       /* 同上面基礎規則一樣乘上 --dvd-area-scale，手機版跟著桌機版一起再放大約 1.1 倍，維持原本手機相對桌機的放大比例 */
-      height: calc(clamp(154px, 36.97vw, 451.73px) * var(--dvd-area-scale, 1));
+      height: calc(clamp(181.18px, 43.49vw, 531.45px) * var(--dvd-area-scale, 1));
     }
   }
   /* 平板縮小成桌機版的 0.85 倍。原本用「寬度介於 641~1100px 之間」來判斷
@@ -2792,20 +2698,10 @@
       return;
     }
 
-    // ---------- 首頁照片改成「隨機散落」之後，這裡的對齊基準也要跟著換 ----------
-    // 原本是去量目標縮圖「實際渲染出來」的左邊緣（getStableImgRect）。照片
-    // 現在每次進站都會落在完全隨機的位置、還可以被使用者拖著跑，再照原本的
-    // 做法量，上排三個標籤就會跟著照片一起亂跑、甚至被拖曳即時牽著走——
-    // 但需求明確是「上排文字標題等等完全不要變動到目前位置」。
-    // 改成用 virtualGridImgRect()：不看照片現在飄到哪，而是用「原本那個
-    // 5 欄網格裡，第 N 張照片的左邊緣會在哪」這個理論值來算。算式跟改版前
-    // 的網格完全等價，所以算出來的數字跟改版前量到的一模一樣，標籤位置
-    // 一格都不會動（也不會再因為 hover 放大／拖曳而抖動，反而比以前更穩）。
-    // 這裡仍然先確認對應的 .grid-item 真的已經建出來了，維持原本「照片還沒
-    // 渲染出來就先不顯示這個標籤」的時機，不讓標籤提早跳出來。
-    if(!grid.querySelector(`.grid-item[data-index="${targetDataIndex}"]`)) return;
-    const imgRect = virtualGridImgRect(targetDataIndex);
-    if(!imgRect || !imgRect.width) return; // 尺寸還算不出來（例如版面寬度還是 0），先不調，等下一次重算
+    const targetImg = grid.querySelector(`.grid-item[data-index="${targetDataIndex}"] img`);
+    if(!targetImg) return; // 目標照片還沒渲染出來，先不顯示這個標籤，等它真的渲染出來再算
+    const imgRect = getStableImgRect(targetImg); // 用「未 hover 放大」的原始邊界，見上面說明
+    if(!imgRect.width) return; // 圖片還沒渲染出寬度，先不調，等 load 事件再算一次
 
     // 讀回目前已經套用的偏移量，還原出「沒有微調時」原本的左邊界，再算出新的
     // 偏移量——因為對應元素的 left 沒有 CSS transition（見 CSS 註解），這裡讀到
@@ -3254,140 +3150,27 @@
   // 直的、還是正方的，理論上佔的可視面積都會被拉到差不多大小，不會再有
   // 橫式明顯小、直式明顯大的落差。長寬比極端的照片（例如很長的全景照）
   // 會夾在 0.4~2.5 之間，避免被拉成一條極細的長條。
-  const GRID_IMG_BOX_RATIO = 0.47; // 首頁縮圖整體大小：使用者反應想要整體再放大一點點，
-                                     // 從 0.42 調高到 0.47（面積跟這個比例的平方成正比），
-                                     // 不影響上面「依真實長寬比分配寬高」的邏輯。
+  const GRID_IMG_BOX_RATIO = 0.42; // 首頁縮圖整體再縮小一點：原本沿用舊版 CSS 的 0.52，
+                                     // 使用者反應想要整體再縮小，調低這個比例即可讓每張
+                                     // 照片的目標面積一起等比縮小（面積跟這個比例的平方成
+                                     // 正比），不影響上面「依真實長寬比分配寬高」的邏輯。
   const GRID_IMG_ASPECT_MIN = 0.4;
   const GRID_IMG_ASPECT_MAX = 2.5;
-  // ---------- 每張照片隨機「有大有小」的面積變化 ----------
-  // 使用者希望畫面上的照片不要全部一樣大，要隨機參差；反應第一版的落差
-  // 還不夠明顯，所以這裡分兩層：① 每張照片都有的基礎隨機浮動（範圍拉得
-  // 比第一版更大）；② 另外從整批照片裡，每隔固定張數挑一張「刻意加碼」
-  // 放得更大，當作視覺上的重點照片。如果單純用 Math.random()，每次重新
-  // 排版（視窗縮放、字體載入完成、橫直切換…都會呼叫 resizeAllGridImages()
-  // 重新套用一次尺寸）都會重新抽一次亂數，同一張照片的大小就會在使用者
-  // 眼前忽大忽小地跳動，看起來像 bug。改成用「照片在 photos 陣列裡的索引」
-  // 當種子、用固定公式算出 0~1 之間的偽隨機數（sin 亂數是常見的無狀態
-  // hash 手法）——同一張照片、同一個索引，不管重算幾次都會得到完全一樣
-  // 的隨機值，大小穩定不跳動，但不同照片彼此之間仍然看起來隨機、大小
-  // 不一。散落排版（scatterStep()／relaxScatterSlots()）本來就是依照片
-  // 各自算出來的實際大小去分配間距、避免互相疊死，所以這裡的隨機大小
-  // 差異（包含被加碼放大的那些）會自然反映在畫面疏密上，不需要額外處理。
-  const GRID_IMG_VARIANCE_MIN = 0.6;  // 一般照片的基礎面積下限
-  const GRID_IMG_VARIANCE_MAX = 1.55; // 一般照片的基礎面積上限（比第一版拉開更多，落差更明顯）
-  // 「刻意放大」的重點照片：不是每張都比大小，而是整批裡每
-  // GRID_IMG_FEATURE_INTERVAL 張，固定挑其中一張出來額外加碼放大。用
-  // 「照片索引」分組挑選，散落排版本身又會把每張照片洗到隨機位置，兩者
-  // 疊加起來，這些被加碼放大的照片自然會平均散落在整個頁面上，不會擠成
-  // 一團，也不會固定出現在畫面同一個角落。
-  const GRID_IMG_FEATURE_INTERVAL = 6;        // 每幾張裡挑一張出來加碼放大
-  const GRID_IMG_FEATURE_BOOST_MIN = 1.9;     // 加碼放大的額外倍率下限（疊乘在基礎隨機值上）
-  const GRID_IMG_FEATURE_BOOST_MAX = 2.7;     // 上限
-  function gridItemSizeVarianceFactor(index){
-    const seed = Math.sin((index + 1) * 12.9898) * 43758.5453;
-    const frac = seed - Math.floor(seed); // 0~1 之間、依 index 固定不變的偽隨機值
-    let variance = GRID_IMG_VARIANCE_MIN + frac * (GRID_IMG_VARIANCE_MAX - GRID_IMG_VARIANCE_MIN);
-    // 用另一組獨立的 hash 常數決定「這一組（每 GRID_IMG_FEATURE_INTERVAL
-    // 張）裡面，是第幾張被選為重點照片」——刻意不要每組都選第 0 張，不然
-    // 加碼放大的照片在畫面上會有規律地固定落在同一種相對位置，看起來不夠
-    // 隨機。groupStart 相同的照片（同一組）會算出同一個 featuredOffset，
-    // 確保每一組真的都恰好選出一張。
-    const groupStart = Math.floor(index / GRID_IMG_FEATURE_INTERVAL) * GRID_IMG_FEATURE_INTERVAL;
-    const groupSeed = Math.sin((groupStart + 1) * 78.233) * 12543.987;
-    const groupFrac = groupSeed - Math.floor(groupSeed);
-    const featuredOffset = Math.floor(groupFrac * GRID_IMG_FEATURE_INTERVAL);
-    if((index - groupStart) === featuredOffset){
-      const boostSeed = Math.sin((index + 1) * 39.425) * 9821.318;
-      const boostFrac = boostSeed - Math.floor(boostSeed);
-      variance *= GRID_IMG_FEATURE_BOOST_MIN + boostFrac * (GRID_IMG_FEATURE_BOOST_MAX - GRID_IMG_FEATURE_BOOST_MIN);
-    }
-    return variance;
-  }
-  // ---------- 「格子」這個概念現在只剩下「算尺寸的基準」 ----------
-  // 首頁照片改成隨機散落之後（見 CSS .grid 那段說明），畫面上已經沒有任何
-  // 一個真的存在的方形格子可以量了——原本 renderGrid()／resizeAllGridImages()
-  // 都是去量「第一個 .thumb-wrap 實際渲染出來的寬度」當 cellSide，現在
-  // .thumb-wrap 已經縮成照片本身的大小，量到的會是照片寬度、不是格子寬度，
-  // 再拿去算照片大小就會一輪比一輪縮小（自己吃自己）。
-  // 改成用純算式重算：欄數、欄距、可用寬度都是已知的（跟原本 CSS Grid
-  // repeat(N, 1fr) + gap 的分法完全等價），算出來的數字跟改版前量到的一模
-  // 一樣，所以每張照片的顯示大小、整頁的密度全部維持原樣，而且完全不需要
-  // 讀取版面（不會觸發強制重排），比原本量 DOM 還便宜。
-  function gridColumnCount(){
-    const w = window.innerWidth;
-    // 跟 CSS 原本 .grid 的兩個 media query 斷點一致（見該處說明）
-    return w <= 640 ? 2 : (w <= 1100 ? 3 : 5);
-  }
-  function gridGapPx(){
-    return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap')) || 18;
-  }
-  function gridCellSide(){
-    if(!grid) return 0;
-    const contentW = grid.clientWidth; // .grid 沒有 padding/border，clientWidth 就是可用寬度
-    if(!contentW) return 0;
-    const cols = gridColumnCount();
-    const gap = gridGapPx();
-    return (contentW - gap * (cols - 1)) / cols;
-  }
-  // 依照片的長寬比與格子邊長，算出這張照片該顯示多大（維持原本「每張照片
-  // 目標面積相同」的邏輯，一個字都沒改，只是抽成可以單獨呼叫的函式，讓
-  // 散落排版、標題對齊那邊都能共用同一份算式）。
-  // 依照片的長寬比、格子邊長、以及這張照片自己的隨機面積係數，算出這張
-  // 照片該顯示多大（維持原本「每張照片目標面積相同、再乘上隨機係數」的
-  // 邏輯，抽成可以單獨呼叫的函式，讓散落排版、標題對齊那邊都能共用同一份
-  // 算式）。index 用來算 gridItemSizeVarianceFactor()，讓同一張照片每次
-  // 重算大小都拿到一樣的隨機值，不會跳動。
-  function gridImageSizeFor(photo, cellSide, index){
-    const rawAspect = (photo && photo.aspect) ? photo.aspect : 1; // 沒有量到寬高比就退回正方形，維持原本行為
-    const aspect = Math.min(GRID_IMG_ASPECT_MAX, Math.max(GRID_IMG_ASPECT_MIN, rawAspect));
-    const boxSide = cellSide * GRID_IMG_BOX_RATIO;
-    const variance = gridItemSizeVarianceFactor(index || 0); // 每張照片固定的隨機面積係數，讓照片有大有小
-    const targetArea = boxSide * boxSide * variance; // 以「正方形照片會佔的面積」再乘上隨機係數，當成這張照片的目標面積
-    // area = w*h，aspect = w/h → h = sqrt(area/aspect)，w = h*aspect
-    const h = Math.sqrt(targetArea / aspect);
-    return { w: h * aspect, h: h };
-  }
   function applyGridItemImageSize(item, cellSide){
     if(!item || !cellSide) return; // 格子還沒有版面尺寸（例如尚未實際渲染），先不動，等下一次觸發再算
     const thumbWrap = item.querySelector('.thumb-wrap');
     const img = thumbWrap ? thumbWrap.querySelector('img') : null;
     if(!thumbWrap || !img) return;
-    const index = Number(item.dataset.index);
-    const size = gridImageSizeFor(photos[index], cellSide, index);
-    img.style.width = size.w + 'px';
-    img.style.height = size.h + 'px';
-    // 散落排版要用「這張照片有多大」來算位置與邊界，順手記在元素身上，
-    // 之後 layoutScatterPhotos()／拖曳物理都直接讀這兩個數字，不用再量 DOM。
-    const st = getScatterState(item);
-    st.w = size.w;
-    st.h = size.h;
-  }
-
-  // 「理論上的網格位置」——只給上排標題文字對齊用。
-  // 上排三個標籤（photobook by edenchen / Preview / Collab…）原本是各自去量
-  // 第 1／2／4 張縮圖「實際渲染出來」的左邊緣來對齊（見 syncEdgeAlignment()）。
-  // 照片改成隨機散落之後，那三張照片每次重新整理都跑到不同地方，標籤當然
-  // 會跟著亂跑——但使用者明確要求「上排文字標題等等完全不要變動到目前位置」。
-  // 所以這裡改成：不看照片現在實際飄到哪，而是用「如果還是原本那個 5 欄
-  // 網格，第 N 張照片的左邊緣會在哪」這個理論值來算。算式跟改版前的網格
-  // 完全等價（欄寬、欄距、照片在格子裡置中的偏移都一樣），所以算出來的
-  // 數字跟改版前量到的一模一樣，標籤位置一格都不會動。
-  function virtualGridImgRect(dataIndex){
-    if(!grid) return null;
-    const photo = photos[dataIndex];
-    if(!photo) return null;
-    const cellSide = gridCellSide();
-    if(!cellSide) return null;
-    const cols = gridColumnCount();
-    const gap = gridGapPx();
-    const gridLeft = grid.getBoundingClientRect().left;
-    const col = dataIndex % cols;
-    const size = gridImageSizeFor(photo, cellSide, dataIndex);
-    const cellLeft = gridLeft + col * (cellSide + gap);
-    return {
-      left: cellLeft + (cellSide - size.w) / 2, // 照片在格子裡是置中的
-      width: size.w
-    };
+    const photo = photos[Number(item.dataset.index)];
+    const rawAspect = (photo && photo.aspect) ? photo.aspect : 1; // 沒有量到寬高比就退回正方形，維持原本行為
+    const aspect = Math.min(GRID_IMG_ASPECT_MAX, Math.max(GRID_IMG_ASPECT_MIN, rawAspect));
+    const boxSide = cellSide * GRID_IMG_BOX_RATIO;
+    const targetArea = boxSide * boxSide; // 以「正方形照片會佔的面積」當成每張照片共同的目標面積
+    // area = w*h，aspect = w/h → h = sqrt(area/aspect)，w = h*aspect
+    const h = Math.sqrt(targetArea / aspect);
+    const w = h * aspect;
+    img.style.width = w + 'px';
+    img.style.height = h + 'px';
   }
 
   // 單一格子場合使用（量這個格子自己的寬度、套用到自己身上）。renderGrid()
@@ -3396,10 +3179,10 @@
   // （例如某張照片的寬高比事後才補齊、只需要更新那一個格子）。
   function sizeGridItemImage(item){
     if(!item) return;
-    // 原本是量 .thumb-wrap 的寬度當格子邊長；散落排版之後 .thumb-wrap 已經
-    // 縮成照片本身的大小，量它會越算越小（見 gridCellSide() 上方的完整說明），
-    // 改成直接用算式算出格子基準邊長。
-    applyGridItemImageSize(item, gridCellSide());
+    const thumbWrap = item.querySelector('.thumb-wrap');
+    if(!thumbWrap) return;
+    const cellSide = thumbWrap.getBoundingClientRect().width; // 正方形格子，寬=高，量寬即可
+    applyGridItemImageSize(item, cellSide);
   }
 
   // 視窗尺寸改變（換欄數、橫直切換、雙指縮放結束…）會讓每張照片的格子
@@ -3414,14 +3197,9 @@
     if(!grid) return;
     const items = grid.querySelectorAll('.grid-item');
     if(!items.length) return;
-    // 同上：改用算式而不是量 DOM（見 gridCellSide() 上方的完整說明）
-    const cellSide = gridCellSide();
-    if(!cellSide) return;
+    const firstWrap = items[0].querySelector('.thumb-wrap');
+    const cellSide = firstWrap ? firstWrap.getBoundingClientRect().width : 0;
     items.forEach(item => applyGridItemImageSize(item, cellSide));
-    // 視窗尺寸一變，畫布的寬高也跟著變，散落的座標要依「同樣的相對位置」
-    // 重新換算貼回去（不重新抽一次亂數——不然使用者只是轉個螢幕方向、
-    // 或瀏覽器網址列收合一下，整頁照片就會忽然全部跳到別的地方）。
-    relayoutScatterPhotos();
   }
 
   function positionGridIdxItem(item){
@@ -3593,58 +3371,12 @@
     // 任何四張照片中間的空白角落時，四張都還在放大範圍內，會一起被引力
     // 稍微拉大，不會有「明明離四張都很近、卻一張都沒反應」的死角。
     const MAGNET_RADIUS = 600;   // px，游標「引力」的有效範圍半徑，超出這個距離的照片維持原始大小
-    const MAGNET_MAX_SCALE = 1.12; // 游標正中心那一點的最大放大倍率：使用者反應引力放大
-                                    // 幅度想再小一點點，從 1.35 調降到 1.22，
-                                    // ↓使用者再反應想要幅度更小一點，從 1.22 調降到 1.12，
-                                    // 其餘半徑／反應速度／爬升節奏都不受影響，只是放大的「量」變小。
+    const MAGNET_MAX_SCALE = 1.35; // 游標正中心那一點的最大放大倍率——比原本二元式 hover
+                                    // 的 1.12 明顯更有份量，讓「被引力吸住」的視覺效果更清楚
     const MAGNET_RESPONSE_MS = 140; // 追向目標縮放值的反應時間常數（越小追得越快、
                                      // 越貼手；越大越有「拖著慢慢跟上」的重量感）
     const MAGNET_SETTLE_EPS = 0.0008; // 目前值/目標值都幾乎等於原始大小時，視為已完全
                                        // 靜止，停止繼續寫入 style、省不必要的重繪
-
-    // ---------- 首頁攝影照片的「飄浮視差」(parallax floating) ----------
-    // 概念移植自 fancy-components 的 Parallax Floating（React + Framer
-    // Motion 元件：每個子元素各自帶一個 depth 值，跟著滑鼠/觸控位置做視差
-    // 位移，depth 越大移動幅度越大）。這裡整個網站是純手刻的 vanilla JS，
-    // 沒有 React/Framer Motion 這套 runtime，所以不是照抄那份元件原始碼，
-    // 而是把同一套「依 depth 值＋滑鼠位置算目標位移→指數平滑(lerp)追過去」
-    // 的邏輯，改寫成這裡慣用的、掛在 magnetFrame() 這個既有 rAF 迴圈裡的
-    // 寫法——不額外多開一個常駐迴圈（見上面 magnetFrame() 開頭那段「多一個
-    // 永遠不關的迴圈會直接墊高每一輪 RAF 執行時間」的說明，這裡完全沿用
-    // 同一個顧慮），也直接沿用同一份 magnetMouseX/magnetMouseY/magnetActive
-    // 滑鼠狀態，不用再多掛一組事件監聽器。
-    //
-    // 效果只加在 .thumb-wrap 這一層：外層 .grid-item 的 transform 是散落
-    // 物理／拖曳位置專用（見 writeScatterTransform()），內層 img 的
-    // transform 是磁吸放大專用（見上面 magnetFalloff() 那段），.thumb-wrap
-    // 目前完全沒有人用，三層各自只負責一件事、互不覆寫，這裡不會跟既有任何
-    // 效果打架。
-    //
-    // 只在 supportsHover（桌機滑鼠）環境套用，跟磁吸放大同一個判斷：觸控
-    // 裝置上「手指位置」同時也是拖曳照片本身的輸入來源，如果套用同一套
-    // 全域視差，會變成「拖著一張照片跑，其他照片全部跟著同一個座標飄」，
-    // 看起來會很混亂，不是想要的效果，所以維持跟磁吸放大一致、觸控完全
-    // 不受影響。
-    const FLOAT_DEPTH_MIN = 0.12;   // depth 下限：對應「畫面裡印得最小」的那張照片
-                                     // （視覺上感覺最遠），幾乎快貼齊 0，跟著滑鼠移動
-                                     // 的幅度非常小
-    const FLOAT_DEPTH_MAX = 2.4;    // depth 上限：對應「畫面裡印得最大」的那張照片
-                                     // （視覺上感覺最近），移動幅度是下限的 20 倍——
-                                     // 使用者反應想要深度差異更明顯，這裡刻意拉開
-                                     // min/max 的差距，不再是原本 0.35~1 那種差別不大
-                                     // 的隨機值
-    const FLOAT_MAX_OFFSET = 60;    // px，滑鼠移到視窗最邊緣時，depth=1 的照片能被
-                                     // 推開的距離。使用者反應想要整體幅度更大，從原本
-                                     // 22 調高到 60（依上面 depth 上限 2.4，畫面最大
-                                     // 那張照片實際最多可以飄到 144px 左右）
-    const FLOAT_RESPONSE_MS = 320;  // 追向目標位移的反應時間常數，比磁吸放大的
-                                     // MAGNET_RESPONSE_MS(140) 更慢、更「飄」，取的是
-                                     // Parallax Floating 原本 easingFactor 預設值
-                                     // (0.05，偏慢、偏平滑) 那種手感，跟磁吸放大那種
-                                     // 貼手的即時感刻意做出差異
-    const FLOAT_SETTLE_EPS = 0.05;  // px，目前值/目標值都幾乎是 0 時視為完全靜止，
-                                     // 停止繼續寫入 style
-
 
     // 首頁縮圖「放大進場」動畫播完的那一刻，引力「強度」（不是縮放值本身）
     // 從 0 緩慢爬升到 100% 所花的時間。原本只把 magnetScaleState 重設回 1
@@ -3669,7 +3401,6 @@
     let magnetActive = false;   // 滑鼠目前是否在視窗內、有提供有效座標
     let magnetLastFrameTime = null;
     const magnetScaleState = new WeakMap(); // item -> 目前實際套用的縮放值
-    const floatOffsetState = new WeakMap(); // item -> 飄浮視差目前實際套用的 {x, y} 位移（見上面 FLOAT_* 常數的說明）
     // null = 引力目前是滿強度（平常狀態，一般 hover 時都是這樣）；非 null
     // 時代表「引力強度」還在爬升中，值是爬升起點的時間戳，跟 rAF 傳進
     // magnetFrame() 的 now 用同一個時間基準（都是 performance.now()），
@@ -3694,38 +3425,10 @@
       if(!magnetItemsCache){
         const nodeList = grid.querySelectorAll('.grid-item');
         if(nodeList.length){
-          // 飄浮視差（見上面 FLOAT_* 常數／magnetFrame() 內的說明）用的
-          // depth：不再是每張隨機亂抽，改成直接對應「這張照片實際顯示
-          // 出來的面積」——面積來自 scatterStates（applyGridItemImageSize()
-          // 依 aspect＋隨機面積係數算出來的 st.w/st.h，散落排版本來就會用
-          // 到，這裡只是直接讀现成的數字，不用再另外量 DOM）。
-          // 邏輯對應真實世界的透視感：照片本身印得越大＝視覺上感覺離觀者
-          // 越「近」，越近的物體在視差移動時位移量本來就該越大；印得越小
-          // ＝越「遠」，位移量該越小。所以面積最大的那張直接吃滿
-          // FLOAT_DEPTH_MAX，面積最小的那張只吃 FLOAT_DEPTH_MIN，中間的
-          // 依面積線性內插。
-          // 用「min-max 正規化」而不是寫死面積的絕對數字：正規化後的比例
-          // 在視窗尺寸改變、格子邊長跟著重新縮放時完全不變（所有照片的
-          // 面積會一起等比例縮放，min/max 也跟著等比例縮放，兩者相除的
-          // 比例不受影響），不需要在 resize 時重新計算一次。
-          const raw = Array.from(nodeList).map(item => {
+          magnetItemsCache = Array.from(nodeList).map(item => {
             const thumbWrap = item.querySelector('.thumb-wrap');
             const idx = item.querySelector('.idx');
-            const st = scatterStates.get(item);
-            const area = (st && st.w && st.h) ? st.w * st.h : 0;
-            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx, area };
-          });
-          let minArea = Infinity, maxArea = -Infinity;
-          raw.forEach(({ area }) => {
-            if(area <= 0) return; // 尺寸還沒算出來的照片（極端情況）不參與正規化範圍
-            if(area < minArea) minArea = area;
-            if(area > maxArea) maxArea = area;
-          });
-          const hasRange = Number.isFinite(minArea) && Number.isFinite(maxArea) && maxArea > minArea;
-          magnetItemsCache = raw.map(({ item, thumbWrap, img, idx, area }) => {
-            const norm = (hasRange && area > 0) ? (area - minArea) / (maxArea - minArea) : 0.5; // 量不到範圍（例如整批都還沒設定尺寸）就先給中間值保底
-            const floatDepth = FLOAT_DEPTH_MIN + norm * (FLOAT_DEPTH_MAX - FLOAT_DEPTH_MIN);
-            return { item, thumbWrap, img, idx, floatDepth };
+            return { item, thumbWrap, img: thumbWrap ? thumbWrap.querySelector('img') : null, idx };
           });
         }
       }
@@ -3796,7 +3499,6 @@
                                                             // 或掉幀時，不要讓追趕的那一步跳太大
       magnetLastFrameTime = now;
       const smoothFactor = 1 - Math.exp(-dt / MAGNET_RESPONSE_MS);
-      const floatSmoothFactor = 1 - Math.exp(-dt / FLOAT_RESPONSE_MS); // 飄浮視差專用，比磁吸放大更慢、更飄（見 FLOAT_RESPONSE_MS 說明）
 
       // 「引力強度」爬升係數：0 代表這一刻引力完全不生效（不管滑鼠多近，
       // 目標值都固定是 1，等同原始大小），1 代表引力已經是平常的滿強度。
@@ -3845,30 +3547,7 @@
       // 總共只需要「一次寫→一次讀」這一個交界會觸發一次強制重排，不管
       // 網格有幾百張照片，強制重排的次數都固定是 1 次，不會再隨照片數量
       // 線性增加。
-      // ---------- 修正：「照片撞擊邊界好像有一點超出去邊界外面」 ----------
-      // 成因：magnetFalloff() 算出來的放大倍率只看「滑鼠離這張照片多近」，
-      // 完全不知道這張照片自己離 .grid 的邊界還剩多少空間。放大是以縮圖
-      // 中心點為準往四周均勻長出去的（img.style.transform = scale(...)，
-      // 縮放中心點預設就是元素自己的中心），而每張照片「平常沒被放大」時
-      // 的位置，本來就已經被散落排版夾到緊貼 .grid 邊緣（見上面
-      // relaxScatterSlots() 收尾那段「夾回畫布範圍內」的說明）——所以只要
-      // 滑鼠恰好靠近一張本來就貼著邊緣的照片，放大倍率一長，圖片就會整個
-      // 凸出 .grid 的邊界外，看起來像「撞到邊界卻還被推出去」。
-      // 修法：每一影格額外量一次 .grid 目前的邊界（跟下面讀 wrapRect 一樣，
-      // 都放在「只讀不寫」的這個階段，不會多引發任何強制重排），算出這張
-      // 照片朝四個方向各自還剩多少空間，換算成「不會凸出邊界」的放大倍率
-      // 上限，直接把 target 夾在這個上限之下。跟 magnetFalloff() 原本的
-      // 效果比，只有在照片真的貼近邊緣、且滑鼠也剛好靠得夠近時才會被這個
-      // 上限攔下來，其餘情況（照片離邊界還有餘裕）完全感覺不出差異。
-      const gridRect = grid ? grid.getBoundingClientRect() : null;
       const magnetPending = [];
-      // 供下面「飄浮視差寫階段」夾住 targetX/targetY 用：key 是 item，值是這一影格
-      // 允許飄浮視差位移落在的合法區間 { minX, maxX, minY, maxY }（相對於這張照片
-      // 「原始、還沒被飄浮視差推動過」的位置）。只有在 magnetActive 且量得到
-      // wrapRect 的這一輪才會寫入（下面同一個 forEach 裡，跟磁吸放大共用同一次
-      // getBoundingClientRect()，不會多引發一次強制重排）——完整成因見下面該處的
-      // 說明。
-      const floatRoomByItem = new Map();
       getMagnetItems().forEach(({ item, thumbWrap, img, idx }) => {
         if(!img || !img.classList.contains('loaded')) return;
 
@@ -3885,49 +3564,6 @@
           // 讓爬升期的目標值突然衝滿，達到「從沒有到有，慢慢長出引力」
           // 的效果。爬滿之後 rampFactor 恆為 1，跟原本行為完全相同。
           target = 1 + (fullTarget - 1) * rampFactor;
-
-          // 放大不能凸出 .grid 邊界：分別算出左右／上下兩個方向「比較窄
-          // 的那一邊」還剩多少空間，除以半寬／半高，換算成這個方向能撐到
-          // 的最大倍率，兩個方向取比較小的那個（任何一邊撐到底就要停）。
-          if(gridRect && wrapRect.width > 0 && wrapRect.height > 0){
-            const roomX = Math.min(wrapRect.left - gridRect.left, gridRect.right - wrapRect.right);
-            const roomY = Math.min(wrapRect.top - gridRect.top, gridRect.bottom - wrapRect.bottom);
-            const maxScaleX = 1 + Math.max(0, roomX) / (wrapRect.width / 2);
-            const maxScaleY = 1 + Math.max(0, roomY) / (wrapRect.height / 2);
-            target = Math.min(target, maxScaleX, maxScaleY);
-          }
-
-          // ---------- 修正：「飄浮視差把貼著邊緣的照片推出 .grid 邊界外」 ----------
-          // 成因跟上面磁吸放大完全一樣的道理，只是換成下面第二輪 forEach 的
-          // 飄浮視差位移（thumbWrap 的 translate3d）：它算出來的 targetX/targetY
-          // 只看滑鼠在整個視窗裡的位置＋這張照片自己的 floatDepth，完全不知道
-          // 這張照片離 .grid 邊界還剩多少空間。散落排版（relaxScatterSlots()）
-          // 本來就會把照片夾到緊貼 .grid 邊緣，一旦飄浮視差再疊加一段位移
-          // （尤其 FLOAT_MAX_OFFSET／FLOAT_DEPTH_MAX 調大之後，位移量可以到
-          // 一百多 px），貼著邊緣的照片就會被整個推出 .grid 邊界外，看起來
-          // 就是「照片跑出去邊界外了」。
-          // 修法：這裡的 wrapRect 已經是磁吸放大量好的（不多一次強制重排），
-          // 拿掉「上一影格已經套用的飄浮視差位移」（floatOffsetState 存的
-          // prevOffset）就能反推回這張照片「原始、還沒被飄浮視差推過」的
-          // 位置，再跟 gridRect 比較，算出這一影格 targetX/targetY 各自允許
-          // 落在的合法區間，寫進 floatRoomByItem，交給下面第二輪飄浮視差寫
-          // 階段夾住——只有真的貼近邊緣、飄浮視差又剛好把它往邊界外推的
-          // 情況才會被攔下來，其餘情況（離邊界還有餘裕）完全感覺不出差異。
-          const prevFloatOffset = floatOffsetState.get(item);
-          const prevOffsetX = prevFloatOffset ? prevFloatOffset.x : 0;
-          const prevOffsetY = prevFloatOffset ? prevFloatOffset.y : 0;
-          if(gridRect && wrapRect.width > 0 && wrapRect.height > 0){
-            const baseLeft = wrapRect.left - prevOffsetX;
-            const baseRight = wrapRect.right - prevOffsetX;
-            const baseTop = wrapRect.top - prevOffsetY;
-            const baseBottom = wrapRect.bottom - prevOffsetY;
-            floatRoomByItem.set(item, {
-              minX: gridRect.left - baseLeft,
-              maxX: gridRect.right - baseRight,
-              minY: gridRect.top - baseTop,
-              maxY: gridRect.bottom - baseBottom
-            });
-          }
         }
 
         let current = magnetScaleState.get(item);
@@ -3953,47 +3589,6 @@
         } else {
           magnetScaleState.set(item, current);
           img.style.transform = `scale(${current.toFixed(4)})`;
-        }
-      });
-
-      // 飄浮視差寫階段：跟上面磁吸放大的寫階段合併在同一輪，維持「集中寫、
-      // 集中讀」的節奏，不會多引發額外的強制重排。這裡不需要另外的讀階段
-      // ——目標位移只依賴滑鼠在整個視窗裡的位置（floatNormX/floatNormY）跟
-      // 每張照片自己固定的 floatDepth，完全不用讀取任何版面尺寸，所以直接
-      // 在同一輪迴圈裡讀（算目標值）＋寫（套用 transform）也不會弄髒版面
-      // 資訊，跟磁吸放大那套「先讀 wrapRect 再寫」必須拆開的情況不一樣。
-      // 寫在 .thumb-wrap 上，跟磁吸放大寫在內層 img 上的 transform 是兩個
-      // 完全獨立的元素，彼此不會互相覆蓋。
-      const floatNormX = magnetActive ? scatterClamp((magnetMouseX - window.innerWidth / 2) / (window.innerWidth / 2), -1, 1) : 0;
-      const floatNormY = magnetActive ? scatterClamp((magnetMouseY - window.innerHeight / 2) / (window.innerHeight / 2), -1, 1) : 0;
-      getMagnetItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
-        if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
-        let targetX = floatNormX * FLOAT_MAX_OFFSET * floatDepth;
-        let targetY = floatNormY * FLOAT_MAX_OFFSET * floatDepth;
-        // 夾住這一影格允許的位移範圍（見上面讀階段 floatRoomByItem 的完整
-        // 說明）：min > max 代表這張照片本身量到的空間有異常（例如剛好在
-        // 版面還沒穩定的那一影格量到寬度是 0），保底不夾、維持原本行為，
-        // 不要因為一次量測異常反而把正常的位移鎖死。
-        const room = floatRoomByItem.get(item);
-        if(room){
-          if(room.minX <= room.maxX) targetX = scatterClamp(targetX, room.minX, room.maxX);
-          if(room.minY <= room.maxY) targetY = scatterClamp(targetY, room.minY, room.maxY);
-        }
-        let cur = floatOffsetState.get(item);
-        if(!cur){ cur = { x: 0, y: 0 }; floatOffsetState.set(item, cur); }
-        cur.x += (targetX - cur.x) * floatSmoothFactor;
-        cur.y += (targetY - cur.y) * floatSmoothFactor;
-        const settled = Math.abs(cur.x - targetX) < FLOAT_SETTLE_EPS && Math.abs(cur.y - targetY) < FLOAT_SETTLE_EPS
-          && Math.abs(targetX) < FLOAT_SETTLE_EPS && Math.abs(targetY) < FLOAT_SETTLE_EPS;
-        // hadTransform：跟磁吸放大同一個省電邏輯——已經完全靜止、且本來
-        // 就沒有殘留 inline transform 的照片，不用每影格都再寫一次空字串。
-        const hadTransform = !!thumbWrap.style.transform;
-        if(settled && !hadTransform) return;
-        if(settled){
-          thumbWrap.style.transform = '';
-          cur.x = 0; cur.y = 0;
-        } else {
-          thumbWrap.style.transform = `translate3d(${cur.x.toFixed(2)}px, ${cur.y.toFixed(2)}px, 0)`;
         }
       });
 
@@ -4055,390 +3650,6 @@
       magnetLastFrameTime = null;
       magnetRevealRampStart = performance.now();
     };
-  }
-
-  // ---------- 首頁「手機/平板傾斜」飄浮視差 ----------
-  // 上面桌機那一整套飄浮視差（FLOAT_* 那段）是靠滑鼠在視窗裡的位置驅動；
-  // 觸控裝置沒有滑鼠游標，這裡改成讀取裝置的方向感測器
-  // （DeviceOrientationEvent 的 beta/gamma），讓「拿著手機慢慢傾斜」這個
-  // 動作取代滑鼠移動——效果本身（每張照片依自己的 floatDepth 各自飄動、
-  // 貼近 .grid 邊緣時會被夾住、不會被推出邊界外）盡量比照桌機版，維持
-  // 兩邊「飄」起來的視覺手感一致，只是輸入來源從滑鼠換成傾斜角度。
-  //
-  // 用 !supportsHover 再排除一次：極少數同時有精準滑鼠又有觸控的裝置
-  // （觸控筆電、外接滑鼠的平板），維持「有滑鼠就用滑鼠那一套」的行為，
-  // 避免兩套飄浮視差同時搶著寫同一個 .thumb-wrap.style.transform、互相
-  // 打架、覆蓋掉對方的位移。純觸控裝置（手機、沒接滑鼠的平板）才會走
-  // 這裡；跟上面 supportsHover 那個區塊是兩套完全獨立、互不干涉的實作，
-  // 各自維護各自的 rAF 迴圈跟狀態，不會互相影響。
-  if(supportsTouch && !supportsHover && grid){
-
-    // 讓 .thumb-wrap 的 transform 過渡交給 CSS（見上面 .tilt-parallax
-    // 那條規則的完整說明），這裡只負責加上這個 class 當開關——只有真的
-    // 判斷成「純觸控、沒有滑鼠 hover」的裝置才會走到這個 if 區塊，安全。
-    grid.classList.add('tilt-parallax');
-
-    // 沿用桌機版 FLOAT_* 的數值，讓兩邊「飄」起來的幅度、速度感一致；
-    // 之後想微調觸控版的手感，改這幾個數字即可，不會動到桌機版。
-    const TILT_DEPTH_MIN = 0.12;
-    const TILT_DEPTH_MAX = 2.4;
-    const TILT_MAX_OFFSET = 60;     // 傾斜到達有效範圍邊緣時，depth=1 的照片能被推開的距離
-    const TILT_SETTLE_EPS = 0.05;
-    // 傾斜多少度（相對下面的基準角度）就達到飄浮視差的最大強度。手機平常
-    // 拿在手上本來就會有一點自然晃動、持握角度也因人而異，這個數字刻意
-    // 不抓太小——太敏感的話光是手部細微的自然晃動就會讓照片一直在飄，
-    // 體感會很躁；22 度大約是「手腕明顯左右轉一下」的程度，需要的話之後
-    // 可以再微調，不影響其餘邏輯。
-    const TILT_SENSITIVITY_DEG = 22;
-
-    let tiltNormX = 0, tiltNormY = 0; // 目前的目標視差方向與強度（-1~1），跟桌機版 floatNormX/floatNormY 是同一個概念
-    // 角度原點改成「固定的自然持機角度」，不再用「使用者剛好在哪個角度
-    // 打開頁面」來動態校準——原本的做法（拿第一筆讀數當基準）有個問題：
-    // 使用者進站當下手機恰好朝哪個方向擺，原點就變成那個方向，同一支手機
-    // 在不同次造訪、原點會不一樣，行為沒辦法預期，甚至進站時手邊剛好在
-    // 做別的事、手機角度偏一邊，飄浮視差一啟動就會先偏往某一側。
-    // 改成固定值之後，原點永遠對應「一般人立起手機、稍微往自己這邊傾斜
-    // 看螢幕」這個常見持機姿勢（beta ≈ 50 度、gamma = 0 度置中），不管
-    // 使用者進站當下實際怎麼拿，只要之後傾斜的角度跟這個固定基準有落差，
-    // 才會產生飄浮位移；之後想微調「多自然」，只改 TILT_NATURAL_BETA／
-    // TILT_NATURAL_GAMMA 這兩個數字即可，不用動其餘邏輯。
-    const TILT_NATURAL_BETA = 50;  // 前後傾角度基準：0 是螢幕平放朝上，90 是完全直立，
-                                    // 50 大致對應「立起來、往自己方向微仰」這種常見滑手機角度
-    const TILT_NATURAL_GAMMA = 0;  // 左右傾角度基準：0 代表左右置中、沒有偏向任一側
-    let tiltOrientationBound = false; // deviceorientation 監聽器是否已經掛上，避免重複掛
-
-    // 讀出目前螢幕方向（直向/橫向，以及橫向的兩種朝向）——beta/gamma 換算
-    // 成跟畫面座標系一致的 x/y 時，需要用同一個角度；固定基準點也要用
-    // 同一個角度換算過去，兩邊才能對得上，見下面 getTiltBaseline()。
-    function getScreenAngle(){
-      return (screen.orientation && typeof screen.orientation.angle === 'number')
-        ? screen.orientation.angle
-        : (typeof window.orientation === 'number' ? window.orientation : 0);
-    }
-
-    // 依目前螢幕方向（直向/橫向，以及橫向的兩種朝向）把 beta/gamma 換算成
-    // 跟畫面座標系一致的 x/y——手機轉成橫向時，beta/gamma 對應的物理軸會
-    // 跟直向時互換，不換算的話橫向拿手機「左右傾」會變成帶動照片上下飄，
-    // 感覺整個方向都是錯的。
-    function readTiltXY(e, angle){
-      const beta = e.beta || 0;   // 前後傾（螢幕面朝上放平大約是 0，往自己這邊立起來變大）
-      const gamma = e.gamma || 0; // 左右傾（拿正是 0，往右傾是正值）
-      switch(angle){
-        case 90:  return { x: -beta, y: gamma };
-        case -90:
-        case 270: return { x: beta, y: -gamma };
-        case 180: return { x: -gamma, y: -beta };
-        default:  return { x: gamma, y: beta }; // 直向（0 度）
-      }
-    }
-
-    // 把固定的「自然持機角度」基準，用跟目前讀數同一顆 readTiltXY() 換算
-    // 成同一個座標系下的 x/y——這樣不管當下是直向還是橫向（甚至橫向轉了
-    // 哪一邊），固定基準永遠跟即時讀數用同一套換算方式比較，不會因為
-    // 中途轉了方向就對不齊。用同一個 angle 呼叫兩次 readTiltXY() 即可，
-    // 換算本身只是幾個加減乘除，不用另外快取。
-    function getTiltBaseline(angle){
-      return readTiltXY({ beta: TILT_NATURAL_BETA, gamma: TILT_NATURAL_GAMMA }, angle);
-    }
-
-    function handleDeviceOrientation(e){
-      if(e.beta == null && e.gamma == null) return; // 部分裝置/情境會回傳整包都是 null 的空事件，直接略過
-      const angle = getScreenAngle();
-      const xy = readTiltXY(e, angle);
-      const baseline = getTiltBaseline(angle);
-      const dx = xy.x - baseline.x;
-      const dy = xy.y - baseline.y;
-      tiltNormX = scatterClamp(dx / TILT_SENSITIVITY_DEG, -1, 1);
-      tiltNormY = scatterClamp(dy / TILT_SENSITIVITY_DEG, -1, 1);
-      scheduleTiltApply();
-    }
-
-    function startTiltListening(){
-      if(tiltOrientationBound || !('DeviceOrientationEvent' in window)) return;
-      tiltOrientationBound = true;
-      window.addEventListener('deviceorientation', handleDeviceOrientation, { passive: true });
-    }
-
-    // ---------- iOS 13+ 的動作/方向權限 ----------
-    // iOS 13 之後的 Safari 把 DeviceOrientationEvent 歸類成需要使用者明確
-    // 授權才能讀取的感測器，且這個授權請求（requestPermission()）一定要
-    // 在使用者手勢（點一下）的呼叫堆疊「當下」同步呼叫——晚一點再呼叫
-    // （例如藏在某個非同步流程完成之後才呼叫）瀏覽器會直接擋掉，系統
-    // 授權彈窗根本不會跳出來。這裡掛一個一次性的 click 監聽器，使用者
-    // 在頁面上第一次點按（不限點在哪裡，含點照片本身）就順勢請求一次；
-    // 不是這套權限模型的裝置（多數 Android、較舊版本的 iOS）完全不需要
-    // 這一步，一進站就可以直接開始監聽，不用等使用者點擊。
-    // 使用者如果拒絕：安靜地放棄，飄浮視差在這台裝置上就是不會生效，
-    // 不彈出任何提示打擾使用者，也完全不影響網站其他功能——跟檔案裡其他
-    // 「查不到就優雅退回」的機制（例如像素遮罩、masks.json 查不到時的
-    // 退場）是同一種精神。
-    if(typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
-      document.addEventListener('click', () => {
-        DeviceOrientationEvent.requestPermission().then(state => {
-          if(state === 'granted') startTiltListening();
-        }).catch(() => {});
-      }, { passive: true, once: true });
-    } else {
-      startTiltListening();
-    }
-
-    // ---------- 每一影格：把目前的傾斜方向套到每張照片的飄浮視差上 ----------
-    // 邏輯、平滑追值、邊界夾制都盡量比照桌機版飄浮視差（見上面 supportsHover
-    // 區塊裡「修正：飄浮視差把貼著邊緣的照片推出 .grid 邊界外」那段的完整
-    // 說明，這裡是同一個問題、同一套解法，只是輸入來源換成傾斜角度）——
-    // 不套用邊界夾制的話，手機版一樣會重現「照片跑出邊界外」那個問題，
-    // 沒理由只修桌機版、放著觸控版繼續壞。
-    let tiltItemsCache = null;
-    function getTiltItems(){
-      if(!tiltItemsCache){
-        const nodeList = grid.querySelectorAll('.grid-item');
-        if(nodeList.length){
-          const raw = Array.from(nodeList).map(item => {
-            const thumbWrap = item.querySelector('.thumb-wrap');
-            const img = thumbWrap ? thumbWrap.querySelector('img') : null;
-            const st = scatterStates.get(item);
-            const area = (st && st.w && st.h) ? st.w * st.h : 0;
-            return { item, thumbWrap, img, area };
-          });
-          let minArea = Infinity, maxArea = -Infinity;
-          raw.forEach(({ area }) => {
-            if(area <= 0) return;
-            if(area < minArea) minArea = area;
-            if(area > maxArea) maxArea = area;
-          });
-          const hasRange = Number.isFinite(minArea) && Number.isFinite(maxArea) && maxArea > minArea;
-          tiltItemsCache = raw.map(({ item, thumbWrap, img, area }) => {
-            const norm = (hasRange && area > 0) ? (area - minArea) / (maxArea - minArea) : 0.5;
-            const floatDepth = TILT_DEPTH_MIN + norm * (TILT_DEPTH_MAX - TILT_DEPTH_MIN);
-            return { item, thumbWrap, img, floatDepth };
-          });
-        }
-      }
-      return tiltItemsCache || [];
-    }
-
-    // 這裡存的是「上一次實際寫進 style 的目標值」（陀螺儀位移＋下面捲動
-    // 風力疊加後的合計），給邊界夾制、settled 判斷當基準用——不是逐影格
-    // 平滑追蹤用的「目前值」，平滑過渡整個交給 CSS transition（見上面
-    // .tilt-parallax 規則）。
-    const tiltOffsetState = new WeakMap();
-    // 純陀螺儀算出來、已經做過邊界夾制的位移，不含下面捲動風力的疊加值。
-    // 捲動風力（tiltNudgeY）每一影格都會變，如果邊界夾制／settled 判斷
-    // 也拿「陀螺儀＋風力」的合計當基準，風力衰減的抖動會反過來一直觸發
-    // 陀螺儀那邊「以為傾斜角度變了」的誤判；分開存，兩邊各自只認自己
-    // 那一份輸入的變化。
-    const tiltGyroOffsetState = new WeakMap();
-    let tiltApplyScheduled = false;
-
-    function applyTiltNow(){
-      // preview/detail 頁或放大進場／照片堆疊動畫播放中完全看不到網格，
-      // 這幾種情況下收到的感測器讀數直接略過，不做任何量測或寫入。
-      if(gridRevealInFlight || photoFallModeActive ||
-         previewPage.classList.contains('active') || detailPage.classList.contains('active')) return;
-
-      // 讀階段：跟桌機版 magnetFrame() 同一個精神，先把所有需要的版面
-      // 資訊（.grid 邊界＋每張照片目前的 wrapRect）一次讀完，不穿插任何
-      // 寫入，避免逼出強制同步重排。
-      const gridRect = grid.getBoundingClientRect();
-      const tiltPending = [];
-      getTiltItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
-        if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
-
-        let targetX = tiltNormX * TILT_MAX_OFFSET * floatDepth;
-        let targetY = tiltNormY * TILT_MAX_OFFSET * floatDepth;
-
-        // 邊界夾制：量出這張照片「原始、還沒被傾斜視差推過」的位置
-        // （目前的 wrapRect 減掉上一次已經套用的完整位移，含捲動風力），
-        // 再跟 .grid 邊界比較，換算出這一次 targetX/targetY 各自允許落在
-        // 的合法區間，避免貼著邊緣的照片被推出畫面外。
-        const prevApplied = tiltOffsetState.get(item);
-        const prevAppliedX = prevApplied ? prevApplied.x : 0;
-        const prevAppliedY = prevApplied ? prevApplied.y : 0;
-        const wrapRect = thumbWrap.getBoundingClientRect();
-        if(wrapRect.width > 0 && wrapRect.height > 0){
-          const baseLeft = wrapRect.left - prevAppliedX;
-          const baseRight = wrapRect.right - prevAppliedX;
-          const baseTop = wrapRect.top - prevAppliedY;
-          const baseBottom = wrapRect.bottom - prevAppliedY;
-          const minX = gridRect.left - baseLeft;
-          const maxX = gridRect.right - baseRight;
-          const minY = gridRect.top - baseTop;
-          const maxY = gridRect.bottom - baseBottom;
-          if(minX <= maxX) targetX = scatterClamp(targetX, minX, maxX);
-          if(minY <= maxY) targetY = scatterClamp(targetY, minY, maxY);
-        }
-
-        const prevGyro = tiltGyroOffsetState.get(item);
-        const prevGyroX = prevGyro ? prevGyro.x : 0;
-        const prevGyroY = prevGyro ? prevGyro.y : 0;
-        const wasSettled = !prevGyro || (Math.abs(prevGyroX) < TILT_SETTLE_EPS && Math.abs(prevGyroY) < TILT_SETTLE_EPS);
-        const nowSettled = Math.abs(targetX) < TILT_SETTLE_EPS && Math.abs(targetY) < TILT_SETTLE_EPS;
-        if(wasSettled && nowSettled && tiltNudgeY === 0) return; // 陀螺儀跟風力都沒東西可動，不用寫
-        if(!wasSettled && !nowSettled &&
-           Math.abs(targetX - prevGyroX) < TILT_SETTLE_EPS && Math.abs(targetY - prevGyroY) < TILT_SETTLE_EPS &&
-           tiltNudgeY === 0) return; // 陀螺儀角度變化太小、也沒有風力要疊加，不值得重新寫一次 style
-
-        tiltPending.push({ item, thumbWrap, floatDepth, targetX, targetY, nowSettled });
-      });
-
-      // 寫階段：把這一輪所有需要更新的照片目標值一次寫完，交給 CSS
-      // transition 自己去過渡，這裡完全不讀取任何版面資訊。純陀螺儀值
-      // 存進 tiltGyroOffsetState，實際寫進畫面的則是再疊上目前捲動風力
-      // （tiltNudgeY，見下面「手機/平板捲動時的飄浮視差」那段）之後的
-      // 合計，讓兩邊來源可以同時反映在同一個 transform 上、互不覆蓋。
-      tiltPending.forEach(({ item, thumbWrap, floatDepth, targetX, targetY, nowSettled }) => {
-        tiltGyroOffsetState.set(item, nowSettled ? { x: 0, y: 0 } : { x: targetX, y: targetY });
-        writeTiltTransform(item, thumbWrap, targetX, targetY + tiltNudgeY * floatDepth);
-      });
-    }
-
-    function scheduleTiltApply(){
-      if(tiltApplyScheduled) return;
-      tiltApplyScheduled = true;
-      requestAnimationFrame(() => {
-        tiltApplyScheduled = false;
-        applyTiltNow();
-      });
-    }
-
-    // 實際把「陀螺儀位移＋捲動風力」的合計寫進 .thumb-wrap 的 transform，
-    // 並更新 tiltOffsetState（給上面邊界夾制當「目前已經套用的完整位移」
-    // 基準用）。settled（陀螺儀跟風力都幾乎是 0）時清空 inline transform，
-    // 讓瀏覽器不用再為這張照片維持一個不必要的合成圖層。
-    function writeTiltTransform(item, thumbWrap, x, y){
-      const settled = Math.abs(x) < TILT_SETTLE_EPS && Math.abs(y) < TILT_SETTLE_EPS;
-      if(settled){
-        thumbWrap.style.transform = '';
-        tiltOffsetState.set(item, { x: 0, y: 0 });
-      } else {
-        thumbWrap.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)`;
-        tiltOffsetState.set(item, { x, y });
-      }
-    }
-
-    // ---------- 手機/平板捲動時的飄浮視差：疊加一股「捲動風力」 ----------
-    // 單靠陀螺儀事件沒辦法保證捲動當下持續有反應——使用者手指正在拖曳
-    // 捲動的那段期間，瀏覽器可能連 deviceorientation 事件本身都不送（見
-    // 上面 applyTiltNow() 前那段完整說明），這不是網頁 JS 這層能完全
-    // 覆蓋掉的限制。這裡改用「捲動了多少」本身當額外的驅動來源：捲動
-    // 事件在使用者手指滑動的當下本來就會持續觸發，不太會被瀏覽器擋掉，
-    // 比照檔案裡飄動字母那套 applyGridScrollNudge() 的物理模型——捲動
-    // 只負責疊加一筆瞬時「風速」，不直接動位置；真正的位移是這股風速
-    // 每影格按 dt 疊進 tiltNudgeY，風速本身再按 dt 為基準指數衰減慢慢
-    // 歸零，不管捲動量多突然，位移都會被攤平成一段平滑曲線。
-    //
-    // 跟陀螺儀怎麼「合體」：每一影格寫進畫面的 Y 位移＝陀螺儀那份
-    // （tiltGyroOffsetState，只在收到新的 deviceorientation 讀數時更新）
-    // ＋這裡的風力位移（tiltNudgeY，每影格都在變）。捲動當下風力持續
-    // 更新、畫面持續有動靜；捲動一停，風力照樣是連續的指數衰減、慢慢
-    // 滑回 0，不是「捲動中」跟「捲動後」兩段互相獨立、切換瞬間銜接不上
-    // 的關係，銜接處感覺不到硬切換，跟陀螺儀之間的過渡是連續的。
-    const TILT_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例，量級沿用飄動字母那套
-    const TILT_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單次疊加的風速上限 (px/s)
-    // 單次疊加雖然有上限（上面那個常數），但原本沒有限制「累加後的總風速」
-    // ——手指快速滑動時，捲動事件幾乎每影格都會觸發一次，疊加的速度比
-    // 風速衰減的速度快很多，一次次疊加下去，風速本身可以一路衝到遠超過
-    // 設計的量級，等於物理模型暴走。這正是「快速往下滑，比較近（floatDepth
-    // 較大）的照片會瞬間閃過畫面、直接飛出去」的成因：風速一旦暴走，
-    // 乘上最大到 2.4 倍的 floatDepth，位移量級完全失控，遠超過原本設計
-    // 給陀螺儀那套視差的最大幅度。加這個總量上限之後，不管疊加幾次，
-    // 風速最終都會被夾在合理範圍內；正常速度的滑動本來就到不了這個上限
-    // （風速會先被衰減吃掉一部分），所以平常的手感完全不受影響，只有
-    // 這種「疊加速度贏過衰減速度」的極端快滑才會被這個上限接住。
-    const TILT_SCROLL_NUDGE_MAX_VELOCITY = 220; // 風速（累加後）本身的總上限 (px/s)
-    const TILT_SCROLL_NUDGE_DECAY_PER_SEC = 4.5; // 衰減係數：比飄動字母的 6.5 稍慢一點，
-                                                   // 捲動停下後風力多飄一下再歸零，跟陀螺儀的
-                                                   // 銜接感覺更像「慢慢交棒」而不是硬停
-    const TILT_NUDGE_SETTLE_EPS = 0.05; // px/s，風速小到這個程度視為完全靜止，停止繼續跑衰減迴圈
-
-    let tiltScrollLastY = window.scrollY;
-    let tiltNudgeVY = 0;   // 目前累積的「風速」殘留值 (px/s)，每影格自然衰減
-    let tiltNudgeY = 0;    // 風速累積出來、目前套用在畫面上的實際位移 (px)，
-                            // 這是「floatDepth=1」基準下的位移量，跟陀螺儀那邊
-                            // 「tiltNormY（-1~1）× TILT_MAX_OFFSET」是同一個角色，
-                            // 各張照片實際顯示時再各自乘上自己的 floatDepth——
-                            // 所以下面會把這個值也夾在 ±TILT_MAX_OFFSET 之內，
-                            // 跟陀螺儀那條路徑用同一把尺，這樣不管位移是哪個
-                            // 來源疊出來的，最極端也只會到 TILT_MAX_OFFSET×
-                            // floatDepth（也就是最大 60×2.4＝144px），不會再有
-                            // 照片被吹出可視範圍外的情況。
-    let tiltNudgeRafRunning = false;
-    let tiltNudgeLastFrameTime = null;
-
-    function onTiltGridScroll(){
-      const scrollY = window.scrollY;
-      const delta = scrollY - tiltScrollLastY;
-      tiltScrollLastY = scrollY;
-      if(delta === 0) return;
-      // 往下捲時頁面內容視覺上往上移動，這裡取負號讓風向跟內容捲動的
-      // 實際視覺方向一致，跟 applyGridScrollNudge() 同一個理由。
-      const impulse = Math.max(-TILT_SCROLL_NUDGE_MAX_IMPULSE, Math.min(TILT_SCROLL_NUDGE_MAX_IMPULSE, -delta * TILT_SCROLL_NUDGE_IMPULSE));
-      // 疊加後立刻夾住總風速——見上面 TILT_SCROLL_NUDGE_MAX_VELOCITY 的
-      // 說明，這是修正「快速連續滑動時風速暴走」的關鍵一步。
-      tiltNudgeVY = scatterClamp(tiltNudgeVY + impulse, -TILT_SCROLL_NUDGE_MAX_VELOCITY, TILT_SCROLL_NUDGE_MAX_VELOCITY);
-      ensureTiltNudgeLoop();
-    }
-    window.addEventListener('scroll', onTiltGridScroll, { passive: true });
-
-    function ensureTiltNudgeLoop(){
-      if(tiltNudgeRafRunning) return;
-      tiltNudgeRafRunning = true;
-      tiltNudgeLastFrameTime = null;
-      requestAnimationFrame(tiltNudgeFrame);
-    }
-
-    function tiltNudgeFrame(now){
-      // preview/detail 頁或動畫播放中：風力歸零、整段迴圈直接停掉，等
-      // 使用者真的回到首頁格子畫面、下一次捲動事件才會重新啟動——跟
-      // 桌機/其他 rAF 迴圈同一個「看不到就不跑」的節流精神。
-      if(gridRevealInFlight || photoFallModeActive ||
-         previewPage.classList.contains('active') || detailPage.classList.contains('active')){
-        tiltNudgeVY = 0;
-        tiltNudgeY = 0;
-        tiltNudgeRafRunning = false;
-        return;
-      }
-
-      if(tiltNudgeLastFrameTime == null) tiltNudgeLastFrameTime = now;
-      const dtMs = Math.min(64, now - tiltNudgeLastFrameTime); // 上限同其他 rAF 迴圈，避免掉幀後一次追趕跳一大段
-      const dt = dtMs / 1000;
-      tiltNudgeLastFrameTime = now;
-
-      tiltNudgeY += tiltNudgeVY * dt;
-      // 位移本身也夾在 ±TILT_MAX_OFFSET 之內（見上面 tiltNudgeY 宣告處的
-      // 說明）：就算風速真的衝到上限、又持續了一段時間，位移也不會超出
-      // 這個設計好的上限，只會貼著上限暫時打平，等使用者放手、風速自然
-      // 衰減之後，位移才會跟著平滑滑回 0——不會有「先夾住、放手瞬間又
-      // 忽然跳回去」那種不連續的頓挫感。
-      tiltNudgeY = scatterClamp(tiltNudgeY, -TILT_MAX_OFFSET, TILT_MAX_OFFSET);
-      tiltNudgeVY *= Math.exp(-TILT_SCROLL_NUDGE_DECAY_PER_SEC * dt); // 指數衰減，dt 為基準，掉幀也不影響衰減的實際速度
-
-      const settling = Math.abs(tiltNudgeVY) < TILT_NUDGE_SETTLE_EPS;
-      if(settling){
-        tiltNudgeVY = 0;
-        if(Math.abs(tiltNudgeY) < TILT_SETTLE_EPS) tiltNudgeY = 0;
-      }
-
-      // 寫階段：只把「陀螺儀位移＋這一影格的風力」重新合成、寫進畫面，
-      // 完全不讀取任何版面資訊（邊界夾制交給上面 applyTiltNow() 在陀螺儀
-      // 真的更新時處理，這裡只是疊加風力，維持這個迴圈本身足夠輕量、
-      // 就算捲動當下主執行緒吃緊也儘量不添亂）。
-      getTiltItems().forEach(({ item, thumbWrap, img, floatDepth }) => {
-        if(!thumbWrap || !img || !img.classList.contains('loaded')) return;
-        const gyro = tiltGyroOffsetState.get(item);
-        const gyroX = gyro ? gyro.x : 0;
-        const gyroY = gyro ? gyro.y : 0;
-        writeTiltTransform(item, thumbWrap, gyroX, gyroY + tiltNudgeY * floatDepth);
-      });
-
-      // 風力已經完全靜止、且沒有陀螺儀位移需要維持時，這個迴圈才真的
-      // 停下來；只要還在衰減中，就繼續排下一影格。
-      if(tiltNudgeVY === 0 && tiltNudgeY === 0){
-        tiltNudgeRafRunning = false;
-        return;
-      }
-      requestAnimationFrame(tiltNudgeFrame);
-    }
   }
 
   // 圖片載入完成時，如果編號正處於「待補」狀態（見 prepareGridRevealState()
@@ -4577,13 +3788,7 @@
     item.appendChild(thumbWrap);
     item.appendChild(idx);
 
-    item.addEventListener('click', () => {
-      // 剛剛這一下其實是「把照片拖走／甩出去」，不是要點進去看大圖——
-      // 放開滑鼠之後瀏覽器還是會照樣送出一個 click，這裡把它吃掉。
-      // （單純原地點一下不會設定這個旗標，維持原本點擊進大圖的行為。）
-      if(consumeScatterClickSuppression(item)) return;
-      openDetail(i, img);
-    });
+    item.addEventListener('click', () => openDetail(i, img));
     // click 事件要等「按下＋放開」都完成才會觸發，pointerdown 只要手指／
     // 滑鼠一按下去就會先觸發（滑鼠通常領先 click 幾十到一百多毫秒，觸控
     // 領先得更多，因為還要再等放開）。這裡搶在 click 之前，先把這張照片
@@ -4610,8 +3815,6 @@
       img.addEventListener('mouseenter', () => showHoverPreview(photo, img));
       img.addEventListener('mouseleave', hideHoverPreview);
     }
-    // 滑鼠拖曳 + 放手後的物理慣性衰減（見下面 attachScatterDrag() 那一整段）
-    attachScatterDrag(item);
     return item;
   }
 
@@ -4644,9 +3847,8 @@
   // callback 在真正全部完成的那一刻才觸發，行為跟原本一次性完成時等價。
   function renderGrid(onComplete){
     grid.innerHTML = '';
-    resetScatterLayout(); // 重新建網格＝重新抽一輪亂數位置（見下面散落排版那一整段）
     let cursor = 0;
-    let cellSide = null; // null 代表還沒算過；算過一次之後就固定沿用同一個數字
+    let cellSide = null; // null 代表還沒量過；量過一次之後就固定沿用同一個數字
 
     // ---------- 修正：「頭幾秒還是會lag」真正剩下的主因 ----------
     // 上面幾輪已經把 renderGrid() 拆成一批批（GRID_RENDER_CHUNK_SIZE 張）
@@ -4696,17 +3898,10 @@
         // CSS），所有格子理論上完全一樣寬，只需要在「第一批」量一次「第
         // 一個」格子的寬度，之後每一批都直接沿用，不用每批各自重新量測。
         if(cellSide === null){
-          // 原本這裡是量「第一個格子」實際渲染出來的寬度。散落排版之後已經
-          // 沒有格子可以量了（.thumb-wrap 縮成照片本身大小），改用純算式算出
-          // 同一個數字，而且完全不用讀版面、不會觸發強制重排——比原本更便宜。
-          // 見 gridCellSide() 上方的完整說明。
-          cellSide = gridCellSide();
+          const firstWrap = batchItems[0].querySelector('.thumb-wrap');
+          cellSide = firstWrap ? firstWrap.getBoundingClientRect().width : 0;
         }
         batchItems.forEach(item => applyGridItemImageSize(item, cellSide));
-        // 這一批的照片尺寸已經確定了，立刻幫它們抽位置、貼上去。分批處理
-        // 的每一批都各自定位，才不會出現「後面幾批還全部疊在左上角、等到
-        // 最後一批建完才一起跳開」的中間狀態。
-        placeScatterItems(batchItems);
       }
 
       if(cursor < photos.length){
@@ -4722,656 +3917,6 @@
       processChunk();
     }
   }
-
-  // ================= 首頁照片「隨機散落 + 滑鼠拖曳 + 甩出去的物理慣性」 =================
-  //
-  // 這一整段取代了原本首頁那個規規矩矩的 5 欄 CSS Grid。三件事：
-  //
-  //  1. 位置完全隨機，每次進站都不一樣（assignScatterSlots()）
-  //     不是「整個畫布上純亂數丟」——純亂數在小樣本下一定會結塊：右半邊擠成
-  //     一團、左下角整片空白，看起來不像「隨意散落」，只像沒排好。這裡用的是
-  //     「打散的抖動網格」（jittered grid）：先沿用原本那個網格的格子當抽籤箱，
-  //     把 N 個格子的順序整個洗牌（Fisher–Yates）、每張照片抽一格，再讓它在
-  //     自己那格的中心附近隨機偏移最多 ±SCATTER_JITTER 格——偏移量刻意允許
-  //     超過半格，照片因此會自然跨進隔壁格的範圍、彼此交疊（需求要的效果），
-  //     但整體密度仍然均勻，不會有大片空洞。每次重新整理，洗牌跟抖動都會重抽，
-  //     所以每次看到的畫面都不一樣。
-  //     疊放的前後順序（z-index）同樣是每次重新洗牌，不會永遠都是同一張壓在
-  //     最上面。
-  //
-  //  2. 座標用「比例」保存，不是寫死的像素（state.fx / state.fy）
-  //     視窗大小一變（轉螢幕方向、手機網址列收合、拉動視窗），畫布的寬高跟著
-  //     變，如果存的是絕對像素，照片就會全部擠到左上角或被推出邊界。這裡每次
-  //     寫入位置時都同步把「中心點佔畫布寬/高的比例」記下來，尺寸一變就用同一組
-  //     比例重新貼回去（relayoutScatterPhotos()）——相對構圖維持不變，也不會
-  //     重新抽亂數（不然使用者只是轉個方向，整頁照片就會忽然跳到別的地方）。
-  //
-  //  3. 拖曳與甩動的物理（attachScatterDrag() / scatterStep()）
-  //     放手後的減速刻意用「線性衰減為主」：速度每秒固定減掉 SCATTER_DECEL
-  //     （等速度減速，也就是真實世界裡動摩擦力的行為——摩擦力大小跟速度無關，
-  //     所以減速度是常數），再疊一層很輕的空氣阻力（跟速度成正比的指數衰減，
-  //     SCATTER_DRAG_PER_SEC）讓尾段收得柔和一點、不會在停止前那一刻顯得生硬。
-  //     整段過程都是用「速度 × dt」逐影格積分出來的，不是 CSS transition 的
-  //     固定曲線，所以不管使用者甩得多快多慢、中途視窗掉了幾幀，減速的手感
-  //     都一致、連續，沒有斷點。
-  //     撞到畫布邊界就反彈（乘上 SCATTER_RESTITUTION 損失一部分動能），照片
-  //     不會被甩出可視範圍外找不回來。
-  //
-  // 效能：requestAnimationFrame 迴圈「只有真的有照片在動的時候才跑」，全部
-  // 停下來就立刻關掉（見 startScatterLoop()／stopScatterItem()）。這點很重要——
-  // 首頁同時還有飄動的 e（stepDvdBounce）、滑鼠引力放大（magnetFrame）兩個
-  // 常駐 RAF 迴圈在跑，多一個永遠不關的迴圈會直接墊高每一輪 RAF 的執行時間、
-  // 造成掉幀（這正是檔案裡其他地方反覆處理過的同一類問題）。
-  // 位置一律寫進 transform（translate3d），不碰 left/top，避免每一影格觸發
-  // 版面重排。
-
-  const SCATTER_JITTER = 0.55;           // 每張照片在自己那格中心附近的隨機偏移幅度（單位：格）。這只是「亂數的起點」，真正決定疏密均不均勻的是下面那段鬆弛（relaxScatterSlots），所以這裡不需要、也不應該開太大——開太大只會讓起點更亂，反而要靠更多次鬆弛才推得回來
-  // ---------- 均勻化（鬆弛 / relaxation）----------
-  // 只靠「洗牌 + 抖動」還是會結塊：抖動是每張照片各抽各的，兩張相鄰格子的
-  // 照片完全可能同時往彼此的方向偏，結果擠成一團；而它們原本待的地方就空
-  // 出來了——這正是「右邊擠一團、左下整片空白」的成因，跟亂數品質無關，
-  // 是「彼此不知道對方在哪」這個結構問題。
-  // 修法用的是排版/繪圖領域處理同一類問題的標準手法：抽完起點之後，再跑
-  // 幾十輪「互相推開」——任兩張照片只要靠得比目標間距近，就沿著兩者連線
-  // 各往外推一點點，一輪一輪下來，密的地方會自己散開、稀的地方自然被填滿，
-  // 最後收斂成「隨機但疏密均勻」的分布（跟藍雜訊 / Lloyd 鬆弛同一個精神）。
-  // 隨機性完全保留：起點是亂數、每次都不一樣，鬆弛只負責把疏密推平，不會
-  // 把照片推回規則的格子上。
-  const SCATTER_RELAX_PASSES = 30;       // 鬆弛輪數：越多越均勻。刻意「不要」推到完全收斂——推滿（80 輪以上）會收斂成幾乎正六邊形的格點，看起來就跟規則網格沒兩樣，隨機感全部消失。30 輪左右正好停在「隨機但疏密均勻」的狀態（統計上就是所謂的藍雜訊分布）
-  const SCATTER_RELAX_STRENGTH = 0.55;   // 每一輪推開的力道（0~1）。太大容易來回彈跳不收斂，太小要更多輪才推得開
-  const SCATTER_SPREAD = 0.9;            // 目標間距相對於「每張照片平均能分到多大地盤」的倍率。1 = 剛好平分整塊畫布；調小＝允許靠更近，調大＝推得更開更平均
-  const SCATTER_MIN_GAP_RATIO = 0.55;    // 兩張照片中心至少要離「各自半徑和」的幾倍。<1 代表刻意允許它們部分交疊，只是不准整張疊死在一起
-  const SCATTER_SPACING_JITTER_MIN = 0.55; // 每張照片的「個人空間」倍率下限
-  const SCATTER_SPACING_JITTER_MAX = 1.35; // 上限。每張照片各自隨機抽一個倍率，有的比較黏、有的比較獨立——沒有這一項，鬆弛會把所有間距推成一模一樣，畫面又變回規則的格點；有了它，間距本身就有隨機的疏密層次，但整體密度仍然均勻
-  // ---------- 刻意製造的交疊 ----------
-  // 上面那套鬆弛只要跑得夠徹底，結果就是「誰也不碰誰」——因為每張照片只佔
-  // 格子約 42% 的面積，平均間距本來就遠大於照片本身，均勻攤開之後自然不會
-  // 交疊。但需求同時要求「照片可以互相交疊」，所以鬆弛完之後再補一步：
-  // 隨機挑一小部分照片，讓它跟最近的鄰居「互相靠到剛好部分重疊」的距離。
-  // 兩張是「一起往中點靠」而不是把其中一張搬到另一張身上——後者會把原本
-  // 那張待的地方整個掏空，等於自己製造出新的空洞，正是要避免的事。
-  const SCATTER_OVERLAP_RATIO = 0.1;     // 有多少比例的照片會被配成「刻意交疊」的一對。調大＝更多交疊但也更容易出現疏密落差；調 0＝完全不交疊、最均勻
-  const SCATTER_OVERLAP_TIGHT = 0.5;     // 交疊那一對的中心距離＝各自半徑和 × 這個倍率。越小疊得越多
-  // ---------- 放手之後的減速手感 ----------
-  // 改成跟飄動物件（stepDvdBounce 的 DVD_DECAY_EASE）同一種「指數衰減」為主：
-  // 阻力跟當下速度成正比——甩得快的時候掉速明顯，速度降下來之後阻力也跟著
-  // 變小，於是尾段拖得很長、很平緩地滑向停止。這正是飄動物件那種「有餘韻、
-  // 飄著慢慢停」的感覺。
-  // 之前是反過來的：以固定減速度（線性摩擦）為主導，速度是一條直線掉到 0，
-  // 整段又短又硬，停下來那一刻也比較突兀。現在線性那一項留著但調得很小，
-  // 只負責「保證最後真的會停住」，不主導手感（純指數衰減理論上永遠趨近 0
-  // 但不會到 0，留一個小小的固定阻力可以讓它乾淨地收尾）。
-  const SCATTER_DECEL = 100;             // 線性摩擦減速度（px/秒²）：只負責收尾，數字刻意很小。調大＝停得更果斷
-  const SCATTER_DRAG_PER_SEC = 1.4;      // 指數衰減係數（1/秒）——這一項才是主導手感的參數。調小＝滑得更遠更久（更飄），調大＝很快停下來
-  const SCATTER_RESTITUTION = 0.42;      // 撞到畫布邊界的反彈係數（0=完全不彈、1=完全彈回）
-  const SCATTER_STOP_SPEED = 16;         // 速度掉到這個值以下（px/秒）就視為停止，免得永遠在算一個看不出來的殘餘移動
-  const SCATTER_MAX_FLING_SPEED = 2600;  // 甩出去的速度上限（px/秒）。原本 4200 太衝，配上修好的速度偵測之後改成比較接近飄動物件量級的數字
-  const SCATTER_FLING_MIN_SPEED = 60;    // 放開時末速度低於這個值（px/秒）就直接當成「放著不動」，原地停下不滑行——避免手已經停住、卻因為最後一兩像素的微小抖動被判成一記小彈射
-  const SCATTER_DRAG_THRESHOLD = 4;      // 按下後要移動超過這麼多 px 才算「拖曳」；在這之內放開仍然算「點一下」→ 正常進大圖
-  const SCATTER_FLING_WINDOW_MS = 90;    // 放開時只採用「放開前這麼多毫秒」內的取樣來算末速度（跟飄動的 e 用的 DVD_FLING_WINDOW_MS 同一個概念）
-
-  const scatterStates = new WeakMap();   // .grid-item → 這張照片的位置/尺寸/速度/拖曳狀態
-  const scatterMoving = new Set();       // 目前還在滑行（有速度）的照片，空的時候整個 RAF 迴圈就會停掉
-  let scatterSlots = null;               // 這一輪抽到的位置（index → {fx, fy, z}）
-  let scatterStageW = 0;                 // 畫布寬（= .grid 的可用寬度）
-  let scatterStageH = 0;                 // 畫布高（沿用原本網格會佔的高度，整頁可捲動長度因此不變）
-  let scatterTopZ = 0;                   // 目前最上層的 z-index，拖曳時把那一張拉到最上面用
-  let scatterRAF = null;
-  let scatterLastT = 0;
-
-  function scatterClamp(v, min, max){ return v < min ? min : (v > max ? max : v); }
-
-  function getScatterState(item){
-    let st = scatterStates.get(item);
-    if(!st){
-      st = {
-        x: 0, y: 0,          // 左上角在畫布座標系裡的位置（px）
-        w: 0, h: 0,          // 這張照片的顯示尺寸（由 applyGridItemImageSize() 寫入）
-        fx: 0.5, fy: 0.5,    // 中心點佔畫布寬/高的比例，視窗尺寸改變時用來重新換算位置
-        vx: 0, vy: 0,        // 目前速度（px/秒）
-        dragging: false,
-        moved: false,
-        pointerId: null,
-        samples: null,
-        suppressClick: false,
-        suppressTimer: null
-      };
-      scatterStates.set(item, st);
-    }
-    return st;
-  }
-
-  // 把 state 目前的 x/y 寫進畫面，並同步更新「比例座標」。
-  // 位置一律走 transform，不動 left/top（見上面說明）。
-  function writeScatterTransform(item, st){
-    item.style.transform = `translate3d(${st.x}px, ${st.y}px, 0)`;
-    if(scatterStageW > 0) st.fx = (st.x + st.w / 2) / scatterStageW;
-    if(scatterStageH > 0) st.fy = (st.y + st.h / 2) / scatterStageH;
-  }
-
-  // 依「原本那個網格」的算式決定畫布要多大：欄數、格子邊長、列數都跟改版前
-  // 完全一樣，所以整頁可以捲動的長度、照片的疏密程度都維持原樣。
-  function computeScatterStage(){
-    const cellSide = gridCellSide();
-    const cols = gridColumnCount();
-    const gap = gridGapPx();
-    const n = Math.max(1, photos.length);
-    const rows = Math.ceil(n / cols);
-    scatterStageW = grid ? grid.clientWidth : 0;
-    scatterStageH = Math.max(1, rows * cellSide + (rows - 1) * gap);
-    if(grid) grid.style.height = scatterStageH + 'px';
-    return { cellSide, cols, gap, rows };
-  }
-
-  // Fisher–Yates 洗牌（跟檔案裡其他地方用的是同一套標準寫法）
-  function scatterShuffle(arr){
-    for(let i = arr.length - 1; i > 0; i--){
-      const j = Math.floor(Math.random() * (i + 1));
-      const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
-    }
-    return arr;
-  }
-
-  // 抽這一輪的位置：洗牌決定誰拿哪一格，再各自隨機抖動出真正的落點。
-  function assignScatterSlots(){
-    const { cellSide, cols, gap, rows } = computeScatterStage();
-    if(!cellSide || !scatterStageW) return false; // 版面還沒有寬度（極早期），等下一次再抽
-    const n = photos.length;
-    if(!n) return false;
-
-    const cells = [];
-    for(let i = 0; i < cols * rows; i++) cells.push(i);
-    scatterShuffle(cells);
-
-    // 第一步：洗牌 + 抖動，抽出每張照片的「起點」
-    const step = cellSide + gap;
-    const centers = new Array(n);
-    const radii = new Array(n);
-    const weights = new Array(n);
-    const halfW = new Array(n);
-    const halfH = new Array(n);
-    for(let i = 0; i < n; i++){
-      const c = cells[i];
-      const col = c % cols;
-      const row = Math.floor(c / cols);
-      centers[i] = {
-        x: col * step + cellSide / 2 + (Math.random() - 0.5) * step * SCATTER_JITTER * 2,
-        y: row * step + cellSide / 2 + (Math.random() - 0.5) * step * SCATTER_JITTER * 2
-      };
-      // 用照片自己的尺寸換算一個「等效半徑」：大張的照片本來就該佔比較多
-      // 空間，推開的距離跟著它自己的大小走，最後看起來的「留白」才會均勻，
-      // 而不是大小張一視同仁、大張的周圍反而顯得擠。
-      const size = gridImageSizeFor(photos[i], cellSide, i);
-      radii[i] = Math.hypot(size.w, size.h) / 2;
-      halfW[i] = size.w / 2;
-      halfH[i] = size.h / 2;
-      // 每張照片各自的「個人空間」倍率，見上面 SCATTER_SPACING_JITTER_MIN 的說明
-      weights[i] = SCATTER_SPACING_JITTER_MIN + Math.random() * (SCATTER_SPACING_JITTER_MAX - SCATTER_SPACING_JITTER_MIN);
-    }
-
-    // 疊放順序（z-index）：不再隨機洗牌，改成直接對應「這張照片顯示出來
-    // 的面積」——跟飄浮視差（見 magnetFrame() 內 FLOAT_* 那段的完整說明）
-    // 用的是同一套「印得越大＝視覺上越近」的物理直覺：越近的東西理所當然
-    // 疊在越遠的東西上面，所以面積小（視覺上比較遠）的照片排在堆疊底層，
-    // 面積大（比較近）的排在最上層——飄浮視差負責「近的飄得比較多」，
-    // 這裡負責「近的蓋在遠的上面」，兩套效果用同一套物理規則，畫面整體
-    // 才會有一致的立體感，不會出現「感覺比較近的那張卻被壓在下面」這種
-    // 跟直覺打架的情況。
-    // 用 halfW[i]*halfH[i]（跟面積成正比，省去再乘一次 4 的算式）排序；
-    // Array.prototype.sort 是穩定排序，面積剛好相同的兩張會維持原本陣列
-    // 順序（也就是上面已經洗過牌的 cells 順序），不會每次都固定同一張
-    // 疊上面。
-    const areaOrder = [];
-    for(let i = 0; i < n; i++) areaOrder.push(i);
-    areaOrder.sort((a, b) => (halfW[a] * halfH[a]) - (halfW[b] * halfH[b]));
-    const zOrder = new Array(n);
-    areaOrder.forEach((origIndex, rank) => { zOrder[origIndex] = rank + 1; });
-
-    // 第二步：鬆弛，把疏密推平（見上面 SCATTER_RELAX_PASSES 那段完整說明）
-    relaxScatterSlots(centers, radii, weights, halfW, halfH, n);
-
-    // 第三步：挑一小部分配成「刻意交疊」的一對（見上面 SCATTER_OVERLAP_RATIO）
-    pairScatterOverlaps(centers, radii, halfW, halfH, n);
-
-    scatterSlots = new Array(n);
-    for(let i = 0; i < n; i++){
-      scatterSlots[i] = {
-        fx: centers[i].x / scatterStageW,
-        fy: centers[i].y / scatterStageH,
-        z: zOrder[i]
-      };
-    }
-    scatterTopZ = n;
-    return true;
-  }
-
-  // 「互相推開」的鬆弛本體。
-  // 目標間距取兩個值裡比較大的那個：
-  //   ① 平均地盤：sqrt(畫布面積 / 照片數) × SCATTER_SPREAD
-  //      —— 這一項負責「整體疏密均勻」，它跟照片大小無關，純粹是把 N 張
-  //      照片平均攤在整塊畫布上該有的間隔。
-  //   ② 兩張照片各自半徑的和 × SCATTER_MIN_GAP_RATIO
-  //      —— 這一項負責「別整張疊死」。比例刻意小於 1，所以照片之間仍然
-  //      可以部分交疊（需求要的效果），只是不會完全重合成一團。
-  // 每一輪推完就夾回畫布範圍內；邊界附近的照片被夾住之後，等於變成一面
-  // 「牆」，會把內側的照片往中間推，這正是我們要的——沿著邊緣也不會結塊。
-  // 效能：這是 O(照片數² × 輪數) 的迴圈，但只在「進站時算一次」，而且都是
-  // 純數字運算、完全不碰 DOM。照片數多的時候自動降低輪數，確保這段最多
-  // 只花幾毫秒，不會影響進站當下的流暢度（首頁那幾秒本來就很吃主執行緒，
-  // 檔案裡其他地方已經為此做過很多優化，這裡不能反過來拖累它）。
-  function relaxScatterSlots(centers, radii, weights, halfW, halfH, n){
-    if(n < 2) return;
-    const targetDist = Math.sqrt((scatterStageW * scatterStageH) / n) * SCATTER_SPREAD;
-    // 照片一多就減少輪數（成本是 n² × 輪數，不設上限的話張數一多會明顯卡一下）
-    const passes = n > 220 ? 14 : (n > 120 ? 22 : SCATTER_RELAX_PASSES);
-
-    for(let p = 0; p < passes; p++){
-      for(let i = 0; i < n; i++){
-        const a = centers[i];
-        for(let j = i + 1; j < n; j++){
-          const b = centers[j];
-          let dx = b.x - a.x;
-          let dy = b.y - a.y;
-          let d = Math.sqrt(dx * dx + dy * dy);
-          // 目標間距 = 兩張照片各自「個人空間」倍率的平均 × 全域平均間距，
-          // 再跟「別疊死」的下限取大的那個。
-          const minD = Math.max(
-            targetDist * (weights[i] + weights[j]) * 0.5,
-            (radii[i] + radii[j]) * SCATTER_MIN_GAP_RATIO
-          );
-          if(d >= minD) continue;
-          if(d < 0.0001){
-            // 兩張剛好完全重合，沒有方向可以推——隨機給一個方向，
-            // 下一輪就能正常分開（不處理的話會除以 0 變成 NaN）。
-            dx = Math.random() - 0.5;
-            dy = Math.random() - 0.5;
-            d = Math.sqrt(dx * dx + dy * dy) || 1;
-          }
-          const push = ((minD - d) / d) * 0.5 * SCATTER_RELAX_STRENGTH;
-          const ox = dx * push;
-          const oy = dy * push;
-          a.x -= ox; a.y -= oy;
-          b.x += ox; b.y += oy;
-        }
-      }
-      // 每一輪結束夾回畫布內（用各自的半寬半高，照片不會有一半露在外面）
-      for(let i = 0; i < n; i++){
-        const c = centers[i];
-        c.x = scatterClamp(c.x, halfW[i], Math.max(halfW[i], scatterStageW - halfW[i]));
-        c.y = scatterClamp(c.y, halfH[i], Math.max(halfH[i], scatterStageH - halfH[i]));
-      }
-    }
-  }
-
-  // 鬆弛完的畫面是「誰也不碰誰」的均勻分布，這裡再補上刻意的交疊：
-  // 隨機挑一部分照片，各自找一個還沒被配對的最近鄰居，兩張一起往彼此的
-  // 中點靠，停在「剛好部分重疊」的距離。因為是兩張一起往中間走（不是把
-  // 其中一張搬到另一張身上），空出來的是它們之間原本的縫隙，而不是整個
-  // 掏空一塊，對整體均勻度的影響很小。
-  // 已經配過對的照片不會被重複挑中，避免一張拉一張串成一長條。
-  function pairScatterOverlaps(centers, radii, halfW, halfH, n){
-    const want = Math.floor(n * SCATTER_OVERLAP_RATIO);
-    if(want <= 0 || n < 2) return;
-
-    const order = [];
-    for(let i = 0; i < n; i++) order.push(i);
-    scatterShuffle(order);
-
-    const used = new Array(n).fill(false);
-    let done = 0;
-    for(let k = 0; k < order.length && done < want; k++){
-      const i = order[k];
-      if(used[i]) continue;
-      // 找最近的、還沒被配對的鄰居
-      let best = -1;
-      let bestD = Infinity;
-      for(let j = 0; j < n; j++){
-        if(j === i || used[j]) continue;
-        const dx = centers[i].x - centers[j].x;
-        const dy = centers[i].y - centers[j].y;
-        const d = dx * dx + dy * dy;
-        if(d < bestD){ bestD = d; best = j; }
-      }
-      if(best < 0) break;
-
-      const mx = (centers[i].x + centers[best].x) / 2;
-      const my = (centers[i].y + centers[best].y) / 2;
-      let dx = centers[i].x - centers[best].x;
-      let dy = centers[i].y - centers[best].y;
-      let d = Math.sqrt(dx * dx + dy * dy);
-      if(d < 0.0001){ dx = 1; dy = 0; d = 1; } // 兩張剛好重合：隨便給一個方向，避免除以 0
-      dx /= d; dy /= d;
-      const half = (radii[i] + radii[best]) * SCATTER_OVERLAP_TIGHT / 2;
-
-      centers[i].x = scatterClamp(mx + dx * half, halfW[i], Math.max(halfW[i], scatterStageW - halfW[i]));
-      centers[i].y = scatterClamp(my + dy * half, halfH[i], Math.max(halfH[i], scatterStageH - halfH[i]));
-      centers[best].x = scatterClamp(mx - dx * half, halfW[best], Math.max(halfW[best], scatterStageW - halfW[best]));
-      centers[best].y = scatterClamp(my - dy * half, halfH[best], Math.max(halfH[best], scatterStageH - halfH[best]));
-
-      used[i] = true;
-      used[best] = true;
-      done++;
-    }
-  }
-
-  // 依 state 目前的比例座標，算出實際 x/y 並貼上去（會夾在畫布範圍內）
-  function applyScatterPosition(item, st){
-    const maxX = Math.max(0, scatterStageW - st.w);
-    const maxY = Math.max(0, scatterStageH - st.h);
-    st.x = scatterClamp(st.fx * scatterStageW - st.w / 2, 0, maxX);
-    st.y = scatterClamp(st.fy * scatterStageH - st.h / 2, 0, maxY);
-    writeScatterTransform(item, st);
-  }
-
-  // renderGrid() 每建好一批照片就呼叫一次，把這一批放到抽到的位置上
-  function placeScatterItems(items){
-    if(!items || !items.length) return;
-    if(!scatterSlots && !assignScatterSlots()) return;
-    items.forEach(item => {
-      const i = Number(item.dataset.index);
-      const slot = scatterSlots[i];
-      if(!slot) return;
-      const st = getScatterState(item);
-      st.fx = slot.fx;
-      st.fy = slot.fy;
-      item.style.zIndex = String(slot.z);
-      applyScatterPosition(item, st);
-    });
-  }
-
-  // 視窗尺寸改變時（見 resizeAllGridImages()）：畫布重新量一次，所有照片用
-  // 同一組比例座標重新貼回去，不重新抽亂數。
-  function relayoutScatterPhotos(){
-    if(!grid || !scatterSlots) return;
-    computeScatterStage();
-    grid.querySelectorAll('.grid-item').forEach(item => {
-      applyScatterPosition(item, getScatterState(item));
-    });
-  }
-
-  function resetScatterLayout(){
-    scatterMoving.forEach(item => item.classList.remove('pf-moving'));
-    scatterMoving.clear();
-    if(scatterRAF !== null){ cancelAnimationFrame(scatterRAF); scatterRAF = null; }
-    scatterSlots = null;
-  }
-
-  // ---------- 放手之後的滑行：只有真的有照片在動時才跑 ----------
-  function startScatterLoop(){
-    if(scatterRAF !== null) return;
-    scatterLastT = performance.now();
-    scatterRAF = requestAnimationFrame(scatterStep);
-  }
-
-  function stopScatterItem(item){
-    const st = getScatterState(item);
-    st.vx = 0;
-    st.vy = 0;
-    scatterMoving.delete(item);
-    item.classList.remove('pf-moving');
-  }
-
-  function scatterStep(now){
-    scatterRAF = null;
-    const dt = Math.min(0.064, Math.max(0, (now - scatterLastT) / 1000)); // 上限 64ms：分頁切走再切回來、或掉幀時，不要讓這一步跳太大
-    scatterLastT = now;
-
-    const maxXBase = scatterStageW;
-    const maxYBase = scatterStageH;
-
-    scatterMoving.forEach(item => {
-      const st = getScatterState(item);
-      const speed = Math.hypot(st.vx, st.vy);
-      if(speed <= 0){ stopScatterItem(item); return; }
-
-      // 線性摩擦（常數減速度）為主 + 很輕的空氣阻力收尾，見上面說明
-      let next = speed - SCATTER_DECEL * dt;
-      next *= Math.exp(-SCATTER_DRAG_PER_SEC * dt);
-      if(next <= SCATTER_STOP_SPEED){ stopScatterItem(item); return; }
-
-      const k = next / speed;
-      st.vx *= k;
-      st.vy *= k;
-
-      st.x += st.vx * dt;
-      st.y += st.vy * dt;
-
-      // 撞到畫布邊界就反彈，照片不會被甩出可視範圍外
-      const maxX = Math.max(0, maxXBase - st.w);
-      const maxY = Math.max(0, maxYBase - st.h);
-      if(st.x < 0){ st.x = 0; st.vx = Math.abs(st.vx) * SCATTER_RESTITUTION; }
-      else if(st.x > maxX){ st.x = maxX; st.vx = -Math.abs(st.vx) * SCATTER_RESTITUTION; }
-      if(st.y < 0){ st.y = 0; st.vy = Math.abs(st.vy) * SCATTER_RESTITUTION; }
-      else if(st.y > maxY){ st.y = maxY; st.vy = -Math.abs(st.vy) * SCATTER_RESTITUTION; }
-
-      writeScatterTransform(item, st);
-    });
-
-    if(scatterMoving.size) scatterRAF = requestAnimationFrame(scatterStep);
-  }
-
-  // 拖曳中／甩出去那一下之後的 click 要被吃掉，不然放開滑鼠就會連帶進大圖
-  function consumeScatterClickSuppression(item){
-    const st = scatterStates.get(item);
-    if(!st || !st.suppressClick) return false;
-    st.suppressClick = false;
-    clearTimeout(st.suppressTimer);
-    return true;
-  }
-
-  function bringScatterItemToFront(item){
-    scatterTopZ += 1;
-    item.style.zIndex = String(scatterTopZ);
-  }
-
-  // ---------- 滑鼠拖曳本體 ----------
-  // 只接滑鼠／觸控筆（pointerType 不是 'touch'）：手機上手指按住照片往上滑，
-  // 使用者的意圖是捲動頁面，不是搬動照片——需求寫的也是「可以用滑鼠移動
-  // 他們」，所以觸控維持原本的捲動＋點擊行為完全不變。
-  //
-  // ⚠️ 修正：「有些照片會黏在滑鼠上，放開也甩不掉」----------
-  // 成因：原本 pointermove / pointerup 是掛在「照片自己」身上，只靠
-  // setPointerCapture() 把後續事件鎖回這個元素。但 setPointerCapture() 並不是
-  // 每次都成功（元素剛被替換、瀏覽器判定這個 pointer 已經不是 active、某些
-  // 情況直接丟例外——所以原本那行才包在 try/catch 裡，失敗時是靜靜地當作
-  // 沒事發生）。一旦鎖定失敗，滑鼠只要快速拖到照片範圍外，pointermove 就
-  // 落到別的元素上、這張照片收不到了（照片停在原地追不上游標），而放開滑鼠
-  // 那一下的 pointerup 同樣落在別的元素上——照片自己的 pointerup 從頭到尾
-  // 沒被觸發過，st.dragging 就永遠停在 true。之後滑鼠再經過這張照片，它的
-  // pointermove 又收得到了，於是照片「啪」地跳到游標上繼續跟著跑，放開也
-  // 沒用（因為根本沒有人在等那個 pointerup）——這正是回報的症狀。
-  // 修法有三層，任何一層單獨都足以收尾，三層一起等於不可能再卡住：
-  //   ① pointermove / pointerup / pointercancel 全部改掛在 window 上。
-  //      不管指標當下落在哪個元素、有沒有鎖定成功，window 一定收得到
-  //      （被 capture 的事件照樣會往上冒泡到 window），拖曳的開始與結束
-  //      不再依賴任何一個特定元素收不收得到事件。
-  //   ② pointermove 裡檢查 e.buttons：滑鼠左鍵已經不是按著的狀態，代表
-  //      使用者早就放開了、只是那一下 pointerup 因故沒送達（切到別的視窗、
-  //      被開發者工具吃掉、瀏覽器分頁失焦…），直接當場收尾。
-  //   ③ 視窗失焦（blur）也一律收尾。
-  // setPointerCapture 保留，但它現在只是錦上添花（讓拖曳中的游標行為更穩），
-  // 不再是「拖曳能不能正常結束」的關鍵。
-  //
-  // 同一時間只可能有一張照片在被拖曳，所以狀態存成單一個變數就夠，
-  // 不需要每張照片各自掛一組 window 監聽器（那會變成上百組重複監聽）。
-  let scatterActiveDrag = null; // { item, st } 或 null
-
-  function scatterDragMove(e){
-    const drag = scatterActiveDrag;
-    if(!drag) return;
-    const { item, st } = drag;
-    if(e.pointerId !== st.pointerId) return;
-
-    // ② 保險：左鍵其實已經放開了（那一下 pointerup 沒送達），立刻收尾，
-    // 不要讓照片繼續黏在游標上。e.buttons 的 bit 0 代表主要按鍵按著。
-    if(e.pointerType !== 'touch' && !(e.buttons & 1)){
-      endScatterDrag(e);
-      return;
-    }
-
-    if(!st.moved){
-      // 還沒超過門檻：可能只是點擊時手抖了一兩格，先不當成拖曳，
-      // 這樣「點一下看大圖」的體驗完全不受影響。
-      if(Math.hypot(e.clientX - st.startClientX, e.clientY - st.startClientY) < SCATTER_DRAG_THRESHOLD) return;
-      st.moved = true;
-      item.classList.add('pf-dragging');
-      item.classList.add('pf-moving');
-      bringScatterItemToFront(item); // 拖著的那張浮到最上面，不會被別張蓋住
-      hideHoverPreview();            // 拖曳期間不要同時彈出 hover 大圖預覽
-    }
-
-    if(e.cancelable) e.preventDefault(); // 擋掉瀏覽器原生的圖片拖放行為
-    const maxX = Math.max(0, scatterStageW - st.w);
-    const maxY = Math.max(0, scatterStageH - st.h);
-    st.x = scatterClamp((e.pageX - st.originX) - st.grabDX, 0, maxX);
-    st.y = scatterClamp((e.pageY - st.originY) - st.grabDY, 0, maxY);
-    writeScatterTransform(item, st);
-
-    st.samples.push({ t: performance.now(), x: e.pageX, y: e.pageY });
-    if(st.samples.length > 16) st.samples.shift(); // 只留最近幾筆，算末速度用不到更早的
-  }
-
-  // ---------- 放開時的末速度 ----------
-  // ⚠️ 修正：「移動後先停下來、才放開，照片卻像被彈出去一樣衝很快」----------
-  // 成因：滑鼠停著不動時，瀏覽器「不會」再送 pointermove——也就是說手停下來
-  // 之後，取樣陣列就完全不再增加。原本的算法是「拿最後一筆取樣，往回找一筆
-  // 約 SCATTER_FLING_WINDOW_MS 以前的取樣，兩者相減算速度」，結果這兩筆都是
-  // 「停下來之前」那段真的在動的取樣——中間那段「停著不動」的時間對算式來說
-  // 完全不存在。所以不管使用者停了 0.2 秒還是 3 秒才放手，算出來的都是他
-  // 停下來前最後那一下的速度，照片自然就「咻」地飛出去。
-  // 修法：把「放開的這一刻」本身也當成一筆取樣，並且時間窗口改成從「放開
-  // 那一刻」往回算。使用者只要停超過一個窗口的時間，窗口內就只剩放開那一
-  // 筆孤零零的取樣（其餘全都太舊、被排除），位移是 0、速度自然就是 0，
-  // 照片乖乖停在原地——跟真實世界「手停住才放開，東西就不會飛」一致。
-  function computeScatterFlingVelocity(st, e){
-    const samples = st.samples || [];
-    const now = performance.now();
-    samples.push({ t: now, x: e.pageX, y: e.pageY });
-
-    // 找出窗口內「最舊」的那一筆
-    let ref = null;
-    for(let i = 0; i < samples.length; i++){
-      if(now - samples[i].t <= SCATTER_FLING_WINDOW_MS){ ref = samples[i]; break; }
-    }
-    if(!ref) return null;
-
-    const dtms = now - ref.t;
-    if(dtms < 1) return null; // 窗口內只剩放開那一筆（＝手停住了）：沒有速度
-    return {
-      vx: (e.pageX - ref.x) / dtms * 1000,
-      vy: (e.pageY - ref.y) / dtms * 1000
-    };
-  }
-
-  function endScatterDrag(e){
-    const drag = scatterActiveDrag;
-    if(!drag) return;
-    const { item, st } = drag;
-    // e 為 null 代表是「視窗失焦」這類沒有事件物件的收尾路徑
-    if(e && e.pointerId !== undefined && e.pointerId !== st.pointerId) return;
-
-    scatterActiveDrag = null;
-    st.dragging = false;
-    item.classList.remove('pf-dragging');
-    if(e && e.pointerId !== undefined){
-      try { item.releasePointerCapture(e.pointerId); } catch(err){}
-    }
-    st.pointerId = null;
-
-    if(!st.moved){
-      // 原地按一下就放開＝單純的點擊，交給既有的 click 監聽器開大圖，
-      // 這裡什麼都不做（也不要設定抑制旗標）。
-      st.samples = null;
-      item.classList.remove('pf-moving');
-      return;
-    }
-
-    // 這一下是拖曳，等一下瀏覽器送過來的那個 click 要吃掉
-    st.suppressClick = true;
-    clearTimeout(st.suppressTimer);
-    st.suppressTimer = setTimeout(() => { st.suppressClick = false; }, 400); // 保底：萬一這次的 click 因故沒送達，旗標也不會永遠卡著
-
-    const v = (e && e.pageX !== undefined) ? computeScatterFlingVelocity(st, e) : null;
-    st.samples = null;
-
-    if(v){
-      let { vx, vy } = v;
-      const speed = Math.hypot(vx, vy);
-      if(speed > SCATTER_MAX_FLING_SPEED){
-        const k = SCATTER_MAX_FLING_SPEED / speed;
-        vx *= k; vy *= k;
-      }
-      if(Math.hypot(vx, vy) > SCATTER_FLING_MIN_SPEED){
-        st.vx = vx;
-        st.vy = vy;
-        scatterMoving.add(item);
-        item.classList.add('pf-moving');
-        startScatterLoop();
-        return;
-      }
-    }
-    // 沒有足夠的末速度（手停住才放開）：原地停下，不要硬給它一個初速
-    stopScatterItem(item);
-  }
-
-  function attachScatterDrag(item){
-    item.addEventListener('pointerdown', (e) => {
-      // 原本這裡會擋掉 touch（e.pointerType === 'touch' 直接 return），
-      // 讓手機／平板的手指維持原生捲動行為，拖曳只給桌機滑鼠用。現在改成
-      // 手機也要能像桌機滑鼠一樣自由拖著照片移動，所以拿掉這個判斷——
-      // 手指按到照片一律當成拖曳的開始，跟滑鼠左鍵走同一套邏輯（放手時的
-      // 甩動慣性、末速度計算都是共用同一份程式碼，見下面 scatterDragMove()／
-      // computeScatterFlingVelocity()，完全不需要另外為觸控寫一套）。
-      // 能夠這樣做的前提是上面 CSS 已經把 .grid-item 的 touch-action 改成
-      // none（見該處說明）：瀏覽器不會再搶著把這次觸控當成捲動手勢處理，
-      // 所以這裡不需要、也不能再靠 pointerType 分流。
-      if(e.button !== undefined && e.button !== 0) return; // 只接左鍵（觸控事件的 button 一律是 0，不受影響）
-      // 飄動的 e 疊在這張照片上面、這一下又剛好會被它的抓取判斷命中：
-      // 直接放棄，不開始照片拖曳，把這一下讓給飄動字（見上面
-      // dvdWouldClaimPointer() 的完整說明，貫徹「飄動物件在上層、優先抓到
-      // 飄動物件」的規則）。事件不呼叫 stopPropagation，照樣正常冒泡到
-      // window，飄動字自己那組 pointerdown 監聽器會接手完成抓取。
-      if(dvdWouldClaimPointer(e)) return;
-      if(photoFallModeActive) return;            // 照片物理堆疊模式期間首頁縮圖是收起來的，不該還能被抓
-      if(detailPage.classList.contains('active') || previewPage.classList.contains('active')) return;
-      if(scatterActiveDrag) endScatterDrag(null); // 保險：上一次拖曳沒收乾淨，先收掉再開新的
-
-      const st = getScatterState(item);
-      stopScatterItem(item); // 抓住還在滑行中的照片：立刻停下來（跟現實一樣，手一按就止住）
-
-      st.dragging = true;
-      st.moved = false;
-      st.pointerId = e.pointerId;
-      st.startClientX = e.clientX;
-      st.startClientY = e.clientY;
-
-      // 用 pageX/pageY（含捲動量）換算成畫布座標，這樣就算拖曳過程中頁面
-      // 被捲動，照片也不會跟著跳掉。
-      const gridRect = grid.getBoundingClientRect();
-      st.originX = gridRect.left + window.scrollX;
-      st.originY = gridRect.top + window.scrollY;
-      st.grabDX = (e.pageX - st.originX) - st.x; // 抓取點跟照片左上角的距離，維持抓哪裡就跟著哪裡、不跳動
-      st.grabDY = (e.pageY - st.originY) - st.y;
-      st.samples = [{ t: performance.now(), x: e.pageX, y: e.pageY }];
-
-      scatterActiveDrag = { item, st };
-
-      // 鎖定指標只是讓拖曳中的游標行為更穩定；就算失敗也沒關係，
-      // 上面那三層 window 監聽器一樣會把拖曳正確地收尾（見完整說明）。
-      try { item.setPointerCapture(e.pointerId); } catch(err){}
-    });
-
-    // 原生的圖片拖放（拖出去變成一個半透明縮圖）跟這裡的拖曳會互搶，直接關掉
-    item.addEventListener('dragstart', (e) => e.preventDefault());
-  }
-
-  // ① 全域監聽：整個網站只掛這一組，不管有幾百張照片都一樣。
-  // 沒有正在拖曳時，這三個 handler 第一行就 return，成本可以忽略。
-  window.addEventListener('pointermove', scatterDragMove, { passive: false });
-  window.addEventListener('pointerup', endScatterDrag);
-  window.addEventListener('pointercancel', endScatterDrag);
-  // ③ 切到別的視窗／分頁時，那一下 pointerup 常常不會送達，一律收尾
-  window.addEventListener('blur', () => endScatterDrag(null));
 
   function computeSafeRandomPosition(excludeRect, boxW, boxH){
     const margin = 24;
@@ -8497,35 +7042,6 @@
   // 不會有任何功能性的問題，只是精細撞牆的時間點稍微晚一點點。
   const PF_ALPHA_MASK_ROWS_PER_CHUNK = DVD_LOW_POWER_DEVICE ? 6 : 12; // 沒有 requestIdleCallback 時，每批固定處理的「列」數，抓一個經驗上足夠短、不會讓單批卡住太久的數字
   const PF_ALPHA_MASK_IDLE_TIME_MARGIN_MS = 3; // 跟 renderGrid() 的 GRID_IDLE_TIME_MARGIN_MS 同一個道理，留一點緩衝給瀏覽器自己排的其他工作
-  // ---------- 從 0/1 遮罩格算出「輪廓像素」座標（正規化成 0..1）----------
-  // 抽成獨立函式的原因：即時運算（buildAlphaMaskFromSourceChunked() 內的
-  // finishMask()）跟離線預算好、從 masks.json 查表讀回來的路徑
-  // （requestAlphaMask() 裡 precomputedEMasks 那段）都需要「輪廓點」這份
-  // 資料給 computeDvdPixelInsets() 用，兩邊共用同一套演算法，才能保證
-  // 不管是即時算的、還是查表查到的，撞牆判斷拿到的輪廓精細度完全一致。
-  // 這裡也是「離線資料圖片撞牆時隔著一段透明區域才撞到」這個回報的修法
-  // 關鍵：如果目前部署的 masks.json 是在 build-masks.js 補上 boundary
-  // 欄位之前就產生的舊版本，pre.boundary 會是 undefined／空陣列——查表
-  // 路徑原本遇到這種情況只會直接退回空陣列，等於這些圖片的撞牆判斷永遠
-  // 退回矩形外框、感覺就是「隔著透明區域才撞到」。現在改成用已經解碼出來
-  // 的 0/1 遮罩格「現場」補算一次輪廓點（演算法跟這裡完全一樣），不必
-  // 等 masks.json 重新產生，所有圖片都能拿到精確的圖案輪廓。
-  function computeMaskBoundaryPoints(mask, maskW, maskH){
-    const boundaryPts = [];
-    for(let y = 0; y < maskH; y++){
-      const rowBase = y * maskW;
-      for(let x = 0; x < maskW; x++){
-        if(mask[rowBase + x] !== 1) continue;
-        const left = x > 0 ? mask[rowBase + x - 1] : 0;
-        const right = x < maskW - 1 ? mask[rowBase + x + 1] : 0;
-        const up = y > 0 ? mask[rowBase - maskW + x] : 0;
-        const down = y < maskH - 1 ? mask[rowBase + maskW + x] : 0;
-        if(left === 1 && right === 1 && up === 1 && down === 1) continue; // 四周都是實心＝內部像素，不可能是最外緣，跳過
-        boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
-      }
-    }
-    return new Float32Array(boundaryPts);
-  }
   function buildAlphaMaskFromSourceChunked(source, naturalW, naturalH, callback){
     if(!naturalW || !naturalH){ callback(null); return; }
     const fullScale = Math.min(1, PF_ALPHA_MASK_FULL_CAP_DIM / Math.max(naturalW, naturalH));
@@ -8615,8 +7131,21 @@
       // 掃過已經縮小完成的 maskW×maskH 網格（最大 72×72＝5184 格，效能
       // 較弱裝置只有 48×48＝2304 格），運算量遠小於上面掃描中繼解析度
       // 那段，維持一次做完，不需要額外分批。
+      const boundaryPts = [];
+      for(let y = 0; y < maskH; y++){
+        const rowBase = y * maskW;
+        for(let x = 0; x < maskW; x++){
+          if(mask[rowBase + x] !== 1) continue;
+          const left = x > 0 ? mask[rowBase + x - 1] : 0;
+          const right = x < maskW - 1 ? mask[rowBase + x + 1] : 0;
+          const up = y > 0 ? mask[rowBase - maskW + x] : 0;
+          const down = y < maskH - 1 ? mask[rowBase + maskW + x] : 0;
+          if(left === 1 && right === 1 && up === 1 && down === 1) continue; // 四周都是實心＝內部像素，不可能是最外緣，跳過
+          boundaryPts.push((x + 0.5) / maskW, (y + 0.5) / maskH);
+        }
+      }
       callback({
-        mask, w: maskW, h: maskH, boundary: computeMaskBoundaryPoints(mask, maskW, maskH),
+        mask, w: maskW, h: maskH, boundary: new Float32Array(boundaryPts),
         // 像素級可見範圍（見上面「額外記錄」那段完整說明），正規化成 0..1：
         // +1 是因為 pxMaxX/pxMaxY 記的是「最後一顆有畫到東西的像素索引」，
         // 要算到這顆像素的右／下邊緣才是它真正涵蓋到的範圍，跟一般
@@ -8754,19 +7283,11 @@
     if(precomputedId && precomputedEMasks && precomputedEMasks.has(precomputedId)){
       const pre = precomputedEMasks.get(precomputedId);
       if(pre && pre.mask && pre.w && pre.h){
-        const decodedMask = decodeMaskBits(pre.mask, pre.w * pre.h);
-        // pre.boundary 查得到就直接用（build-masks.js 新版已經算好）；查不到
-        // （舊版 masks.json，還沒補上這個欄位）就用已經解碼好的 0/1 遮罩格
-        // 現場補算一次，理由見上面 computeMaskBoundaryPoints() 的完整說明——
-        // 不這樣做的話，這些圖片的撞牆判斷永遠會退回矩形外框。
-        const boundary = (pre.boundary && pre.boundary.length)
-          ? Float32Array.from(pre.boundary)
-          : computeMaskBoundaryPoints(decodedMask, pre.w, pre.h);
         finish({
-          mask: decodedMask,
+          mask: decodeMaskBits(pre.mask, pre.w * pre.h),
           w: pre.w,
           h: pre.h,
-          boundary,
+          boundary: (pre.boundary && pre.boundary.length) ? Float32Array.from(pre.boundary) : new Float32Array(0),
           fullBBox: pre.fullBBox || null,
         });
         return;
@@ -8950,33 +7471,7 @@
         }
       }
     }
-    // ---------- 修正：「掉落照片撞牆／撞其他照片時，實際圖案跟碰撞邊緣
-    // 之間隔著一段透明」 ----------
-    // 成因：畫面上顯示這張圖的 <img> 用的是 object-fit:contain（見上面
-    // CSS .photo-fall-item img 的說明）——這格容器的寬高（也就是這裡收到
-    // 的 w／h 參數，itemW／itemH）只是依「面積＋概略長寬比」概算出來的，
-    // 很少剛好精準等於這張圖真正的長寬比（真正的比例要看 srcW/srcH）。
-    // object-fit:contain 會把圖片等比例縮到「剛好整張塞進容器、其中一軸
-    // 貼齊，另一軸留白置中」，所以視覺上圖案實際佔用的範圍，通常比整個
-    // 容器 w×h 小一圈。下面原本直接拿整個 w×h 當分母去換算每一格的像素
-    // 座標，等於是把遮罩「硬拉伸貼滿整個容器」，而不是貼合圖片實際顯示
-    // 出來的那個（通常更小一點的）範圍——算出來的碰撞體因此會比使用者
-    // 肉眼看到的圖案大一圈，物件根本還沒真的碰到看得見的圖案，碰撞體的
-    // 邊緣就先撞到牆／其他物件了，感覺就是「隔著一段透明才撞到」。而且
-    // 概算長寬比幾乎不會剛好精準命中每一張圖真正的比例，這個落差每張圖
-    // 都會有，這正是「全部都這樣」的成因。
-    // 修法：用跟 CSS object-fit:contain 完全同一套公式（沿用下面
-    // pfWallpaperContainFit() 現成的算法，確保視覺呈現、碰撞判斷兩邊
-    // 算出來的結果永遠一致），先算出圖片實際會顯示在容器裡的「縮小後」
-    // 尺寸（contentW/contentH），遮罩格子的像素座標改用這個縮小後的尺寸
-    // 去換算，不再用整個外框 w×h。因為 contain 本來就是置中對齊，內容的
-    // 中心點永遠跟容器中心點重合，中心點座標系不用另外處理，只要把用來
-    // 換算格子大小、中心偏移量的分母從 w/h 換成 contentW/contentH，算出來
-    // 的碰撞體範圍就會精準貼合使用者實際看到的圖案範圍，不再比視覺上的
-    // 圖案大一圈。
-    const fit = pfWallpaperContainFit(w, h, srcW, srcH);
-    const contentW = fit.w, contentH = fit.h;
-    const cellW = contentW / gridW, cellH = contentH / gridH;
+    const cellW = w / gridW, cellH = h / gridH;
     const rects = [];
     for(let gy = 0; gy < gridH; gy++){
       let runStart = -1;
@@ -8985,8 +7480,8 @@
         if(solid && runStart === -1) runStart = gx;
         if(!solid && runStart !== -1){
           rects.push({
-            cx: (runStart + gx) / 2 * cellW - contentW / 2,
-            cy: (gy + 0.5) * cellH - contentH / 2,
+            cx: (runStart + gx) / 2 * cellW - w / 2,
+            cy: (gy + 0.5) * cellH - h / 2,
             w: (gx - runStart) * cellW,
             h: cellH,
           });
@@ -10278,88 +8773,80 @@
   // 對應的像素遮罩用；每次換圖（見 setDvdBounceImageSrc()）都會同步更新。
   let dvdActiveImgSrc = '';
 
-  // ---------- 撞螢幕邊界改用「圖片真實的矩形邊界」，不再依賴像素遮罩 ----------
-  // 這裡之前試過用「去背像素遮罩的輪廓點」來算撞牆邊界，理論上應該更貼合
-  // 圖案的真實外緣，但實際上這條路線有好幾個天生的脆弱點：① 遮罩是非同步
-  // 建立的（不管是即時算的 buildAlphaMaskFromSourceChunked()，還是查表用的
-  // 離線 masks.json），剛換上新圖、遮罩還沒就緒的那幾影格，只能先暫時
-  // 退回矩形外框；② 遮罩本身是縮到 72×72（甚至更小）格子的低解析度取樣，
-  // 輪廓天生就是「格子精度」而不是像素精度，旋轉的時候這個誤差會被放大；
-  // ③ 完全依賴離線 masks.json 有沒有正確重新產生過 boundary 欄位。使用者
-  // 實測後回報「依舊不是用圖片真實四邊形邊界在撞擊」，代表這幾個脆弱點
-  // 加起來，實際觀感還是跟「圖片真正的矩形邊緣」對不齊。
+  // ---------- 撞螢幕邊界也改用「實際圖案像素」判斷，不是外框的空白 ----------
+  // 上面 requestAlphaMask()／pixelShapesOverlap() 那套「像素遮罩 vs 像素
+  // 遮罩」原本只用在飄動物件跟頁面內照片（首頁縮圖／詳情頁大圖）的碰撞
+  // 判斷；跟螢幕四個邊界的撞牆，原本仍然單純拿「整個裁切後的矩形外框」去
+  // 判斷——去背裁切只保證外框本身沒有多餘的四周留白，外框「內部」（尤其
+  // 是圖案本身是異形、鏤空造型，或飄動時帶有旋轉角度）仍然可能留有大片
+  // 透明區域，造成「肉眼看到的圖案明明還沒真的碰到螢幕邊緣，就已經反彈」
+  // 的落差感——這正是「撞擊依舊是用周圍空白在撞擊邊界」這個回報的成因。
   //
-  // 這裡的圖片本來就是規則的矩形（撞牆時唯一會變的只有旋轉角度
-  // dvdRotationDeg，不會變形），要算「這個矩形被旋轉 theta 度之後，
-  // 相對於螢幕座標軸的真正外接範圍」完全可以用三角函數直接算出精確解，
-  // 不需要透過取樣、非同步、有解析度誤差的像素遮罩去「猜」——這樣的
-  // 邊界永遠 100% 貼合圖片實際的四個角，不管遮罩準不準備好、準不準，
-  // 兩者完全無關，也不會再受離線資料是否重新產生過的影響。
-  //
-  // 幾何推導：矩形未旋轉時半寬高是 halfW/halfH，四個角相對中心點的座標
-  // 分別是 (±halfW, ±halfH)。旋轉 theta 度之後，這四個角在螢幕座標軸上的
-  // x／y 分量最大值分別是 halfW*|cosθ| + halfH*|sinθ|（x 方向）跟
-  // halfW*|sinθ| + halfH*|cosθ|（y 方向）——這就是「旋轉後矩形」在螢幕
-  // 座標軸上真正的半寬、半高（正是使用者要的「四邊形的真實邊界」）。跟
-  // 未旋轉時的 halfW/halfH 相減，就是這一刻四邊各自該內縮（或凸出）多少
-  // 距離；角度是 0／90／180…（沒有真的轉）時，兩者相等，inset 剛好是 0，
-  // 完全退回原本「矩形碰矩形」的行為，不會影響沒有旋轉時的手感。
+  // 這裡補上：沿用同一份已經在算物件間碰撞用的像素遮罩，取出圖案的
+  // 「輪廓像素」（見 buildAlphaMaskFromSource() 裡新增的 boundary 說明），
+  // 套用目前這一影格的旋轉角度，算出圖案本身實際的上下左右最外緣，相對
+  // 外框邊緣各自內縮了多少距離（inset）。撞牆邊界檢查時，把這個內縮距離
+  // 加回允許的活動範圍——外框可以比原本多飄出螢幕 inset 這麼多，直到
+  // 圖案本身的像素真的碰到螢幕邊緣，才會觸發反彈，不再是外框一碰到就彈開。
+  // 每一影格重新算一次，是因為飄動物件會持續旋轉（見 dvdRotationDeg／
+  // stepDvdRotation()），最外緣的位置會隨旋轉角度即時改變，沒辦法只算
+  // 一次就沿用。運算量只跟圖案「輪廓」的像素數量成正比（見上面 boundary
+  // 的說明，遠小於整張遮罩的面積），每影格重算一次不會造成效能負擔。
+  // 遮罩還沒準備好（例如剛換上新圖，requestAlphaMask() 是非同步的、還沒
+  // 跑完）就傳回全 0 的 inset，等同暫時退回原本「矩形外框」的行為，不會
+  // 等待、也不會讓撞牆判斷暫時失靈。
   function computeDvdPixelInsets(){
-    if(!dvdW || !dvdH){
+    const entry = getCachedAlphaMask(dvdActiveImgSrc);
+    if(!entry || !entry.boundary || !entry.boundary.length || !dvdW || !dvdH){
       return { left: 0, right: 0, top: 0, bottom: 0 };
     }
-    const halfW = dvdW / 2, halfH = dvdH / 2;
-    const theta = dvdRotationDeg * Math.PI / 180; // 跟 CSS rotate() 同方向
-
-    // ---------- 修正：「撞螢幕邊界時，隔著一段透明區域才撞到」 ----------
-    // 成因：下面舊版的算法假設整個 .dvd-bounce 矩形框都是「實心」的——
-    // 但這個框是去背圖裁到「只剩最小外接矩形」之後的框（見 trimTransparentImage()
-    // 的說明），框內部本身通常還留著大片透明區域（只要圖案本身不是矩形，
-    // 例如飄動的「e」、樹枝、任何不規則輪廓的去背照片，一定會有這個落差）。
-    // 撞牆判斷只看「這個矩形框」有沒有貼到螢幕邊緣，不管框裡的圖案本身有
-    // 沒有真的貼到邊緣，肉眼就會看到「隔著一段透明才撞到」——這正是這次
-    // 回報的成因，跟「撞頁面內的圖片」用的 pixelShapesOverlap()（有拿真正
-    // 的像素遮罩去比對）是兩套不同標準，這裡原本完全沒有用到遮罩。
-    // 修法：如果這張圖的像素遮罩已經就緒（getCachedAlphaMask 查得到、且
-    // 有算出輪廓點 boundary），直接拿這些「圖案真正的最外緣座標」套用
-    // 目前的旋轉角度，算出這一刻圖案在螢幕 x/y 軸上實際能到達的最大範圍，
-    // 拿來當作 inset，而不是假設整個矩形都是實心的。輪廓點是建立遮罩時
-    // 掃出來的正規化座標（0~1，對應未旋轉時的圖片本地座標，見
-    // computeMaskBoundaryPoints()），這裡換算回「以中心點為原點」的
-    // px 座標，再用標準旋轉矩陣轉成螢幕座標系，取絕對值的最大值即為
-    // 這一刻真正的半寬／半高。
-    const maskEntry = getCachedAlphaMask(dvdActiveImgSrc);
-    if(maskEntry && maskEntry.boundary && maskEntry.boundary.length >= 2){
-      const pts = maskEntry.boundary;
-      const cosT = Math.cos(theta), sinT = Math.sin(theta);
-      let maxAbsX = 0, maxAbsY = 0;
-      for(let i = 0; i < pts.length; i += 2){
-        const lx = (pts[i] - 0.5) * dvdW;
-        const ly = (pts[i + 1] - 0.5) * dvdH;
-        const sx = lx * cosT - ly * sinT;
-        const sy = lx * sinT + ly * cosT;
-        const ax = Math.abs(sx), ay = Math.abs(sy);
-        if(ax > maxAbsX) maxAbsX = ax;
-        if(ay > maxAbsY) maxAbsY = ay;
-      }
-      const insetX = halfW - maxAbsX;
-      const insetY = halfH - maxAbsY;
-      return { left: insetX, right: insetX, top: insetY, bottom: insetY };
+    const pts = entry.boundary;
+    const theta = dvdRotationDeg * Math.PI / 180; // 跟 CSS rotate() 同方向，直接拿本地座標旋轉即可換算成目前螢幕方向下的偏移
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for(let i = 0; i < pts.length; i += 2){
+      const lx = (pts[i] - 0.5) * dvdW; // 相對外框中心點的本地座標（尚未旋轉）
+      const ly = (pts[i + 1] - 0.5) * dvdH;
+      const rx = lx * cosT - ly * sinT; // 旋轉之後，相對外框中心點的座標
+      const ry = lx * sinT + ly * cosT;
+      if(rx < minX) minX = rx;
+      if(rx > maxX) maxX = rx;
+      if(ry < minY) minY = ry;
+      if(ry > maxY) maxY = ry;
     }
-
-    // 遮罩還沒準備好（剛換上新圖、背景建立中，或這張圖沒有遮罩可用）——
-    // 優雅退回舊版「假設整個矩形都是實心」的算法，等遮罩就緒的那一影格
-    // 會自動切換成上面的精確版本，不會卡住、也不會讓功能壞掉。
-    const cosAbs = Math.abs(Math.cos(theta)), sinAbs = Math.abs(Math.sin(theta));
-    const rotatedHalfW = halfW * cosAbs + halfH * sinAbs; // 旋轉後，矩形四個角在螢幕 x 軸方向的真正半寬
-    const rotatedHalfH = halfW * sinAbs + halfH * cosAbs; // 旋轉後，矩形四個角在螢幕 y 軸方向的真正半高
-    // insetX/insetY <= 0：旋轉後的矩形一定跟未旋轉時一樣大或更往外凸出
-    // （角旋出去了），從來不會比未旋轉時更小——跟上面像素遮罩那條路線
-    // 「inset 可以是負值」的結論完全一致，只是這裡是精確算出來的，不是
-    // 用取樣猜的。
-    const insetX = halfW - rotatedHalfW;
-    const insetY = halfH - rotatedHalfH;
-    return { left: insetX, right: insetX, top: insetY, bottom: insetY };
+    if(minX > maxX || minY > maxY){
+      return { left: 0, right: 0, top: 0, bottom: 0 };
+    }
+    // 換算成「外框四邊各自內縮了多少距離」。
+    //
+    // ---------- 修正：「圖片已經跑出邊界才有反彈」的真正殘餘成因 ----------
+    // 這裡原本用 Math.max(0, …) 把結果強制夾成不小於 0，理由寫的是「旋轉
+    // 不會讓圖案的像素跑到外框範圍以外」——這句話只有在「外框」指的是
+    // getBoundingClientRect() 那種隨旋轉一起撐大的外接矩形時才成立；但這裡
+    // minX/maxX 是拿 dvdW/dvdH（offsetWidth/offsetHeight，永遠是未旋轉的
+    // 原始寬高，理由見 measureDvdSize() 的說明）當半寬高在換算 inset，兩者
+    // 不是同一個框。圖案的可視像素只要夠靠近去背後的四個角（絕大多數照片
+    // 裁切完都會有像素貼到至少某個角落附近），旋轉 45 度左右時，那個角上
+    // 的像素離中心的距離會比 halfW/halfH 更遠——也就是 minX 真的可能小於
+    // -halfW（或 maxX 大於 halfW），算出來的 inset 本來就應該是負的：
+    // 代表圖案此刻的實際輪廓，比「未旋轉時的框邊」還要更往外凸出。
+    // 把這種負值夾成 0，等於告訴下面 stepDvdBounce()「框邊碰到螢幕邊界時
+    // 才反彈就好」，但實際上圖案的像素在框邊碰到之前，就已經先一步凸出
+    // 螢幕外了——這正是「圖片已經跑出邊界才有反彈」在像素遮罩上線之後
+    // 依然存在的根本原因：問題不是遮罩不準，而是這裡把「應該更早反彈」
+    // 的負值訊號整個丟棄了。
+    // 修法：不再夾成 0，讓 inset 可以是負值，交給下面 stepDvdBounce()／
+    // clampDvdIntoViewport() 的 minX/maxX 算式自然把允許的活動範圍收緊
+    // （負的 inset 會讓邊界往內縮，逼反彈提早在框邊碰到螢幕邊界之前觸發，
+    // 跟圖案肉眼看到的實際邊緣同步）。極端浮點數誤差可能讓數值出現微小的
+    // 正負抖動，這裡不用特別處理，量級遠小於一個像素，不影響觀感。
+    const halfW = dvdW / 2, halfH = dvdH / 2;
+    return {
+      left: minX + halfW,
+      right: halfW - maxX,
+      top: minY + halfH,
+      bottom: halfH - maxY
+    };
   }
 
   // ---------- 撞牆震動 ----------
@@ -11420,32 +9907,6 @@
   const DVD_GRAB_PADDING_TOUCH = 26;   // px，觸控手指額外可命中的邊界寬度（比滑鼠寬一些）
   function dvdHitTest(rect, x, y, padding){
     return !(x < rect.left - padding || x > rect.right + padding || y < rect.top - padding || y > rect.bottom + padding);
-  }
-  // ---------- 修正：「飄動的 e 疊在照片上面時，長按會同時抓到兩個」 ----------
-  // 成因：飄動的 e（#dvdBounce）是 pointer-events:none，「抓取它」這件事
-  // 完全靠下面 window 層級的 pointerdown 監聽器自己用 getBoundingClientRect()
-  // 手動比對座標，跟 DOM 原生的 hit-test／z-index 疊層完全無關（見該處開頭
-  // 的完整說明）。也正因為 pointer-events:none，瀏覽器原生 hit-test 找到的
-  // 「真正的目標元素」永遠是疊在它底下那張可以互動的 .grid-item 照片——
-  // 這一下 pointerdown 因此會先在目標階段（target phase）觸發照片自己掛在
-  // 身上的 pointerdown 監聽器（attachScatterDrag() 裡的那個，開始照片拖曳），
-  // 事件才接著冒泡到 window，window 這組才判定「命中飄動字」、另外再啟動
-  // 一次飄動字的抓取——同一下長按，兩套邏輯各自獨立判定「我被抓住了」，
-  // 使用者因此感覺兩個東西同時被抓到。
-  // 修法：抽出跟 window pointerdown 開頭完全同一套「這一下算不算抓到飄動
-  // 的 e」判斷（守門條件＋矩形命中測試），讓照片自己的拖曳判斷也能呼叫；
-  // 只要飄動的 e 這一下會被判定為「命中」，照片這邊就直接放棄、不開始拖曳
-  // ——事件照樣往上冒泡，交給 window 那組正常抓取飄動字，貫徹「飄動物件
-  // 疊在上層，優先抓到飄動物件」的規則。反過來，只要飄動的 e 這一下不會
-  // 被判定命中（例如隱藏中、被彈窗蓋住、根本沒疊到），這裡回傳 false，
-  // 照片拖曳完全不受影響，跟原本行為一致。
-  function dvdWouldClaimPointer(e){
-    if(pfRulesOverlay && pfRulesOverlay.classList.contains('active')) return false;
-    if(dvdBounce.classList.contains('dvd-hidden')) return false;
-    if(wallpaperPreviewOverlay && wallpaperPreviewOverlay.classList.contains('active')) return false;
-    const rect = dvdBounce.getBoundingClientRect();
-    const padding = e.pointerType === 'mouse' ? DVD_GRAB_PADDING_DESKTOP : DVD_GRAB_PADDING_TOUCH;
-    return dvdHitTest(rect, e.clientX, e.clientY, padding);
   }
   // 手機觸控版修正：.dvd-bounce 本身是 pointer-events:none（見上面 CSS
   // 該處的完整說明），所以手指實際落下時，瀏覽器 hit-test 抓到的一路都是
@@ -13363,11 +11824,8 @@
     // 讓算出來的 tileSize 整體小一成，後續依面積、長寬比反推出的每張照片
     // 寬高也會跟著等比例一起縮小。桌機／平板版（0.52）不受影響。
     const PHOTO_FALL_TILE_RATIO = isDetailMobile() ? 0.54 : 0.52;
-    // 原本是量第一個 .grid-item 實際渲染出來的寬度當格子邊長。首頁照片改成
-    // 隨機散落之後，.grid-item 的盒子已經縮成「照片本身」的大小，不再是整個
-    // 方形格子，量它會讓掉落的照片整批縮水——改用同一套算式版本
-    // （見 gridCellSide() 上方的完整說明），拿到的就是原本那個格子寬度。
-    const cellSize = gridCellSide() || Math.min(vw / 5, 260);
+    const sampleItem = grid.querySelector('.grid-item');
+    const cellSize = sampleItem ? sampleItem.getBoundingClientRect().width : Math.min(vw / 5, 260);
     const tileSize = Math.round(cellSize * PHOTO_FALL_TILE_RATIO);
     // 上面這個 tileSize 原本直接拿來當每張掉落照片「正方形」的邊長，導致不管
     // 照片實際是直的、橫的、還是正方的，全部都被硬擠成同一個正方形——這正是
