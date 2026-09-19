@@ -485,19 +485,25 @@
     position:relative; /* .idx 現在改成絕對定位，left / top 都由 JS 依「照片本身」
                            實際渲染出來的邊界即時算出 */
   }
-  /* 手機/平板陀螺儀飄浮視差（見 JS supportsTouch && !supportsHover 那段）
-     改用 CSS transition 做位移平滑，不再靠 JS rAF 迴圈每影格手動算 lerp、
-     寫 transform——CSS transition 的插值是瀏覽器合成執行緒（compositor
-     thread）自己算的，跟主執行緒是否正忙（例如使用者正在觸控捲動、瀏覽器
-     把主執行緒資源優先讓給捲動手勢本身，導致主執行緒 JS 大幅延遲或整段
-     停擺）完全無關；就算主執行緒被捲動卡住一段時間，已經在跑的這段過渡
-     動畫還是會繼續在畫面上滑順進行，不會像 JS 手動 lerp 那樣直接整個卡住
-     不動、等主執行緒恢復才「跳」一下追上去。只加在這個 class 底下（JS
-     只在真的是「純觸控、沒有滑鼠 hover」裝置才會幫 .grid 加上這個
-     class），桌機磁吸放大／散落拖曳／飄浮視差（img/.grid-item 上各自的
-     transform）完全不受影響。 */
+  /* 手機/平板飄浮視差（見 JS supportsTouch && !supportsHover 那段）改用
+     CSS transition 做位移平滑，不再靠 JS rAF 迴圈每影格手動算 lerp、寫
+     transform——CSS transition 的插值是瀏覽器合成執行緒（compositor
+     thread）自己算的，跟主執行緒是否正忙（例如使用者正在觸控捲動）完全
+     無關，就算主執行緒被捲動卡住一段時間，已經在跑的這段過渡動畫還是
+     會繼續在畫面上滑順進行。只加在這個 class 底下（JS 只在真的是「純
+     觸控、沒有滑鼠 hover」裝置才會幫 .grid 加上這個 class），桌機磁吸
+     放大／散落拖曳完全不受影響。
+     注意：will-change 刻意「不」放在這裡整批下給所有 .thumb-wrap——跟
+     上面 .pf-moving 同一個理由（見該處註解），上百張照片同時掛著
+     will-change 會逼瀏覽器把每一張都獨立成一個合成圖層，圖層一多，
+     部分手機 GPU 資源撐不住，反而造成捲動卡頓、甚至整頁「卡住滑不動」。
+     will-change 改成只在照片「真的有位移」的當下才由 JS 動態加上
+     .tilt-moving（見下面 writeTiltTransform()），沒在動的照片完全不佔用
+     額外的合成圖層。 */
   .tilt-parallax .grid-item .thumb-wrap{
     transition: transform .34s cubic-bezier(.22,.61,.36,1);
+  }
+  .tilt-parallax .grid-item.tilt-moving .thumb-wrap{
     will-change: transform;
   }
   .grid-item img{
@@ -3402,6 +3408,24 @@
     applyGridItemImageSize(item, gridCellSide());
   }
 
+  // ---------- 修正：手機捲動時網址列收合觸發 resize，把捲動手勢卡住 ----------
+  // 成因：手機瀏覽器捲動的當下，網址列/工具列會自動收合或展開，這個動作
+  // 只有「高度」在變、寬度沒變，但一樣會觸發一次 window resize 事件。
+  // syncFixedChromeLive()（見下方）監聽了 resize，一收到就幾乎立刻呼叫
+  // syncFixedChrome() → resizeAllGridImages() → relayoutScatterPhotos()
+  // → computeScatterStage()，把 .grid 的高度整個重新算、重寫一次，還
+  // 逐張（可能上百張）重新定位——這些全都發生在使用者手指還按著、頁面
+  // 還在捲動手勢進行中的當下。在捲動手勢進行中對大量元素做同步版面重算
+  // ／重寫，正是 iOS Safari 容易把捲動手勢整個「卡住」（卡在某個高度、
+  // 上下都滑不動，需要放開手指重新開始一次新的捲動才能繼續）的典型觸發
+  // 點——這不是效能問題（頁面其餘部分照常運作），是瀏覽器把這次捲動手勢
+  // 直接中斷/凍結了。
+  // 關鍵是：gridColumnCount()／gridCellSide()（決定格子排版的兩個函式）
+  // 只吃寬度、完全不看高度，純高度變化的 resize 其實根本不需要重算格子
+  // 排版。這裡加一層「寬度真的沒變就整組跳過」的保護，跳過的都是原本就
+  // 算不出任何新結果的白工，不影響任何真正需要重算的情境（換欄數、橫直
+  // 切換、雙指縮放結束都一定伴隨寬度改變，不會被這層保護誤擋）。
+  let lastGridLayoutWidth = null;
   // 視窗尺寸改變（換欄數、橫直切換、雙指縮放結束…）會讓每張照片的格子
   // 寬度跟著變，所有已經渲染出來的縮圖尺寸都要一起重新算一次，理由同上。
   // 跟 positionAllGridIdx() 一樣掛在 syncFixedChrome() 這個共用入口，不用
@@ -3417,6 +3441,11 @@
     // 同上：改用算式而不是量 DOM（見 gridCellSide() 上方的完整說明）
     const cellSide = gridCellSide();
     if(!cellSide) return;
+    // 寬度沒變（例如手機捲動時網址列收合造成的純高度 resize）：格子排版
+    // 算出來一定跟上一次一模一樣，整組跳過，見上面完整說明。
+    const currentWidth = grid.clientWidth;
+    if(lastGridLayoutWidth !== null && currentWidth === lastGridLayoutWidth) return;
+    lastGridLayoutWidth = currentWidth;
     items.forEach(item => applyGridItemImageSize(item, cellSide));
     // 視窗尺寸一變，畫布的寬高也跟著變，散落的座標要依「同樣的相對位置」
     // 重新換算貼回去（不重新抽一次亂數——不然使用者只是轉個螢幕方向、
@@ -4119,15 +4148,19 @@
     const tiltOffsetState = new WeakMap();
 
     // 實際把位移寫進 .thumb-wrap 的 transform。settled（幾乎是 0）時清空
-    // inline transform，讓瀏覽器不用再為這張照片維持一個不必要的合成圖層。
+    // inline transform，並拿掉 .tilt-moving（見上面 CSS 規則的說明，讓這
+    // 張照片交回單一合成圖層，不再佔額外的圖層資源）；有位移時才加上，
+    // 跟 .pf-moving 同一個「只在真的會動的期間才給 will-change」精神。
     function writeTiltTransform(item, thumbWrap, x, y){
       const settled = Math.abs(x) < TILT_SETTLE_EPS && Math.abs(y) < TILT_SETTLE_EPS;
       if(settled){
         thumbWrap.style.transform = '';
         tiltOffsetState.set(item, { x: 0, y: 0 });
+        item.classList.remove('tilt-moving');
       } else {
         thumbWrap.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)`;
         tiltOffsetState.set(item, { x, y });
+        item.classList.add('tilt-moving');
       }
     }
 
@@ -4138,21 +4171,22 @@
     // 風速每影格按 dt 疊進 tiltNudgeY，風速本身再按 dt 為基準指數衰減慢慢
     // 歸零，不管捲動量多突然，位移都會被攤平成一段平滑曲線，停止捲動後
     // 也是平滑收斂回 0，不會有硬切換的觀感。
-    const TILT_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例，量級沿用飄動字母那套
-    const TILT_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單一 scroll 事件能疊加的風速上限 (px/s)
+    const TILT_SCROLL_NUDGE_IMPULSE = 3.4;      // 捲動量轉換成風速的比例（比上一版的 2.4 加大，修完 will-change 圖層問題後效果太弱，拉高讓感受更明顯）
+    const TILT_SCROLL_NUDGE_MAX_IMPULSE = 260;  // 單一 scroll 事件能疊加的風速上限 (px/s)
     // 風速累積後的總量、換算成位移後都各自夾上限，避免快速滑動時
     // scroll 事件密集疊加、衰減追不上，位移暴衝成瞬移的觀感。
-    const TILT_SCROLL_NUDGE_MAX_TOTAL = 320;    // 風速累積後的總量上限 (px/s)
-    const TILT_SCROLL_NUDGE_MAX_OFFSET = 34;    // 換算成實際位移後的上限 (px)
+    const TILT_SCROLL_NUDGE_MAX_TOTAL = 380;    // 風速累積後的總量上限 (px/s)
+    const TILT_SCROLL_NUDGE_MAX_OFFSET = 52;    // 換算成實際位移後的上限 (px)，比上一版的 34 加大
     const TILT_SCROLL_NUDGE_DECAY_PER_SEC = 4.5; // 衰減係數，捲動停下後風力慢慢收斂回 0
     const TILT_NUDGE_SETTLE_EPS = 0.05; // px/s，風速小到這個程度視為完全靜止，停止繼續跑衰減迴圈
 
-    // 深度係數改用壓縮過、專門給飄浮視差用的區間（0.78～1.22 倍），不要
-    // 直接套用 TILT_DEPTH_MIN/MAX 那組原始比例（近 20 倍差距，是刻意給
-    // 桌機滑鼠版誇張化用的）——這樣不管深淺，全部照片捲動時都會有感，
-    // 只是最上層那些比其他張多動一點點，不是「只有它們在動」。
-    const TILT_SCROLL_NUDGE_DEPTH_MIN = 0.78;
-    const TILT_SCROLL_NUDGE_DEPTH_MAX = 1.22;
+    // 深度係數改用壓縮過、專門給飄浮視差用的區間（0.6～1.5 倍，比上一版
+    // 的 0.78～1.22 拉寬，層次感更明顯一點），不要直接套用
+    // TILT_DEPTH_MIN/MAX 那組原始比例（近 20 倍差距，是刻意給桌機滑鼠版
+    // 誇張化用的）——這樣不管深淺，全部照片捲動時都會有感，只是最上層
+    // 那些比其他張多動一些，不是「只有它們在動」。
+    const TILT_SCROLL_NUDGE_DEPTH_MIN = 0.6;
+    const TILT_SCROLL_NUDGE_DEPTH_MAX = 1.5;
     function scrollNudgeDepthFactor(floatDepth){
       const span = TILT_DEPTH_MAX - TILT_DEPTH_MIN;
       const t = span > 0 ? scatterClamp((floatDepth - TILT_DEPTH_MIN) / span, 0, 1) : 0.5;
