@@ -4092,22 +4092,35 @@
     const TILT_SENSITIVITY_DEG = 22;
 
     let tiltNormX = 0, tiltNormY = 0; // 目前的目標視差方向與強度（-1~1），跟桌機版 floatNormX/floatNormY 是同一個概念
-    // 第一次收到感測器讀數時的角度，當作「使用者現在自然拿著手機的角度」
-    // 這個基準點，之後都只算跟這個基準點的差值——不校準的話，隨便一個人
-    // 手機平常就有的自然傾斜角度（不會是絕對水平）會被誤判成「已經傾斜
-    // 到底」，畫面一進站照片就會全部飄到某一側去，而不是先靜止在中間，
-    // 等使用者真的動手傾斜才跟著動。
-    let tiltBaseline = null;
+    // 角度原點改成「固定的自然持機角度」，不再用「使用者剛好在哪個角度
+    // 打開頁面」來動態校準——原本的做法（拿第一筆讀數當基準）有個問題：
+    // 使用者進站當下手機恰好朝哪個方向擺，原點就變成那個方向，同一支手機
+    // 在不同次造訪、原點會不一樣，行為沒辦法預期，甚至進站時手邊剛好在
+    // 做別的事、手機角度偏一邊，飄浮視差一啟動就會先偏往某一側。
+    // 改成固定值之後，原點永遠對應「一般人立起手機、稍微往自己這邊傾斜
+    // 看螢幕」這個常見持機姿勢（beta ≈ 50 度、gamma = 0 度置中），不管
+    // 使用者進站當下實際怎麼拿，只要之後傾斜的角度跟這個固定基準有落差，
+    // 才會產生飄浮位移；之後想微調「多自然」，只改 TILT_NATURAL_BETA／
+    // TILT_NATURAL_GAMMA 這兩個數字即可，不用動其餘邏輯。
+    const TILT_NATURAL_BETA = 50;  // 前後傾角度基準：0 是螢幕平放朝上，90 是完全直立，
+                                    // 50 大致對應「立起來、往自己方向微仰」這種常見滑手機角度
+    const TILT_NATURAL_GAMMA = 0;  // 左右傾角度基準：0 代表左右置中、沒有偏向任一側
     let tiltOrientationBound = false; // deviceorientation 監聽器是否已經掛上，避免重複掛
+
+    // 讀出目前螢幕方向（直向/橫向，以及橫向的兩種朝向）——beta/gamma 換算
+    // 成跟畫面座標系一致的 x/y 時，需要用同一個角度；固定基準點也要用
+    // 同一個角度換算過去，兩邊才能對得上，見下面 getTiltBaseline()。
+    function getScreenAngle(){
+      return (screen.orientation && typeof screen.orientation.angle === 'number')
+        ? screen.orientation.angle
+        : (typeof window.orientation === 'number' ? window.orientation : 0);
+    }
 
     // 依目前螢幕方向（直向/橫向，以及橫向的兩種朝向）把 beta/gamma 換算成
     // 跟畫面座標系一致的 x/y——手機轉成橫向時，beta/gamma 對應的物理軸會
     // 跟直向時互換，不換算的話橫向拿手機「左右傾」會變成帶動照片上下飄，
     // 感覺整個方向都是錯的。
-    function readTiltXY(e){
-      const angle = (screen.orientation && typeof screen.orientation.angle === 'number')
-        ? screen.orientation.angle
-        : (typeof window.orientation === 'number' ? window.orientation : 0);
+    function readTiltXY(e, angle){
       const beta = e.beta || 0;   // 前後傾（螢幕面朝上放平大約是 0，往自己這邊立起來變大）
       const gamma = e.gamma || 0; // 左右傾（拿正是 0，往右傾是正值）
       switch(angle){
@@ -4119,15 +4132,22 @@
       }
     }
 
+    // 把固定的「自然持機角度」基準，用跟目前讀數同一顆 readTiltXY() 換算
+    // 成同一個座標系下的 x/y——這樣不管當下是直向還是橫向（甚至橫向轉了
+    // 哪一邊），固定基準永遠跟即時讀數用同一套換算方式比較，不會因為
+    // 中途轉了方向就對不齊。用同一個 angle 呼叫兩次 readTiltXY() 即可，
+    // 換算本身只是幾個加減乘除，不用另外快取。
+    function getTiltBaseline(angle){
+      return readTiltXY({ beta: TILT_NATURAL_BETA, gamma: TILT_NATURAL_GAMMA }, angle);
+    }
+
     function handleDeviceOrientation(e){
       if(e.beta == null && e.gamma == null) return; // 部分裝置/情境會回傳整包都是 null 的空事件，直接略過
-      const xy = readTiltXY(e);
-      if(!tiltBaseline){
-        tiltBaseline = xy; // 第一次收到讀數只拿來校準基準角度，這一影格不產生任何位移
-        return;
-      }
-      const dx = xy.x - tiltBaseline.x;
-      const dy = xy.y - tiltBaseline.y;
+      const angle = getScreenAngle();
+      const xy = readTiltXY(e, angle);
+      const baseline = getTiltBaseline(angle);
+      const dx = xy.x - baseline.x;
+      const dy = xy.y - baseline.y;
       tiltNormX = scatterClamp(dx / TILT_SENSITIVITY_DEG, -1, 1);
       tiltNormY = scatterClamp(dy / TILT_SENSITIVITY_DEG, -1, 1);
       scheduleTiltApply();
@@ -4315,6 +4335,17 @@
     // 的關係，銜接處感覺不到硬切換，跟陀螺儀之間的過渡是連續的。
     const TILT_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例，量級沿用飄動字母那套
     const TILT_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單次疊加的風速上限 (px/s)
+    // 單次疊加雖然有上限（上面那個常數），但原本沒有限制「累加後的總風速」
+    // ——手指快速滑動時，捲動事件幾乎每影格都會觸發一次，疊加的速度比
+    // 風速衰減的速度快很多，一次次疊加下去，風速本身可以一路衝到遠超過
+    // 設計的量級，等於物理模型暴走。這正是「快速往下滑，比較近（floatDepth
+    // 較大）的照片會瞬間閃過畫面、直接飛出去」的成因：風速一旦暴走，
+    // 乘上最大到 2.4 倍的 floatDepth，位移量級完全失控，遠超過原本設計
+    // 給陀螺儀那套視差的最大幅度。加這個總量上限之後，不管疊加幾次，
+    // 風速最終都會被夾在合理範圍內；正常速度的滑動本來就到不了這個上限
+    // （風速會先被衰減吃掉一部分），所以平常的手感完全不受影響，只有
+    // 這種「疊加速度贏過衰減速度」的極端快滑才會被這個上限接住。
+    const TILT_SCROLL_NUDGE_MAX_VELOCITY = 220; // 風速（累加後）本身的總上限 (px/s)
     const TILT_SCROLL_NUDGE_DECAY_PER_SEC = 4.5; // 衰減係數：比飄動字母的 6.5 稍慢一點，
                                                    // 捲動停下後風力多飄一下再歸零，跟陀螺儀的
                                                    // 銜接感覺更像「慢慢交棒」而不是硬停
@@ -4322,7 +4353,15 @@
 
     let tiltScrollLastY = window.scrollY;
     let tiltNudgeVY = 0;   // 目前累積的「風速」殘留值 (px/s)，每影格自然衰減
-    let tiltNudgeY = 0;    // 風速累積出來、目前套用在畫面上的實際位移 (px)
+    let tiltNudgeY = 0;    // 風速累積出來、目前套用在畫面上的實際位移 (px)，
+                            // 這是「floatDepth=1」基準下的位移量，跟陀螺儀那邊
+                            // 「tiltNormY（-1~1）× TILT_MAX_OFFSET」是同一個角色，
+                            // 各張照片實際顯示時再各自乘上自己的 floatDepth——
+                            // 所以下面會把這個值也夾在 ±TILT_MAX_OFFSET 之內，
+                            // 跟陀螺儀那條路徑用同一把尺，這樣不管位移是哪個
+                            // 來源疊出來的，最極端也只會到 TILT_MAX_OFFSET×
+                            // floatDepth（也就是最大 60×2.4＝144px），不會再有
+                            // 照片被吹出可視範圍外的情況。
     let tiltNudgeRafRunning = false;
     let tiltNudgeLastFrameTime = null;
 
@@ -4334,7 +4373,9 @@
       // 往下捲時頁面內容視覺上往上移動，這裡取負號讓風向跟內容捲動的
       // 實際視覺方向一致，跟 applyGridScrollNudge() 同一個理由。
       const impulse = Math.max(-TILT_SCROLL_NUDGE_MAX_IMPULSE, Math.min(TILT_SCROLL_NUDGE_MAX_IMPULSE, -delta * TILT_SCROLL_NUDGE_IMPULSE));
-      tiltNudgeVY += impulse;
+      // 疊加後立刻夾住總風速——見上面 TILT_SCROLL_NUDGE_MAX_VELOCITY 的
+      // 說明，這是修正「快速連續滑動時風速暴走」的關鍵一步。
+      tiltNudgeVY = scatterClamp(tiltNudgeVY + impulse, -TILT_SCROLL_NUDGE_MAX_VELOCITY, TILT_SCROLL_NUDGE_MAX_VELOCITY);
       ensureTiltNudgeLoop();
     }
     window.addEventListener('scroll', onTiltGridScroll, { passive: true });
@@ -4364,6 +4405,12 @@
       tiltNudgeLastFrameTime = now;
 
       tiltNudgeY += tiltNudgeVY * dt;
+      // 位移本身也夾在 ±TILT_MAX_OFFSET 之內（見上面 tiltNudgeY 宣告處的
+      // 說明）：就算風速真的衝到上限、又持續了一段時間，位移也不會超出
+      // 這個設計好的上限，只會貼著上限暫時打平，等使用者放手、風速自然
+      // 衰減之後，位移才會跟著平滑滑回 0——不會有「先夾住、放手瞬間又
+      // 忽然跳回去」那種不連續的頓挫感。
+      tiltNudgeY = scatterClamp(tiltNudgeY, -TILT_MAX_OFFSET, TILT_MAX_OFFSET);
       tiltNudgeVY *= Math.exp(-TILT_SCROLL_NUDGE_DECAY_PER_SEC * dt); // 指數衰減，dt 為基準，掉幀也不影響衰減的實際速度
 
       const settling = Math.abs(tiltNudgeVY) < TILT_NUDGE_SETTLE_EPS;
