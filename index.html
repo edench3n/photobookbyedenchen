@@ -4268,7 +4268,7 @@
       // 合計，讓兩邊來源可以同時反映在同一個 transform 上、互不覆蓋。
       tiltPending.forEach(({ item, thumbWrap, floatDepth, targetX, targetY, nowSettled }) => {
         tiltGyroOffsetState.set(item, nowSettled ? { x: 0, y: 0 } : { x: targetX, y: targetY });
-        writeTiltTransform(item, thumbWrap, targetX, targetY + tiltNudgeY * floatDepth);
+        writeTiltTransform(item, thumbWrap, targetX, targetY + tiltNudgeY * scrollNudgeDepthFactor(floatDepth));
       });
     }
 
@@ -4314,11 +4314,38 @@
     // 滑回 0，不是「捲動中」跟「捲動後」兩段互相獨立、切換瞬間銜接不上
     // 的關係，銜接處感覺不到硬切換，跟陀螺儀之間的過渡是連續的。
     const TILT_SCROLL_NUDGE_IMPULSE = 2.4;      // 捲動量轉換成風速的比例，量級沿用飄動字母那套
-    const TILT_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單次疊加的風速上限 (px/s)
+    const TILT_SCROLL_NUDGE_MAX_IMPULSE = 220;  // 單一 scroll 事件能疊加的風速上限 (px/s)
+    // ---------- 修正：快速滑動時最上層照片像瞬移一樣飛出去 ----------
+    // 成因：原本只夾了「單一 scroll 事件」的衝量上限，卻沒有夾「累積後
+    // 的風速總量」——快速滑動時瀏覽器一次會連續觸發幾十個 scroll 事件，
+    // 衰減（見下面 TILT_SCROLL_NUDGE_DECAY_PER_SEC）追不上疊加的速度，
+    // tiltNudgeVY 會越疊越高；乘上原本直接沿用陀螺儀那組 floatDepth
+    // （0.12～2.4，將近 20 倍差距）之後，最上層／最近的照片位移量被
+    // 放大到很誇張，看起來就是飛速瞬移。這裡另外加一個「風速總量」上限
+    // （TILT_SCROLL_NUDGE_MAX_TOTAL）跟「換算成位移後」的上限
+    // （TILT_SCROLL_NUDGE_MAX_OFFSET），兩層都夾住，不管滑得多快都不會
+    // 再無上限往上疊。
+    const TILT_SCROLL_NUDGE_MAX_TOTAL = 320;    // 風速累積後的總量上限 (px/s)，比單次衝量上限稍高，容許連續滑動時風力持續增強，但不會無限疊加
+    const TILT_SCROLL_NUDGE_MAX_OFFSET = 34;    // 換算成實際位移後的上限 (px)，depth 最高的照片也不會超過這個值太多
     const TILT_SCROLL_NUDGE_DECAY_PER_SEC = 4.5; // 衰減係數：比飄動字母的 6.5 稍慢一點，
                                                    // 捲動停下後風力多飄一下再歸零，跟陀螺儀的
                                                    // 銜接感覺更像「慢慢交棒」而不是硬停
     const TILT_NUDGE_SETTLE_EPS = 0.05; // px/s，風速小到這個程度視為完全靜止，停止繼續跑衰減迴圈
+    // ---------- 修正：只有最上層照片動很多，其他幾乎不動 ----------
+    // 陀螺儀那組 floatDepth（0.12～2.4）是刻意設計成「近的照片飄很多、
+    // 遠的幾乎不飄」，本來就是誇張化的比例；風力如果直接沿用同一組深度，
+    // 效果會被連帶放大成「只有最上層在動、其他都靜止」。這裡改用一組
+    // 壓縮過、專門給風力用的深度係數（0.78～1.22 倍），先把 floatDepth
+    // 換算成 0~1 的相對位置，再內插到這個窄很多的區間——這樣不管深淺，
+    // 全部照片捲動時都會有感、只是最上層那些比其他張多動一點點，
+    // 不是「只有它們在動」。
+    const TILT_SCROLL_NUDGE_DEPTH_MIN = 0.78;
+    const TILT_SCROLL_NUDGE_DEPTH_MAX = 1.22;
+    function scrollNudgeDepthFactor(floatDepth){
+      const span = TILT_DEPTH_MAX - TILT_DEPTH_MIN;
+      const t = span > 0 ? scatterClamp((floatDepth - TILT_DEPTH_MIN) / span, 0, 1) : 0.5;
+      return TILT_SCROLL_NUDGE_DEPTH_MIN + t * (TILT_SCROLL_NUDGE_DEPTH_MAX - TILT_SCROLL_NUDGE_DEPTH_MIN);
+    }
 
     let tiltScrollLastY = window.scrollY;
     let tiltNudgeVY = 0;   // 目前累積的「風速」殘留值 (px/s)，每影格自然衰減
@@ -4334,7 +4361,9 @@
       // 往下捲時頁面內容視覺上往上移動，這裡取負號讓風向跟內容捲動的
       // 實際視覺方向一致，跟 applyGridScrollNudge() 同一個理由。
       const impulse = Math.max(-TILT_SCROLL_NUDGE_MAX_IMPULSE, Math.min(TILT_SCROLL_NUDGE_MAX_IMPULSE, -delta * TILT_SCROLL_NUDGE_IMPULSE));
-      tiltNudgeVY += impulse;
+      // 累積後的風速總量也要夾住——單次衝量再小，滑得夠快、事件夠密集
+      // 一樣會無上限往上疊，這一層才是真正擋住「飛速瞬移」的關鍵。
+      tiltNudgeVY = scatterClamp(tiltNudgeVY + impulse, -TILT_SCROLL_NUDGE_MAX_TOTAL, TILT_SCROLL_NUDGE_MAX_TOTAL);
       ensureTiltNudgeLoop();
     }
     window.addEventListener('scroll', onTiltGridScroll, { passive: true });
@@ -4363,7 +4392,7 @@
       const dt = dtMs / 1000;
       tiltNudgeLastFrameTime = now;
 
-      tiltNudgeY += tiltNudgeVY * dt;
+      tiltNudgeY = scatterClamp(tiltNudgeY + tiltNudgeVY * dt, -TILT_SCROLL_NUDGE_MAX_OFFSET, TILT_SCROLL_NUDGE_MAX_OFFSET);
       tiltNudgeVY *= Math.exp(-TILT_SCROLL_NUDGE_DECAY_PER_SEC * dt); // 指數衰減，dt 為基準，掉幀也不影響衰減的實際速度
 
       const settling = Math.abs(tiltNudgeVY) < TILT_NUDGE_SETTLE_EPS;
@@ -4381,7 +4410,7 @@
         const gyro = tiltGyroOffsetState.get(item);
         const gyroX = gyro ? gyro.x : 0;
         const gyroY = gyro ? gyro.y : 0;
-        writeTiltTransform(item, thumbWrap, gyroX, gyroY + tiltNudgeY * floatDepth);
+        writeTiltTransform(item, thumbWrap, gyroX, gyroY + tiltNudgeY * scrollNudgeDepthFactor(floatDepth));
       });
 
       // 風力已經完全靜止、且沒有陀螺儀位移需要維持時，這個迴圈才真的
