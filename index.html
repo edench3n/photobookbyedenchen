@@ -4527,11 +4527,26 @@
   }
 
   function placeAndReveal(itemEl){
-    const boxW = hoverPreview.getBoundingClientRect().width || Math.min(window.innerWidth * 0.45, 650);
+    // 每次都先把寬度還原成 CSS 預設（45vw、最寬 650px）再量：上一張如果是直式照片被限縮過，
+    // 這裡才不會把上一次縮小的寬度誤當成這一張的預設寬度。
+    hoverPreview.style.width = '';
+    let boxW = hoverPreview.getBoundingClientRect().width || Math.min(window.innerWidth * 0.45, 650);
     const ratio = (itemEl.naturalHeight && itemEl.naturalWidth)
       ? itemEl.naturalHeight / itemEl.naturalWidth
       : 1;
-    const boxH = boxW * ratio;
+    let boxH = boxW * ratio;
+
+    // 直式（高 > 寬）照片：寬度固定 45vw 的話，高度 = 寬度 × 比例，很容易比螢幕還高，
+    // 圖片下緣就會超出畫面。這裡限制大圖高度不超過「螢幕高度 − 上下各留一個邊距」（邊距跟
+    // computeSafeRandomPosition() 的 margin 同一個數字 24px），超過的話把寬度依照片比例等比例縮小，
+    // 讓整張圖完整留在螢幕內，不裁切、不變形。橫式照片高度本來就夠小，完全不受影響。
+    const viewportMargin = 24;
+    const maxBoxH = Math.max(120, window.innerHeight - viewportMargin * 2);
+    if(boxH > maxBoxH){
+      boxW = maxBoxH / ratio;
+      boxH = maxBoxH;
+      hoverPreview.style.width = boxW + 'px';
+    }
 
     const excludeRect = itemEl.getBoundingClientRect();
     const pos = computeSafeRandomPosition(excludeRect, boxW, boxH);
