@@ -2624,10 +2624,13 @@
   //   跳轉時用的是 stepPreviewSide(side, true)：照片已經在 readyCache 裡，會同步一次到位換上
   //   高畫質版本，不會先閃縮圖、也不會有等待。
   const COVER_JUMP_SEQUENCE = ['left', 'right', 'left', 'right', 'left', 'right', 'left', 'right']; // 8 下＝左右左右 × 2 輪
-  // 第一下到最後一下的總跨度（固定不變）。原本 4 下 × 400ms 間隔 = 1200ms，改成 8 下之後總時長維持
-  // 不變，所以相鄰兩下的間隔改由這個跨度自動平均分配：間隔 = WINDOW ÷ (下數 − 1)（8 下 ≈ 171ms）。
-  // 最後一下仍然對齊 endCoverText()，前面依序往前推。
-  const COVER_JUMP_WINDOW_MS = 1200;
+  // 第一下跳轉的時間點＝全白遮罩完全淡出（COVER_TEXT_REVEAL_LEAD_MS）之後，再等這一小段緩衝。
+  // 原本第一下排在 1.3s，遮罩 0.5s 就淡完了，中間約 0.8 秒畫面是靜止的，使用者會感覺「停頓一下
+  // 才開始跳」；改成遮罩一淡完、只留很短的一拍（讓人看得到起始照片）就開始跳。最後一下仍然固定
+  // 對齊 endCoverText()（大字消失／飄動物件淡入），所以總時長不變，相鄰兩下的間隔由「第一下到
+  // 最後一下」的跨度自動平均分配：間隔 = (結束時間 − 第一下時間) ÷ (下數 − 1)。
+  // 想要更快開始跳就把這個數字調小（0＝遮罩一淡完立刻跳），想要多停一拍就調大。
+  const COVER_JUMP_START_DELAY_MS = 150;
   const COVER_JUMP_LOAD_TIMEOUT_MS = 3500;    // 這幾張照片最多等這麼久，逾時就放棄跳轉
   let coverJumpPlan = null;        // 準備好的跳轉計畫：[{side, idx}, ...]；null＝沒有（放棄或還沒好）
   let coverJumpsSettled = false;   // 跳轉照片的準備流程已經有結果（成功／失敗／逾時）
@@ -2707,7 +2710,8 @@
     const n = coverJumpPlan.length;
     // 前 n-1 下用計時器；最後一下由 endCoverText() 自己在放行的同一個同步區塊內執行，
     // 確保「最後一跳」跟「飄動物件／header 淡入開始」是同一影格。
-    const interval = n > 1 ? COVER_JUMP_WINDOW_MS / (n - 1) : 0; // 總跨度固定，間隔自動平均分配
+    const firstMs = Math.min(endMs, COVER_TEXT_REVEAL_LEAD_MS + COVER_JUMP_START_DELAY_MS); // 第一下的時間點
+    const interval = n > 1 ? (endMs - firstMs) / (n - 1) : 0; // 第一下到最後一下平均分配
     for(let i = 0; i < n - 1; i++){
       const t = Math.max(0, Math.round(endMs - (n - 1 - i) * interval));
       setTimeout(() => coverJumpAt(i), t);
@@ -2843,10 +2847,15 @@
       clearTimeout(initialRevealGraceTimer);
       initialRevealGraceTimer = null;
       if(!initialRevealExtraBufferTimer){
+        // 這一段額外緩衝是為了讓飄動的 e 撞牆用的候選圖有更多時間載入。有封面大字時，飄動物件
+        // 本來就會被壓住（隱形、不能撞牆）整整 COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS
+        // ＝2.5 秒才放行，這段時間足夠背景載完，不需要再讓使用者對著白畫面多等 450ms；
+        // 沒有封面大字（圖片失敗／已經播過）時維持原本的緩衝。
+        const extraBufferMs = (coverTextLoaded && !coverTextConsumed) ? 0 : INITIAL_REVEAL_EXTRA_BUFFER_MS;
         initialRevealExtraBufferTimer = setTimeout(() => {
           initialRevealExtraBufferTimer = null;
           revealInitialChrome();
-        }, INITIAL_REVEAL_EXTRA_BUFFER_MS);
+        }, extraBufferMs);
       }
       return;
     }
@@ -6549,8 +6558,17 @@
   // 多暖 2 步（等於隨時保留 3 張的下載/解碼緩衝）在幾乎不增加多少流量的
   // 前提下，能大幅降低這種「連續切換太快、暖機追不上」的機率。
   const WARM_AHEAD_COUNT = 2;
+  // 進站流程是 preparePreviewSequences()（照片清單一到手）→ 稍後 openPreviewPage() 各呼叫一次
+  // warmPreviewStart()，而 warmPreviewStart() 每次都會「重新隨機挑起點」——結果第一次挑的起點
+  // 剛開始下載，第二次又換一批，前一批 3+3 張高畫質圖白白浪費頻寬、還跟真正要顯示的照片搶連線，
+  // 進站的白畫面因此更久。這個旗標標記「進站當下已經挑好、暖機好起點了」，第一次 openPreviewPage()
+  // 直接沿用（只消耗一次），之後使用者重新進入 preview 頁仍然照原本規則重新隨機。
+  let previewStartChosenAtLoad = false;
 
-  function warmPreviewStart(){
+  // reuseStart：true＝沿用已經挑好的起點（不重新隨機），只補暖機；aheadCount：往後多暖機幾步
+  //（預設 WARM_AHEAD_COUNT），進站第一次會拉高到「封面大字跳轉要用的張數」，讓那批照片跟起始張
+  // 同時平行下載，而不是等起始張好了才排隊開始載（見 prepareCoverJumps()）。
+  function warmPreviewStart(reuseStart, aheadCount){
     // 起始張不再固定（原本左邊永遠是最後一張、右邊永遠是第一張），改成
     // 每次都在各自那一側的序列裡隨機挑一張當起點——單號／雙號分兩邊的
     // 規則完全不受影響（previewEvenPhotos / previewOddPhotos 這兩個序列
@@ -6558,8 +6576,10 @@
     // 除了頁面第一次載入會呼叫一次，使用者每次重新進入 preview 頁
     // （openPreviewPage）也都會呼叫一次，所以「重新整理」跟「每次點進
     // preview 頁」都會拿到新的隨機起點。
-    previewLeftIdx = previewEvenPhotos.length ? Math.floor(Math.random() * previewEvenPhotos.length) : 0;
-    previewRightIdx = previewOddPhotos.length ? Math.floor(Math.random() * previewOddPhotos.length) : 0;
+    if(!reuseStart){
+      previewLeftIdx = previewEvenPhotos.length ? Math.floor(Math.random() * previewEvenPhotos.length) : 0;
+      previewRightIdx = previewOddPhotos.length ? Math.floor(Math.random() * previewOddPhotos.length) : 0;
+    }
     if(previewEvenPhotos.length){
       warmPreviewPlaceholder(previewEvenPhotos[previewLeftIdx]);
       resolvePreviewImage(previewEvenPhotos[previewLeftIdx], previewResolvedLeft, previewReadyLeft, previewLeftIdx);
@@ -6578,7 +6598,8 @@
     // preparePreviewSequences 在照片清單一到手就會呼叫這個函式）就開始
     // 下載，通常會有遠超過 0.5 秒的提前量，等真正切換到它時多半早就已經
     // 載完。
-    for(let step = 1; step <= WARM_AHEAD_COUNT; step++){
+    const aheadSteps = aheadCount || WARM_AHEAD_COUNT;
+    for(let step = 1; step <= aheadSteps; step++){
       if(previewEvenPhotos.length > 1){
         const nextLeftIdx = (previewLeftIdx - step + previewEvenPhotos.length * 2) % previewEvenPhotos.length;
         warmPreviewPlaceholder(previewEvenPhotos[nextLeftIdx]);
@@ -6601,7 +6622,11 @@
     // 真正「馬上」要用到的，只有起始畫面 + 前面幾步（warmPreviewStart 裡的
     // WARM_AHEAD_COUNT），這裡先同步暖機好，維持原本「點進去/自動開啟
     // preview 馬上就能看到照片」的保證。
-    warmPreviewStart();
+    // 進站第一次：起始張＋封面大字跳轉每一側要用到的張數，一起立刻開始平行下載
+    const coverLeftSteps = COVER_JUMP_SEQUENCE.filter((sd) => sd === 'left').length;
+    const coverRightSteps = COVER_JUMP_SEQUENCE.length - coverLeftSteps;
+    warmPreviewStart(false, Math.max(WARM_AHEAD_COUNT, coverLeftSteps, coverRightSteps));
+    previewStartChosenAtLoad = true; // 第一次 openPreviewPage() 沿用這組起點，不要再重新隨機一次
     // 剩下「兩條序列全部照片」的極小圖（320px），是給撞牆跳轉「撞太快/
     // 連續撞擊」這種次要情境用的保險，不是進站當下就要用的東西。原本這裡
     // 用 forEach 一次性把全部照片的極小圖請求同時發出去，等於是拿這種次要
@@ -14996,7 +15021,9 @@
 
     // 每次重新進入都重新隨機挑一張起始張（見 warmPreviewStart 內的說明），
     // 並確保起始畫面已經暖機好，這裡如果先前已經暖過就直接沿用快取，幾乎不用等
-    warmPreviewStart();
+    const reuseLoadStart = previewStartChosenAtLoad; // 進站第一次：沿用 preparePreviewSequences() 已經暖機好的起點
+    previewStartChosenAtLoad = false;
+    warmPreviewStart(reuseLoadStart);
     startPreviewCycle();
 
     // 注意：EDEN 飄動字現在是貫穿全站的元素，從進站那一刻就開始跑，
