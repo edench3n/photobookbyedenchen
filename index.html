@@ -1236,6 +1236,82 @@
     transition:none !important;
   }
 
+  /* ---------- 進站首次：preview 頁兩塊照片區域正中央的封面大字 ----------
+     使用者需求：第一次進站、剛看到 preview 頁時，兩塊照片區域的正中央各顯示一張大字 PNG
+     （左／上：橫式 "photographs + shapes"，2269×748px；右／下：直式 "by edenchen"，
+     740×1751px）。這段期間飄動物件先不出現，2 秒後兩塊字快速淡出、飄動物件同時淡入
+     （順便替飄動物件多爭取一點載入時間）。只有「這次頁面載入的第一次進站」才會有，
+     重新整理會重來；之後手動切換 preview／首頁都不會再出現（做法跟堆疊頁面規則說明圖
+     「這次頁面載入只顯示一次」同一套邏輯，見 JS 封面大字那段）。
+     用 body 的 class 控制狀態，不動任何既有元素的 CSS：
+       cover-text-active   兩塊大字顯示中（opacity 1）
+       cover-text-leaving  大字淡出中（.25s）
+       dvd-cover-hold      壓住飄動物件（隱形、物理迴圈暫停、不能抓），時間到才放行
+     兩張圖的大小「共用同一個縮放單位 --cover-unit」：寬高各 = 原始 px × --cover-unit，
+     所以兩張圖的比例永遠等於實際檔案尺寸的比例（不會有一張被單獨放大縮小）。
+       桌機：以設計稿為準——設計稿整張封面 7958×3615px，橫式大字寬度 2269px
+       約佔 28.5%（＝左邊那塊區域寬度的 57%），所以 --cover-unit = 100vw / 7958（同時用
+       100vh / 3615 取小，螢幕比設計稿更寬扁時以高度為準，兩塊字不會超出畫面）。
+       平板（641~1100px）：兩塊區域各只有螢幕寬度的一半，照桌機比例會偏小，橫式大字放大到
+       螢幕寬度的 36%（約佔區域寬度的 72%），直式大字高度不超過螢幕高度的 45%。
+       手機（≤640px）：兩塊區域是上下疊放、各自等於整個螢幕寬度，大字要相對放大：橫式大字
+       寬度佔螢幕寬的 68%，同時限制直式大字高度不超過螢幕高度的 40%。
+     .preview-col img 那組規則（inset:0／滿版／object-fit:cover／transition:none !important）
+     會連這兩張圖一起吃到，所以下面用更高優先權（多一層 .preview-cover-text）逐項蓋掉。 */
+  .preview-col img.preview-cover-text{
+    --cover-unit: min(100vw / 7958, 100vh / 3615);
+    position:absolute;
+    inset:auto;
+    left:50%;
+    top:50%;
+    transform: translate(-50%, -50%);
+    object-fit:contain;
+    background:transparent;
+    opacity:0;
+    pointer-events:none;
+    -webkit-user-select:none;
+    user-select:none;
+    z-index:2;
+  }
+  @supports (height: 100dvh){
+    .preview-col img.preview-cover-text{ --cover-unit: min(100vw / 7958, 100dvh / 3615); }
+  }
+  .preview-col img.preview-cover-text-left{
+    width: calc(2269 * var(--cover-unit));
+    height: calc(748 * var(--cover-unit));
+  }
+  .preview-col img.preview-cover-text-right{
+    width: calc(740 * var(--cover-unit));
+    height: calc(1751 * var(--cover-unit));
+  }
+  body.cover-text-active .preview-col img.preview-cover-text{
+    opacity:1;
+  }
+  body.cover-text-active.cover-text-leaving .preview-col img.preview-cover-text{
+    opacity:0;
+    transition: opacity .25s ease !important;
+  }
+  /* 大字顯示期間壓住飄動物件：完全隱形、不接收互動（見 JS：物理迴圈同時暫停）。
+     規則一拿掉，.dvd-bounce 原本的 opacity .3s ease 就會讓它淡入。 */
+  body.dvd-cover-hold .dvd-bounce{
+    opacity:0 !important;
+    transition:none !important;
+  }
+  /* 平板（641~1100px）：見上面說明 */
+  @media (min-width: 640.02px) and (max-width: 1100px){
+    .preview-col img.preview-cover-text{ --cover-unit: min(36vw / 2269, 45vh / 1751); }
+    @supports (height: 100dvh){
+      .preview-col img.preview-cover-text{ --cover-unit: min(36vw / 2269, 45dvh / 1751); }
+    }
+  }
+  /* 手機：上下兩塊區域，大字相對螢幕放大（見上面說明） */
+  @media (max-width: 640px){
+    .preview-col img.preview-cover-text{ --cover-unit: min(68vw / 2269, 40vh / 1751); }
+    @supports (height: 100dvh){
+      .preview-col img.preview-cover-text{ --cover-unit: min(68vw / 2269, 40dvh / 1751); }
+    }
+  }
+
   /* 手機：左右兩欄改成上下兩欄。只改排版方向跟每欄的寬高比例，跳轉的時機/節奏
      （JS 那邊完全沒動）跟每張照片的填滿方式（object-fit:cover）都維持不變。 */
   @media (max-width: 640px){
@@ -2169,9 +2245,15 @@
   <div class="preview-page" id="previewPage">
     <div class="preview-col preview-left">
       <img id="previewLeftImg" alt="" draggable="false">
+      <!-- 進站首次才會出現的封面大字（"photographs + shapes"），置中在左邊這塊照片區域
+           （手機是上面那塊）正中央。src 由 JS 依 COVER_TEXT_SRC 指定，見 JS「封面大字」
+           那段的完整說明；載入失敗或已經播放過會被 JS 直接從 DOM 移除。 -->
+      <img class="preview-cover-text preview-cover-text-left" id="coverTextLeft" alt="" aria-hidden="true" draggable="false">
     </div>
     <div class="preview-col preview-right">
       <img id="previewRightImg" alt="" draggable="false">
+      <!-- 同上，右邊（手機是下面）那塊照片區域正中央的直式大字 "by edenchen" -->
+      <img class="preview-cover-text preview-cover-text-right" id="coverTextRight" alt="" aria-hidden="true" draggable="false">
     </div>
   </div>
 
@@ -2451,6 +2533,78 @@
   // initial-reveal-pending 這個 class 了，classList.remove 對本來就沒有
   // 的 class 是無害的重複操作，不會有任何多餘動作或閃爍。
   let initialChromeRevealed = false;
+
+  // ---------- 進站首次：preview 頁兩塊照片區域正中央的封面大字 ----------
+  // 對應 CSS「進站首次：preview 頁兩塊照片區域正中央的封面大字」那段（完整需求說明在那裡）。
+  // 流程：① 腳本一開始就預先載入＋解碼兩張 PNG，並把「載好了沒」併進 attemptInitialReveal()
+  // 的放行條件（跟 preview 照片／飄動物件同一套：全部準備好才一起淡入）；② revealInitialChrome()
+  // 放行的同一刻掛上 body.cover-text-active（大字出現）＋body.dvd-cover-hold（飄動物件先
+  // 隱形、物理迴圈暫停）；③ 全白遮罩淡出完、再撐滿 COVER_TEXT_SHOW_MS 之後，endCoverText()
+  // 讓大字用 .25s 快速淡出、同一刻拿掉 dvd-cover-hold 讓飄動物件淡入。
+  // 「只有第一次」＝這次頁面載入只播一次：coverTextConsumed 記錄已經用掉，重新整理 JS 重跑、
+  // 旗標歸零就會重播（跟堆疊頁面規則圖 pfRulesShownThisPageLoad 同一種邏輯）。
+  // 圖片載入失敗／逾時／檔案還沒上傳：一律直接跳過封面大字、走原本的進站流程（飄動物件照常
+  // 出現），不會卡住任何東西。
+  // ★ 兩張圖放在網站根目錄（跟 pf-rules.png、favicon 同一層），檔名沿用原始檔名
+  //   封面大字-04.png／封面大字-05.png；encodeURI 把中文檔名轉成網址用的編碼。
+  //   之後檔名或位置有變，只要改這兩個字串就好。
+  const COVER_TEXT_SRC = {
+    left:  encodeURI('/封面大字-04.png'),   // 橫式 "photographs + shapes"（原檔 2269×748px）
+    right: encodeURI('/封面大字-05.png')    // 直式 "by edenchen"（原檔 740×1751px）
+  };
+  const COVER_TEXT_SHOW_MS = 2000;          // 大字「完整看得見」的時間，之後才開始淡出
+  const COVER_TEXT_REVEAL_LEAD_MS = 500;    // 全白遮罩淡出所需時間（.5s），從畫面真的看得到那刻起算
+  const COVER_TEXT_FADE_MS = 250;           // 大字淡出時間，要跟 CSS 的 .25s 一致
+  const COVER_TEXT_LOAD_TIMEOUT_MS = 3000;  // 圖片最多等這麼久，逾時就當作沒有這個效果
+  const coverTextLeftEl = document.getElementById('coverTextLeft');
+  const coverTextRightEl = document.getElementById('coverTextRight');
+  let coverTextSettled = false;   // 圖片載入流程已經有結果（成功／失敗／逾時），可以放行
+  let coverTextLoaded = false;    // 兩張都成功載入並解碼完成
+  let coverTextConsumed = false;  // 這次頁面載入已經處理過（不管有沒有真的顯示）
+  let coverTextTimer = null;
+  function removeCoverTextEls(){
+    if(coverTextLeftEl) coverTextLeftEl.remove();
+    if(coverTextRightEl) coverTextRightEl.remove();
+  }
+  function settleCoverText(loaded){
+    if(coverTextSettled) return;
+    coverTextSettled = true;
+    coverTextLoaded = !!loaded;
+    if(!loaded) removeCoverTextEls();
+    attemptInitialReveal(); // 補問一次：可能剛好只差這個條件
+  }
+  (function preloadCoverText(){
+    if(!coverTextLeftEl || !coverTextRightEl){ setTimeout(() => settleCoverText(false), 0); return; } // 不能同步呼叫：attemptInitialReveal() 用到的旗標宣告在這段後面（let 尚未初始化）
+    const timer = setTimeout(() => settleCoverText(false), COVER_TEXT_LOAD_TIMEOUT_MS);
+    const load = (el, src) => new Promise((resolve, reject) => {
+      el.addEventListener('error', reject, { once:true });
+      el.src = src;
+      if(el.decode) el.decode().then(resolve, reject);
+      else el.addEventListener('load', resolve, { once:true });
+    });
+    Promise.all([load(coverTextLeftEl, COVER_TEXT_SRC.left), load(coverTextRightEl, COVER_TEXT_SRC.right)])
+      .then(() => { clearTimeout(timer); settleCoverText(true); })
+      .catch(() => { clearTimeout(timer); settleCoverText(false); });
+  })();
+  // 兩塊大字淡出＋飄動物件同一刻淡入。飄動物件的「彈入」寫法跟 revealInitialChrome() 原本一模一樣
+  // （dvd-reveal 目前沒有任何視覺差異，實際效果是外層 .dvd-bounce 原本的 opacity .3s 淡入）。
+  function endCoverText(){
+    coverTextTimer = null;
+    document.body.classList.add('cover-text-leaving');
+    document.body.classList.remove('dvd-cover-hold');
+    if(dvdBounce){
+      dvdBounce.classList.add('dvd-reveal');
+      clearTimeout(dvdBounce._revealPopTimer);
+      dvdBounce._revealPopTimer = setTimeout(() => {
+        dvdBounce.classList.remove('dvd-reveal');
+      }, 650);
+    }
+    setTimeout(() => {
+      document.body.classList.remove('cover-text-active', 'cover-text-leaving');
+      removeCoverTextEls(); // 用完就從 DOM 拿掉，之後 preview 頁完全回到原本的樣子
+    }, COVER_TEXT_FADE_MS + 150);
+  }
+
   // 全白遮罩淡出：完整說明見上面 CSS .initial-load-overlay 那段。跟
   // initial-reveal-pending 拿掉的同一刻觸發，用 .hide 這個 class 讓遮罩
   // 從不透明的白色用 .5s 淡出成透明，畫面上看起來就是「從全白淡入到
@@ -2470,8 +2624,23 @@
   function revealInitialChrome(){
     if(initialChromeRevealed) return;
     initialChromeRevealed = true;
+    // 封面大字（見上面 preloadCoverText() 那段）：兩張圖真的都載好、而且這次頁面載入還沒播過才顯示。
+    // 一定要「先掛上 cover-text-active／dvd-cover-hold，再拿掉 initial-reveal-pending」，兩件事在
+    // 同一個同步區塊內完成，瀏覽器不會有任何一影格漏出還沒該出現的飄動物件。
+    const showCoverText = coverTextLoaded && !coverTextConsumed;
+    coverTextConsumed = true;
+    if(showCoverText){
+      document.body.classList.add('cover-text-active', 'dvd-cover-hold');
+    }else{
+      removeCoverTextEls();
+    }
     document.body.classList.remove('initial-reveal-pending');
     hideInitialLoadOverlay();
+    if(showCoverText){
+      // 飄動物件的淡入延後到 endCoverText()，這裡不做
+      coverTextTimer = setTimeout(endCoverText, COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS);
+      return;
+    }
     // 飄動的 e 首次進站專用的縮放彈入（見上面 CSS .dvd-bounce.dvd-reveal
     // 的完整說明）：跟拿掉遮罩同一刻加上 dvd-reveal，讓內層圖片從
     // scale(0) 用 .6s 的回彈曲線放大到正常大小；動畫時間一到就把這個
@@ -2536,7 +2705,7 @@
   let initialRevealExtraBufferTimer = null;
   function attemptInitialReveal(){
     if(initialChromeRevealed) return;
-    if(previewReadyForInitialReveal && dvdReadyForInitialReveal){
+    if(previewReadyForInitialReveal && dvdReadyForInitialReveal && coverTextSettled){
       clearTimeout(initialRevealGraceTimer);
       initialRevealGraceTimer = null;
       if(!initialRevealExtraBufferTimer){
@@ -6637,7 +6806,9 @@
     dvdRealImageReady = true;
     const chromeAlreadyRevealed = initialChromeRevealed; // 見上面 revealInitialChrome() 的說明
     dvdBounce.classList.remove('dvd-image-pending');
-    if(chromeAlreadyRevealed){
+    // 封面大字顯示期間（dvd-cover-hold）飄動物件本來就被壓住，先不用彈入；
+    // 等 endCoverText() 放行那一刻自己會處理淡入。
+    if(chromeAlreadyRevealed && !document.body.classList.contains('dvd-cover-hold')){
       // 整體首屏（header／照片）那一組已經先淡入過了，飄動物件因為圖片庫
       // 還沒準備好才多等了這一下——這裡額外補一次跟「首次進站」同樣的
       // 縮放彈入動畫（見 revealInitialChrome() 內同樣的寫法），讓它終於
@@ -9209,7 +9380,11 @@
     // 看得到的首屏渲染工作。dvdLastTime 順便清成 null，等真的被放行看得
     // 見的那一刻，第一影格的 dt 會重新從 0 起算，不會因為這段跳過期間
     // 沒有更新 dvdLastTime，一放行就補一大段位移、瞬間跳一下。
-    if(document.body.classList.contains('initial-reveal-pending')){
+    // 封面大字顯示期間（body.dvd-cover-hold，見 endCoverText()）飄動物件被壓住、看不到，
+    // 跟 initial-reveal-pending 同樣道理：整套移動／撞牆運算先暫停，只保留 RAF 鏈不中斷，
+    // 也不會有機會在隱形期間撞牆換圖或觸發 preview 頁換照片。
+    if(document.body.classList.contains('initial-reveal-pending') ||
+       document.body.classList.contains('dvd-cover-hold')){
       dvdLastTime = null;
       dvdRAF = requestAnimationFrame(stepDvdBounce);
       return;
@@ -10031,7 +10206,7 @@
     // 真正看得到、可以互動的元素；只有飄動的 e 真的顯示在畫面上时，才
     // 需要攔截、判斷是不是要抓取它，跟原本手機版「抓不到飄動字」那個
     // 問題的修法互不影響。
-    if(dvdBounce.classList.contains('dvd-hidden')) return;
+    if(dvdBounce.classList.contains('dvd-hidden') || document.body.classList.contains('dvd-cover-hold')) return; // 封面大字顯示期間飄動物件隱形，不能被抓（見 endCoverText()）
     // ---------- 修正：「手機版桌布截圖預覽彈窗，back 按鈕偶爾按了沒反應」----------
     // 成因：進入桌布截圖預覽彈窗時，飄動的 e（#dvdBounce）並不會被標記成
     // dvd-hidden（那個 class 只在照片詳細頁才會加上）——它其實還停在物理
@@ -10119,7 +10294,7 @@
     // 跟上面 touchstart 監聽器同樣的理由（見該處完整說明）：飄動的 e
     // 隱藏狀態（dvd-hidden）時，它的邊界框只是停在最後位置的「隱形」
     // 矩形，不該繼續攔截落在它範圍內的點擊/觸控，直接放行。
-    if(dvdBounce.classList.contains('dvd-hidden')) return;
+    if(dvdBounce.classList.contains('dvd-hidden') || document.body.classList.contains('dvd-cover-hold')) return; // 封面大字顯示期間飄動物件隱形，不能被抓（見 endCoverText()）
     // 跟上面 touchstart 監聽器同樣的理由（見該處「桌布截圖預覽彈窗，back
     // 按鈕偶爾按了沒反應」那段完整說明）：桌布預覽彈窗開著時，e 的隱形
     // 矩形一樣不該繼續攔截落在它範圍內的點擊/觸控，直接放行，讓觸控正常
