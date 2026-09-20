@@ -1239,13 +1239,13 @@
   /* ---------- 進站首次：preview 頁兩塊照片區域正中央的封面大字 ----------
      使用者需求：第一次進站、剛看到 preview 頁時，兩塊照片區域的正中央各顯示一張大字 PNG
      （左／上：橫式 "photographs + shapes"，2269×748px；右／下：直式 "by edenchen"，
-     740×1751px）。這段期間飄動物件先不出現，2 秒後兩塊字快速淡出、飄動物件同時淡入
+     740×1751px）。這段期間飄動物件先不出現，2 秒後兩塊字跟著最後一組照片跳轉「瞬間消失」、飄動物件／header 同一刻開始淡入
      （順便替飄動物件多爭取一點載入時間）。只有「這次頁面載入的第一次進站」才會有，
      重新整理會重來；之後手動切換 preview／首頁都不會再出現（做法跟堆疊頁面規則說明圖
      「這次頁面載入只顯示一次」同一套邏輯，見 JS 封面大字那段）。
      用 body 的 class 控制狀態，不動任何既有元素的 CSS：
        cover-text-active   兩塊大字顯示中（opacity 1）
-       cover-text-leaving  大字淡出中（.45s）
+       cover-text-leaving  大字已瞬間消失、飄動物件／header／時鐘淡入中（.3s）
        dvd-cover-hold      壓住飄動物件（隱形、物理迴圈暫停、不能抓）＋上方 header 小文字／時鐘（隱形），
                            時間到才一起放行
      兩張圖的大小「共用同一個縮放單位 --cover-unit」：寬高各 = 原始 px × --cover-unit，
@@ -1288,21 +1288,28 @@
   body.cover-text-active .preview-col img.preview-cover-text{
     opacity:1;
   }
+  /* 每一側的大字，在「那一側最後一次換照片」的同一影格瞬間消失：左邊照片最後一次切換時
+     左邊大字跟著消失、右邊照片最後一次切換時右邊大字跟著消失（JS coverJumpAt() 加上這個 class）。
+     用 !important 蓋過上面 cover-text-active 的 opacity:1；不淡出，直接不見。 */
+  .preview-col img.preview-cover-text.cover-text-gone{
+    opacity:0 !important;
+    transition:none !important;
+  }
   body.cover-text-active.cover-text-leaving .preview-col img.preview-cover-text{
     opacity:0;
-    transition: opacity .45s ease !important;
+    transition: none !important; /* 保底：萬一沒有跳轉計畫（照片沒載好而放棄跳轉），最後一刻兩邊大字一起瞬間消失 */
   }
-  /* 大字淡出 ↔ 飄動物件／header 小文字／時鐘淡入，全部用同一個時長（.45s，要跟 JS
-     COVER_TEXT_FADE_MS 一致），讓切換是同步的一段交叉淡化。只覆蓋 transition-duration，
+  /* 大字都消失之後（最後一下照片跳轉的同一刻），飄動物件／header 小文字／時鐘才開始淡入（淡入
+     時長 .3s，比原本 .45s 快一點；要跟 JS COVER_TEXT_FADE_MS 一致）。只覆蓋 transition-duration，
      其他 transition 設定（屬性、曲線）維持各元素原本的樣子。 */
   body.cover-text-leaving .dvd-bounce,
   body.cover-text-leaving .fixed-header,
   body.cover-text-leaving .page-clock{
-    transition-duration: .45s !important;
+    transition-duration: .3s !important;
   }
   /* 大字顯示期間，除了飄動物件之外，上方那排小文字（.fixed-header：Photobook by edenchen／
      Preview／Collab at…，各版本 preview 頁都一樣）和當下時間（.page-clock）也一起壓住：
-     全部完全隱形，等大字淡出的同一刻才跟飄動物件一起淡入。飄動物件另外在 JS 暫停物理迴圈、
+     全部完全隱形，等大字瞬間消失的同一刻才跟飄動物件一起淡入。飄動物件另外在 JS 暫停物理迴圈、
      不能被抓（見 JS endCoverText()）。規則一拿掉，各元素原本的 opacity 淡入 transition
      （飄動物件 .3s ease；header 文字跟原本進站淡入同一套）就會自己生效。
      header 期間 pointer-events 也關掉，避免使用者點到還看不到的 Preview／首頁標籤。 */
@@ -2558,7 +2565,7 @@
   // 的放行條件（跟 preview 照片／飄動物件同一套：全部準備好才一起淡入）；② revealInitialChrome()
   // 放行的同一刻掛上 body.cover-text-active（大字出現）＋body.dvd-cover-hold（飄動物件先
   // 隱形、物理迴圈暫停）；③ 全白遮罩淡出完、再撐滿 COVER_TEXT_SHOW_MS 之後，endCoverText()
-  // 讓大字用 .25s 快速淡出、同一刻拿掉 dvd-cover-hold 讓飄動物件淡入。
+  // 讓兩邊大字各自跟著自己那一側最後一次換照片瞬間消失（見 coverJumpAt()）、最後一下同一刻拿掉 dvd-cover-hold 讓飄動物件淡入。
   // 「只有第一次」＝這次頁面載入只播一次：coverTextConsumed 記錄已經用掉，重新整理 JS 重跑、
   // 旗標歸零就會重播（跟堆疊頁面規則圖 pfRulesShownThisPageLoad 同一種邏輯）。
   // 圖片載入失敗／逾時／檔案還沒上傳：一律直接跳過封面大字、走原本的進站流程（飄動物件照常
@@ -2572,7 +2579,7 @@
   };
   const COVER_TEXT_SHOW_MS = 2000;          // 大字「完整看得見」的時間，之後才開始淡出
   const COVER_TEXT_REVEAL_LEAD_MS = 500;    // 全白遮罩淡出所需時間（.5s），從畫面真的看得到那刻起算
-  const COVER_TEXT_FADE_MS = 450;           // 大字淡出／飄動物件與 header 淡入的時間，要跟 CSS 的 .45s 一致
+  const COVER_TEXT_FADE_MS = 300;           // 飄動物件／header／時鐘淡入的時間，要跟 CSS 的 .3s 一致（大字本身是瞬間消失，沒有淡出）
   const COVER_TEXT_LOAD_TIMEOUT_MS = 3000;  // 圖片最多等這麼久，逾時就當作沒有這個效果
   const coverTextLeftEl = document.getElementById('coverTextLeft');
   const coverTextRightEl = document.getElementById('coverTextRight');
@@ -2678,6 +2685,23 @@
     if(!previewActive) return; // 使用者已經離開 preview 頁，不用再跳
     stepPreviewSide(side, true);
   }
+  // 某一側的封面大字瞬間消失（沒有淡出）：CSS .cover-text-gone 直接把 opacity 設成 0
+  function hideCoverTextSide(side){
+    const el = side === 'left' ? coverTextLeftEl : coverTextRightEl;
+    if(el) el.classList.add('cover-text-gone');
+  }
+  // 執行第 i 下跳轉；如果這是「那一側」最後一次切換（計畫裡後面已經沒有同一側的跳轉），
+  // 就在同一個同步區塊內讓那一側的大字瞬間消失——照片換掉跟大字不見是同一影格。
+  // 左邊：第 7 下（倒數第二下）；右邊：第 8 下（最後一下）。
+  function coverJumpAt(i){
+    if(!coverJumpPlan) return;
+    const side = coverJumpPlan[i].side;
+    coverJump(side);
+    for(let j = i + 1; j < coverJumpPlan.length; j++){
+      if(coverJumpPlan[j].side === side) return; // 這一側後面還有跳轉，大字先留著
+    }
+    hideCoverTextSide(side);
+  }
   function scheduleCoverJumps(endMs){
     if(!coverJumpPlan) return;
     const n = coverJumpPlan.length;
@@ -2686,16 +2710,17 @@
     const interval = n > 1 ? COVER_JUMP_WINDOW_MS / (n - 1) : 0; // 總跨度固定，間隔自動平均分配
     for(let i = 0; i < n - 1; i++){
       const t = Math.max(0, Math.round(endMs - (n - 1 - i) * interval));
-      setTimeout(() => coverJump(coverJumpPlan[i].side), t);
+      setTimeout(() => coverJumpAt(i), t);
     }
   }
 
-  // 兩塊大字淡出＋飄動物件同一刻淡入。飄動物件的「彈入」寫法跟 revealInitialChrome() 原本一模一樣
+  // 兩塊大字各自在自己那一側最後一次換照片時瞬間消失（左邊在 coverJumpAt() 倒數第二下、右邊在這裡最後一下）；
+  // 最後一下的同一刻，飄動物件／header 開始淡入。飄動物件的「彈入」寫法跟 revealInitialChrome() 原本一模一樣
   // （dvd-reveal 目前沒有任何視覺差異，實際效果是外層 .dvd-bounce 原本的 opacity .3s 淡入）。
   function endCoverText(){
     coverTextTimer = null;
-    // 最後一跳：跟下面「大字淡出／飄動物件與 header 淡入」同一個同步區塊，同一影格發生
-    if(coverJumpPlan) coverJump(coverJumpPlan[coverJumpPlan.length - 1].side);
+    // 最後一跳（右邊）：右邊大字跟著這一下瞬間消失，並跟下面「飄動物件與 header 開始淡入」同一個同步區塊、同一影格發生
+    if(coverJumpPlan) coverJumpAt(coverJumpPlan.length - 1);
     document.body.classList.add('cover-text-leaving');
     document.body.classList.remove('dvd-cover-hold');
     if(dvdBounce){
