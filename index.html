@@ -2605,7 +2605,7 @@
       .catch(() => { clearTimeout(timer); settleCoverText(false); });
   })();
   // ---------- 封面大字期間：preview 頁左右兩塊照片「左右左右」快速交錯跳轉 ----------
-  // 需求：大字還在的這 2 秒，左右兩塊照片快速交錯各跳兩下（左、右、左、右，共 4 下），最後
+  // 需求：大字還在的這 2 秒，左右兩塊照片快速交錯各跳四下（左右左右左右左右，共 8 下），最後
   // 一下要剛好對上飄動物件／header 小文字淡入的那一刻（endCoverText()）。
   // 跳轉本身直接沿用 preview 頁原本的切換函式 stepPreviewSide()（左側往前遞減、右側往後遞增，
   // 索引也會跟著推進，之後飄動物件撞牆接手時序列自然接續，不會重複或跳號）。
@@ -2616,8 +2616,11 @@
   //   （大字照常顯示 2 秒、飄動物件照常淡入），絕不冒險去顯示沒載好的照片。
   //   跳轉時用的是 stepPreviewSide(side, true)：照片已經在 readyCache 裡，會同步一次到位換上
   //   高畫質版本，不會先閃縮圖、也不會有等待。
-  const COVER_JUMP_SEQUENCE = ['left', 'right', 'left', 'right'];
-  const COVER_JUMP_INTERVAL_MS = 400;         // 相鄰兩下的間隔；最後一下對齊 endCoverText()，前面依序往前推
+  const COVER_JUMP_SEQUENCE = ['left', 'right', 'left', 'right', 'left', 'right', 'left', 'right']; // 8 下＝左右左右 × 2 輪
+  // 第一下到最後一下的總跨度（固定不變）。原本 4 下 × 400ms 間隔 = 1200ms，改成 8 下之後總時長維持
+  // 不變，所以相鄰兩下的間隔改由這個跨度自動平均分配：間隔 = WINDOW ÷ (下數 − 1)（8 下 ≈ 171ms）。
+  // 最後一下仍然對齊 endCoverText()，前面依序往前推。
+  const COVER_JUMP_WINDOW_MS = 1200;
   const COVER_JUMP_LOAD_TIMEOUT_MS = 3500;    // 這幾張照片最多等這麼久，逾時就放棄跳轉
   let coverJumpPlan = null;        // 準備好的跳轉計畫：[{side, idx}, ...]；null＝沒有（放棄或還沒好）
   let coverJumpsSettled = false;   // 跳轉照片的準備流程已經有結果（成功／失敗／逾時）
@@ -2638,7 +2641,10 @@
     coverJumpsPreparing = true;
     const nL = previewEvenPhotos.length;
     const nR = previewOddPhotos.length;
-    if(nL < 3 || nR < 3){ settleCoverJumps(null); return; } // 照片太少，跳轉會重複，直接放棄
+    const leftSteps = COVER_JUMP_SEQUENCE.filter((s) => s === 'left').length;
+    const rightSteps = COVER_JUMP_SEQUENCE.length - leftSteps;
+    // 每一側要跳 N 下，就至少需要 N+1 張（起始張＋N 張），否則轉一圈會回到重複的照片
+    if(nL < leftSteps + 1 || nR < rightSteps + 1){ settleCoverJumps(null); return; } // 照片太少，跳轉會重複，直接放棄
     // 依序推算每一下會落在哪一張（跟 stepPreviewSide() 的遞增／遞減規則完全一致）
     let li = startLeftIdx, ri = startRightIdx;
     const steps = COVER_JUMP_SEQUENCE.map((side) => {
@@ -2677,8 +2683,9 @@
     const n = coverJumpPlan.length;
     // 前 n-1 下用計時器；最後一下由 endCoverText() 自己在放行的同一個同步區塊內執行，
     // 確保「最後一跳」跟「飄動物件／header 淡入開始」是同一影格。
+    const interval = n > 1 ? COVER_JUMP_WINDOW_MS / (n - 1) : 0; // 總跨度固定，間隔自動平均分配
     for(let i = 0; i < n - 1; i++){
-      const t = Math.max(0, endMs - (n - 1 - i) * COVER_JUMP_INTERVAL_MS);
+      const t = Math.max(0, Math.round(endMs - (n - 1 - i) * interval));
       setTimeout(() => coverJump(coverJumpPlan[i].side), t);
     }
   }
