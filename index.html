@@ -11078,6 +11078,67 @@
   // 讓 finishExitPhotoFallMode() 收尾時可以正確解除，不會每次進出堆疊
   // 模式就疊加一個新的 listener。
   let pfMouseButtonGuard = null;
+
+  // ---------- 修正（手機版）：「堆疊頁面有些圖片抓起來亂晃、不會跟其他圖片碰撞」----------
+  // 這是上面 pfMouseButtonGuard（桌機滑鼠拖出視窗）跟長按擷取那兩次修正的「同一類問題、第三條路徑」：
+  // Matter.Mouse 只認 touchend／mouseup 當作「放開」，完全不認 touchcancel。手機上瀏覽器會在很多
+  // 情況主動取消整個觸控序列而不是送 touchend——系統手勢（邊緣滑動、通知欄、控制中心）、主執行緒
+  // 被物理運算塞爆、多指誤觸、瀏覽器自己搶走手勢……這時 Matter 內部的 mouse.button 會永遠停在 0
+  // （＝按著），之後會出現兩種看起來像「壞掉」的症狀：
+  //   ① 已經抓著的那張圖：拖曳彈簧（stiffness 0.5）一直把它拉向「最後一根手指停留的座標」，跟鄰居的
+  //      碰撞推力互相拉扯，就是「亂晃」；彈簧力遠大於碰撞推力時，又像是「不會跟其他圖片碰撞」。
+  //   ② 沒有任何圖片被抓著、但 mouse.button 仍是 0：MouseConstraint 每一步都會檢查「有沒有 body 蓋在
+  //      mouse.position 上」，只要有任何一張圖剛好飄過那個座標，就會被「憑空抓住」——所以會是「有些圖片」
+  //      才發生，而且看起來毫無來由。
+  // 之前的 pfMouseButtonGuard 只在「滑鼠 mousemove 且 buttons===0」時才會介入，手機根本不會有
+  // mousemove；pointercancel 監聽器也只處理長按判定，都沒有清掉 Matter 的按鍵狀態。
+  // 修法（不再一條一條補路徑，改成通用保險）：
+  //   A. 自己追蹤「螢幕上現在還有幾根手指」（pfTouchesNow，用瀏覽器每次 touch 事件的 e.touches.length，
+  //      這是最權威的來源）與「滑鼠鍵是否按著」（pfMouseIsDown）。
+  //   B. 收到 touchcancel 且已經沒有手指 → 立刻代 Matter 補一次「放開」。
+  //   C. 每一影格物理更新前檢查：Matter 認為按著（mouse.button === 0），但我們追蹤到「沒有手指、
+  //      滑鼠也沒按著」，連續 3 影格 → 強制放開。這條不依賴是哪個事件漏掉，任何原因造成的卡死都會被
+  //      收掉（含上面的 ②「憑空抓住」）。3 影格的去抖動是為了避開按下當下事件先後順序的空檔。
+  //   D. 視窗失焦／分頁被隱藏 → 也視為放開（拖到一半切 App 時瀏覽器不保證送出任何結束事件）。
+  // 只有「Matter 說按著、瀏覽器卻說沒人按」這一種矛盾狀態會被處理；使用者真的還在按著（含兩指旋轉）
+  // 時 pfTouchesNow／pfMouseIsDown 一定大於 0，完全不受影響。
+  let pfTouchesNow = 0;
+  let pfMouseIsDown = false;
+  let pfStuckGrabFrames = 0;
+  function pfReleaseStuckGrab(){
+    if(!pfMouseConstraint) return;
+    const stuckBody = pfMouseConstraint.body;
+    if(pfMouseConstraint.mouse) pfMouseConstraint.mouse.button = -1; // 下一步 MouseConstraint.update() 會走「放開」分支，連 constraint.bodyB 一起清掉
+    if(stuckBody){
+      pfMouseConstraint.body = null;
+      if(window.Matter && window.Matter.Sleeping) window.Matter.Sleeping.set(stuckBody, false); // 保險叫醒，放開後才會照重力正常掉落、跟其他照片碰撞
+    }
+    photoFallStage.classList.remove('grabbing');
+    pfDragging = false;
+    pfStuckGrabFrames = 0;
+  }
+  function pfCheckStuckGrab(){
+    const mouse = pfMouseConstraint && pfMouseConstraint.mouse;
+    if(!mouse || mouse.button !== 0){ pfStuckGrabFrames = 0; return; }
+    if(pfTouchesNow > 0 || pfMouseIsDown){ pfStuckGrabFrames = 0; return; } // 真的還有人按著
+    pfStuckGrabFrames += 1;
+    if(pfStuckGrabFrames >= 3) pfReleaseStuckGrab();
+  }
+  (function pfInstallGrabTracking(){
+    const onTouch = (e) => {
+      pfTouchesNow = e.touches ? e.touches.length : 0;
+      if(e.type === 'touchcancel' && pfTouchesNow === 0) pfReleaseStuckGrab();
+    };
+    ['touchstart', 'touchend', 'touchcancel'].forEach((t) => {
+      document.addEventListener(t, onTouch, { capture: true, passive: true });
+    });
+    document.addEventListener('mousedown', () => { pfMouseIsDown = true; }, true);
+    document.addEventListener('mouseup', () => { pfMouseIsDown = false; }, true);
+    document.addEventListener('mousemove', (e) => { if(e.buttons === 0) pfMouseIsDown = false; }, true); // 放開發生在視窗外時，回到視窗的第一個 mousemove 會如實回報 buttons
+    const onLoseFocus = () => { pfTouchesNow = 0; pfMouseIsDown = false; pfReleaseStuckGrab(); };
+    window.addEventListener('blur', onLoseFocus);
+    document.addEventListener('visibilitychange', () => { if(document.hidden) onLoseFocus(); });
+  })();
   // pfRunner 目前是不是真的處於「停止」狀態——重複呼叫「啟動迴圈」如果對一個
   // 「已經在跑」的迴圈重複呼叫，會疊加出第二個 requestAnimationFrame 迴圈
   // （「停止迴圈」只會取消最後一次記錄到的那個迴圈 id，先前疊加的迴圈不會
@@ -11126,6 +11187,7 @@
     if(pfLoopLastTime === null){ pfLoopLastTime = now; return; } // 第一幀還沒有「上一幀」可以算真實經過時間，先跳過，下一幀開始正常累加
     let frameMs = now - pfLoopLastTime;
     pfLoopLastTime = now;
+    pfCheckStuckGrab(); // 通用保險：Matter 認為按著、瀏覽器卻說沒人按 → 強制放開（完整說明見 pfReleaseStuckGrab 宣告處）
     if(frameMs > 250) frameMs = 250; // 分頁切到背景很久才切回來：真實經過時間可能長達數秒甚至數分鐘，夾住上限，避免下面 while 迴圈瞬間跑出天文數字的補步
     pfAccumulatorMs += frameMs;
     let steps = 0;
@@ -12154,6 +12216,71 @@
           x: clampedX !== pos.x ? 0 : vel.x,
           y: clampedY !== pos.y ? 0 : vel.y,
         });
+      }
+    });
+
+    // ---------- 修正（手機／桌機通用）：「手指真的按著、真的在拖，但拖著的
+    // 那張照片會直接穿過其他照片，看起來完全沒有碰撞」----------
+    // 成因：跟上面「拖著物件去撞網頁邊界會被拖穿過去」完全同一個病灶，只是
+    // 這次撞到的不是牆壁、是別張照片。MouseConstraint 這條彈簧（stiffness 0.5）
+    // 每一步都在用外力硬拉這顆 body 去追手指，拉力經常大到蓋過碰撞解算原本
+    // 想把它推開的力道；牆壁那邊已經用「事後檢查、超出範圍就強制拉回」解決，
+    // 但牆壁的位置是固定的，好算——別張照片的位置是動態的，沒辦法用同一招
+    // 「夾進一個固定範圍」，所以當時只補了牆壁，沒有補這裡。
+    // 修法：一樣是「事後檢查」，但這次不是跟固定範圍比，而是直接讀
+    // pfEngine.pairs.list——物理引擎這一步真正算出來的碰撞資訊，每一對還在
+    // 接觸的 body 都帶著 SAT 算出來的精確穿透深度（collision.depth）跟法線
+    // 方向（collision.normal）。只挑「其中一顆是目前正被拖著的 body、另一顆
+    // 是別的動態物件（不是牆壁／地板，那些已經有自己的處理）」這種配對，只要
+    // 穿透深度超過一個很小的門檻（代表彈簧硬把它拉進別張照片裡，不是單純貼著
+    // 的正常接觸），就沿著碰撞法線把兩顆 body 往外推開，消除這段多出來的穿透。
+    // ---------- 只推拖曳中的那張、不推被撞到的那張，會變成「撞到牆」而不是
+    // 「兩張互相碰撞」----------
+    // 第一版這裡只推拖曳中的 body，被撞到的那張完全沒動——手感上會變成「拖著
+    // 的照片頂到旁邊就卡住」，比較像撞到一堵不會動的牆，不是「兩張照片真的
+    // 撞在一起、互相推開」的正常碰撞感。
+    // 修法：把要消除的穿透深度，依兩顆 body 的「質量倒數」(inverseMass) 比例
+    // 分攤給雙方——越輕（質量倒數越大）分到的推開距離越多，這跟 Matter.js
+    // 自己內建的位置解算（Resolver.solvePosition）用的是同一套分攤邏輯，只是
+    // 我們在彈簧蓋過那套解算之後，多做一次同樣精神的修正。被撞到那張的速度
+    // 完全不去動它，讓引擎這一步本來就算好的回彈力道自然生效——這樣拖曳中的
+    // 這對碰撞，看起來會跟兩張沒被拖曳、單純互撞的照片手感一致：真的會被推開、
+    // 彈飛，不是釘在原地擋著。
+    const PF_DRAG_OVERLAP_DEPTH = 0.5; // px，超過這個穿透深度才視為「被彈簧硬拉進去了」，一般貼合的正常接觸深度趨近 0
+    Events.on(pfEngine, 'afterUpdate', () => {
+      const draggedBody = pfMouseConstraint.body;
+      if(!draggedBody) return;
+      const pairs = pfEngine.pairs.list;
+      for(let i = 0; i < pairs.length; i++){
+        const pair = pairs[i];
+        if(!pair.isActive) continue;
+        const a = pair.bodyA, b = pair.bodyB;
+        let other;
+        if(a === draggedBody) other = b;
+        else if(b === draggedBody) other = a;
+        else continue;
+        if(other.isStatic) continue; // 牆壁／地板已經有上面那段專屬處理，這裡只管別的動態物件（其他照片、飄動的 e）
+        const depth = pair.collision.depth;
+        if(depth <= PF_DRAG_OVERLAP_DEPTH) continue;
+        const totalInvMass = draggedBody.inverseMass + other.inverseMass;
+        if(totalInvMass <= 0) continue; // 理論上不會發生（other 已經排除 isStatic），保底避免除以 0
+        const draggedShare = draggedBody.inverseMass / totalInvMass;
+        const otherShare = other.inverseMass / totalInvMass;
+        // collision.normal 的方向定義是「從 bodyA 指向 bodyB」；拖曳中的
+        // body 是 bodyA 時要沿法線反方向推出去，是 bodyB 時才沿法線正方向推。
+        const sign = (a === draggedBody) ? -1 : 1;
+        const nx = pair.collision.normal.x * sign, ny = pair.collision.normal.y * sign;
+        Matter.Body.translate(draggedBody, { x: nx * depth * draggedShare, y: ny * depth * draggedShare });
+        Matter.Body.translate(other, { x: -nx * depth * otherShare, y: -ny * depth * otherShare });
+        const vel = draggedBody.velocity;
+        const vn = vel.x * nx + vel.y * ny; // 速度沿法線方向的分量
+        if(vn < 0){ // 只在「還在往裡陷」的方向歸零，不影響其他方向的手感；被撞到那張的速度不去動它
+          Matter.Body.setVelocity(draggedBody, { x: vel.x - vn * nx, y: vel.y - vn * ny });
+        }
+        if(window.Matter.Sleeping){
+          if(draggedBody.isSleeping) Matter.Sleeping.set(draggedBody, false);
+          if(other.isSleeping) Matter.Sleeping.set(other, false); // 保險叫醒被撞到的那張，確保它也會正常回彈，不是被硬推開卻一動不動
+        }
       }
     });
 
