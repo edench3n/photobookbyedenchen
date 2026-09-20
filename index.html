@@ -2612,29 +2612,47 @@
       .catch(() => { clearTimeout(timer); settleCoverText(false); });
   })();
   // ---------- 封面大字期間：preview 頁左右兩塊照片「左右左右」快速交錯跳轉 ----------
-  // 需求：大字還在的這 2 秒，左右兩塊照片快速交錯各跳四下（左右左右左右左右，共 8 下），最後
-  // 一下要剛好對上飄動物件／header 小文字淡入的那一刻（endCoverText()）。
-  // 跳轉本身直接沿用 preview 頁原本的切換函式 stepPreviewSide()（左側往前遞減、右側往後遞增，
-  // 索引也會跟著推進，之後飄動物件撞牆接手時序列自然接續，不會重複或跳號）。
-  // ★ 「不能出現沒載好的照片」的保證：這 4 下要用到的照片（左側前兩步、右側後兩步）＋起始那兩張，
-  //   一律在放行前先「載入 + decode 完成」才算準備好（prepareCoverJumps()），並且併進
-  //   attemptInitialReveal() 的放行條件（coverGateOpen()）——沒準備好就不放行、繼續等，
-  //   最多等 COVER_JUMP_LOAD_TIMEOUT_MS；逾時或任何一張載入失敗，就整個放棄「跳轉」這部分
-  //   （大字照常顯示 2 秒、飄動物件照常淡入），絕不冒險去顯示沒載好的照片。
-  //   跳轉時用的是 stepPreviewSide(side, true)：照片已經在 readyCache 裡，會同步一次到位換上
-  //   高畫質版本，不會先閃縮圖、也不會有等待。
+  // 需求：大字還在的這 2 秒，左右兩塊照片快速交錯（左、右、左、右…共 8 下），最後一下要剛好
+  // 對上飄動物件／header 小文字淡入的那一刻（endCoverText()）；每一側的大字，在「那一側最後
+  // 一次換照片」的同一影格瞬間消失（coverJumpAt()）。
+  // ★ 「不能出現沒載好的照片」的保證：跳轉要用的照片一律在放行前先「載入 + decode 完成」才會
+  //   列入計畫（prepareCoverJumps()），並且併進 attemptInitialReveal() 的放行條件
+  //   （coverGateOpen()）——沒準備好就繼續等，最多等 COVER_JUMP_LOAD_TIMEOUT_MS。
+  // ★ 穩定性設計（修正「有時候左邊連跳兩次右邊才跳」「整段沒跳轉直接出現飄動物件」）：
+  //   ① 每一下都「明確指定要顯示第幾張」（coverJump(step) 直接設定 previewLeftIdx／
+  //      previewRightIdx 再顯示），不再靠 stepPreviewSide() 的「往前一步」累加——就算指標被
+  //      別的地方多動了一次，下一下也會立刻校正回計畫裡的那一張，不會一路錯位；也不再每跳一下
+  //      就順便發出下一張的高畫質下載請求（跳轉期間不跟自己搶頻寬，結束後才補暖機，見
+  //      warmNextAfterCover()）。
+  //   ② 單一序列器（startCoverJumpSequence()）取代原本「每一下各一個獨立計時器」：一次只排下
+  //      一下，相鄰兩下至少間隔 COVER_JUMP_MIN_GAP_MS——主執行緒忙的時候計時器再晚到，也不會
+  //      擠在同一影格連續觸發（畫面上看起來左右左右的順序才不會亂）；落後的部分會在後面平均
+  //      追回，最後一下仍盡量對齊 endCoverText()。
+  //   ③ 照片準備「盡量多、不全有全無」：原本 10 張裡任何一張失敗或逾時，整段跳轉就被放棄；
+  //      現在逾時或個別失敗時，取「從頭開始連續都準備好」的那一段（保持左右交替），至少 2 下
+  //      就照樣跳，只是下數變少。
+  //   ④ 晚到也補排：4 秒保底逾時（INITIAL_REVEAL_FALLBACK_MS）有可能在跳轉計畫準備好之前就強制放行，
+  //      以前這種情況整段跳轉就直接沒了；現在計畫晚到（settleCoverJumps()）時，會依「剩下的時間
+  //      塞得下幾下」補排，至少 2 下才跳。
+  //   ⑤ 最後一下由序列器自己呼叫 endCoverText()；萬一序列器跑得太慢，超過
+  //      COVER_JUMP_END_TOLERANCE_MS 也一定會被保底計時器強制結束，不會讓大字卡住。
   const COVER_JUMP_SEQUENCE = ['left', 'right', 'left', 'right', 'left', 'right', 'left', 'right']; // 8 下＝左右左右 × 2 輪
-  // 第一下跳轉的時間點＝全白遮罩完全淡出（COVER_TEXT_REVEAL_LEAD_MS）之後，再等這一小段緩衝。
-  // 原本第一下排在 1.3s，遮罩 0.5s 就淡完了，中間約 0.8 秒畫面是靜止的，使用者會感覺「停頓一下
-  // 才開始跳」；改成遮罩一淡完、只留很短的一拍（讓人看得到起始照片）就開始跳。最後一下仍然固定
-  // 對齊 endCoverText()（大字消失／飄動物件淡入），所以總時長不變，相鄰兩下的間隔由「第一下到
-  // 最後一下」的跨度自動平均分配：間隔 = (結束時間 − 第一下時間) ÷ (下數 − 1)。
+  // 第一下跳轉的時間點＝全白遮罩完全淡出（COVER_TEXT_REVEAL_LEAD_MS）之後，再等這一小段緩衝，
+  // 讓人看得到起始照片。最後一下固定對齊 endCoverText()，相鄰兩下的間隔由「第一下到最後一下」
+  // 的跨度自動平均分配：間隔 = (結束時間 − 第一下時間) ÷ (下數 − 1)。
   // 想要更快開始跳就把這個數字調小（0＝遮罩一淡完立刻跳），想要多停一拍就調大。
   const COVER_JUMP_START_DELAY_MS = 150;
-  const COVER_JUMP_LOAD_TIMEOUT_MS = 3500;    // 這幾張照片最多等這麼久，逾時就放棄跳轉
+  const COVER_JUMP_MIN_GAP_MS = 110;          // 相鄰兩下最少間隔（落後時的下限，確保每一下都有機會被看見）
+  const COVER_JUMP_END_TOLERANCE_MS = 1200;   // 序列器最多可以比預定結束時間晚這麼久，超過就強制結束
+  const COVER_JUMP_LOAD_TIMEOUT_MS = 3000;    // 這幾張照片最多等這麼久，逾時就用「已經準備好的那一段」
   let coverJumpPlan = null;        // 準備好的跳轉計畫：[{side, idx}, ...]；null＝沒有（放棄或還沒好）
-  let coverJumpsSettled = false;   // 跳轉照片的準備流程已經有結果（成功／失敗／逾時）
+  let coverJumpActive = null;      // 序列器實際要執行的那一段（計畫可能因為剩餘時間不夠而截短）
+  let coverJumpsSettled = false;   // 跳轉照片的準備流程已經有結果（成功／部分成功／失敗／逾時）
   let coverJumpsPreparing = false;
+  let coverJumpSeqStarted = false;
+  let coverJumpTimer = null;
+  let coverRevealAt = 0;           // 放行（全白遮罩開始淡出）那一刻的 performance.now()；0＝還沒放行
+  let coverTextEnded = false;
   const coverJumpKeepAlive = [];   // 抓著已 decode 的 Image 物件，避免跳轉前被瀏覽器回收解碼結果
   // 放行條件：封面大字圖片已有結果；而且如果要顯示大字，跳轉照片也要有結果
   function coverGateOpen(){
@@ -2645,86 +2663,136 @@
     coverJumpsSettled = true;
     coverJumpPlan = plan || null;
     attemptInitialReveal(); // 補問一次：可能剛好只差這個條件
+    startCoverJumpSequence(); // 放行已經發生（例如保底逾時搶先放行）就補排；還沒放行則什麼都不做，等放行時再排
   }
   function prepareCoverJumps(startLeftIdx, startRightIdx){
     if(coverJumpsSettled || coverJumpsPreparing) return;
     coverJumpsPreparing = true;
     const nL = previewEvenPhotos.length;
     const nR = previewOddPhotos.length;
-    const leftSteps = COVER_JUMP_SEQUENCE.filter((s) => s === 'left').length;
-    const rightSteps = COVER_JUMP_SEQUENCE.length - leftSteps;
-    // 每一側要跳 N 下，就至少需要 N+1 張（起始張＋N 張），否則轉一圈會回到重複的照片
-    if(nL < leftSteps + 1 || nR < rightSteps + 1){ settleCoverJumps(null); return; } // 照片太少，跳轉會重複，直接放棄
-    // 依序推算每一下會落在哪一張（跟 stepPreviewSide() 的遞增／遞減規則完全一致）
-    let li = startLeftIdx, ri = startRightIdx;
-    const steps = COVER_JUMP_SEQUENCE.map((side) => {
-      if(side === 'left'){ li = (li - 1 + nL) % nL; return { side, idx: li }; }
-      ri = (ri + 1) % nR; return { side, idx: ri };
-    });
-    const timer = setTimeout(() => settleCoverJumps(null), COVER_JUMP_LOAD_TIMEOUT_MS);
-    const need = [
-      { side: 'left', idx: startLeftIdx }, { side: 'right', idx: startRightIdx }
-    ].concat(steps);
-    Promise.all(need.map(({ side, idx }) => {
+    // 依序推算每一下會落在哪一張（左側往前遞減、右側往後遞增，跟 stepPreviewSide() 的規則一致）。
+    // 每一側最多只跳「張數 − 1」下，避免轉一圈回到重複的照片。
+    let li = startLeftIdx, ri = startRightIdx, usedL = 0, usedR = 0;
+    const steps = [];
+    for(const side of COVER_JUMP_SEQUENCE){
+      if(side === 'left'){
+        if(usedL >= nL - 1) break;
+        li = (li - 1 + nL) % nL; usedL++;
+        steps.push({ side, idx: li });
+      }else{
+        if(usedR >= nR - 1) break;
+        ri = (ri + 1) % nR; usedR++;
+        steps.push({ side, idx: ri });
+      }
+    }
+    if(steps.length < 2){ settleCoverJumps(null); return; } // 照片太少，湊不出左右交替，直接放棄
+    // 載入＋decode 一張；任何失敗都只回傳 false，不再讓整批 Promise.all 一起垮掉
+    const loadOne = (side, idx) => {
       const seq = side === 'left' ? previewEvenPhotos : previewOddPhotos;
       const cache = side === 'left' ? previewResolvedLeft : previewResolvedRight;
       const readyCache = side === 'left' ? previewReadyLeft : previewReadyRight;
       return resolvePreviewImage(seq[idx], cache, readyCache, idx).then((url) => {
-        if(!url) throw new Error('preview image failed');
+        if(!url) return false;
         const im = new Image();
         im.src = url; // 已經載入過，走快取；這裡再 decode 一次並抓著，確保解碼結果留在記憶體
         coverJumpKeepAlive.push(im);
-        return im.decode ? im.decode().catch(() => {}) : undefined;
-      });
-    })).then(() => {
+        return im.decode ? im.decode().then(() => true, () => true) : true;
+      }).catch(() => false);
+    };
+    const stepReady = steps.map(() => false);
+    let pending = steps.length + 2; // 跳轉每一張＋兩側起始張（起始張只是順便確認，不影響計畫）
+    let timer = null;
+    const finish = () => {
       clearTimeout(timer);
-      settleCoverJumps(steps);
-    }).catch(() => {
-      clearTimeout(timer);
-      settleCoverJumps(null);
-    });
-  }
-  function coverJump(side){
-    if(!previewActive) return; // 使用者已經離開 preview 頁，不用再跳
-    stepPreviewSide(side, true);
+      // 取「從頭開始連續都準備好」的那一段（保持左右交替順序）；不足 2 下就放棄
+      let m = 0;
+      while(m < steps.length && stepReady[m]) m++;
+      settleCoverJumps(m >= 2 ? steps.slice(0, m) : null);
+    };
+    const done = () => { if(--pending === 0) finish(); };
+    timer = setTimeout(finish, COVER_JUMP_LOAD_TIMEOUT_MS);
+    steps.forEach((st, i) => loadOne(st.side, st.idx).then((ok) => { stepReady[i] = ok; done(); }));
+    loadOne('left', startLeftIdx).then(done);
+    loadOne('right', startRightIdx).then(done);
   }
   // 某一側的封面大字瞬間消失（沒有淡出）：CSS .cover-text-gone 直接把 opacity 設成 0
   function hideCoverTextSide(side){
     const el = side === 'left' ? coverTextLeftEl : coverTextRightEl;
     if(el) el.classList.add('cover-text-gone');
   }
-  // 執行第 i 下跳轉；如果這是「那一側」最後一次切換（計畫裡後面已經沒有同一側的跳轉），
-  // 就在同一個同步區塊內讓那一側的大字瞬間消失——照片換掉跟大字不見是同一影格。
-  // 左邊：第 7 下（倒數第二下）；右邊：第 8 下（最後一下）。
+  // 直接顯示計畫裡指定的那一張（不是「往前一步」）：先把該側指標設成計畫的索引，再走 applyPreviewSide
+  // 的 forceTiny 快速路徑——照片已經在 readyCache 裡，會同步一次到位換上高畫質版本。
+  function coverJump(step){
+    if(!previewActive) return; // 使用者已經離開 preview 頁，不用再跳
+    if(step.side === 'left') previewLeftIdx = step.idx; else previewRightIdx = step.idx;
+    applyPreviewSide(step.side, true);
+  }
+  // 執行第 i 下跳轉；如果這是「那一側」最後一次切換（後面已經沒有同一側的跳轉），就在同一個
+  // 同步區塊內讓那一側的大字瞬間消失——照片換掉跟大字不見是同一影格。
   function coverJumpAt(i){
-    if(!coverJumpPlan) return;
-    const side = coverJumpPlan[i].side;
-    coverJump(side);
-    for(let j = i + 1; j < coverJumpPlan.length; j++){
-      if(coverJumpPlan[j].side === side) return; // 這一側後面還有跳轉，大字先留著
+    const steps = coverJumpActive;
+    if(!steps || !steps[i]) return;
+    const side = steps[i].side;
+    coverJump(steps[i]);
+    for(let j = i + 1; j < steps.length; j++){
+      if(steps[j].side === side) return; // 這一側後面還有跳轉，大字先留著
     }
     hideCoverTextSide(side);
   }
-  function scheduleCoverJumps(endMs){
-    if(!coverJumpPlan) return;
-    const n = coverJumpPlan.length;
-    // 前 n-1 下用計時器；最後一下由 endCoverText() 自己在放行的同一個同步區塊內執行，
-    // 確保「最後一跳」跟「飄動物件／header 淡入開始」是同一影格。
-    const firstMs = Math.min(endMs, COVER_TEXT_REVEAL_LEAD_MS + COVER_JUMP_START_DELAY_MS); // 第一下的時間點
-    const interval = n > 1 ? (endMs - firstMs) / (n - 1) : 0; // 第一下到最後一下平均分配
-    for(let i = 0; i < n - 1; i++){
-      const t = Math.max(0, Math.round(endMs - (n - 1 - i) * interval));
-      setTimeout(() => coverJumpAt(i), t);
+  // 序列器：一次只排「下一下」。放行時（revealInitialChrome）或計畫晚到時（settleCoverJumps）呼叫。
+  function startCoverJumpSequence(){
+    if(coverJumpSeqStarted || coverTextEnded || !coverJumpPlan || !coverRevealAt) return;
+    const endMs = COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS;          // 預定結束時間（相對放行）
+    const elapsed = performance.now() - coverRevealAt;
+    const firstMs = Math.max(COVER_TEXT_REVEAL_LEAD_MS + COVER_JUMP_START_DELAY_MS, elapsed + 30); // 第一下不早於「現在」
+    const fit = Math.floor((endMs - firstMs) / COVER_JUMP_MIN_GAP_MS) + 1; // 剩下的時間塞得下幾下
+    const n = Math.min(coverJumpPlan.length, fit);
+    if(n < 2) return; // 來不及了：不跳，大字照常在預定時間結束
+    coverJumpSeqStarted = true;
+    coverJumpActive = coverJumpPlan.slice(0, n);
+    const interval = (endMs - firstMs) / (n - 1);
+    // 結束時機改由序列器在「最後一下」自己觸發；原本的固定計時器改成「最晚不能超過」的保底
+    clearTimeout(coverTextTimer);
+    coverTextTimer = setTimeout(endCoverText, Math.max(0, endMs + COVER_JUMP_END_TOLERANCE_MS - elapsed));
+    let i = 0;
+    const runNext = () => {
+      coverJumpTimer = null;
+      if(coverTextEnded) return;
+      const isLast = (i === n - 1);
+      coverJumpAt(i);
+      i++;
+      if(isLast){ endCoverText(); return; } // 最後一下：跟大字消失／飄動物件淡入同一個同步區塊
+      const now = performance.now() - coverRevealAt;
+      const delay = Math.max(COVER_JUMP_MIN_GAP_MS, (firstMs + i * interval) - now); // 落後就盡量追回，但相鄰兩下不低於下限
+      coverJumpTimer = setTimeout(runNext, delay);
+    };
+    coverJumpTimer = setTimeout(runNext, Math.max(0, firstMs - elapsed));
+  }
+  // 封面結束後，順手預先暖機兩側「下一張」（等於原本 stepPreviewSide() 每跳一下都會做的事），
+  // 讓飄動物件放行後第一下撞牆換圖也有快取可用。
+  function warmNextAfterCover(){
+    if(previewEvenPhotos.length){
+      const idx = (previewLeftIdx - 1 + previewEvenPhotos.length) % previewEvenPhotos.length;
+      warmPreviewPlaceholder(previewEvenPhotos[idx]);
+      resolvePreviewImage(previewEvenPhotos[idx], previewResolvedLeft, previewReadyLeft, idx);
+    }
+    if(previewOddPhotos.length){
+      const idx = (previewRightIdx + 1) % previewOddPhotos.length;
+      warmPreviewPlaceholder(previewOddPhotos[idx]);
+      resolvePreviewImage(previewOddPhotos[idx], previewResolvedRight, previewReadyRight, idx);
     }
   }
 
-  // 兩塊大字各自在自己那一側最後一次換照片時瞬間消失（左邊在 coverJumpAt() 倒數第二下、右邊在這裡最後一下）；
-  // 最後一下的同一刻，飄動物件／header 開始淡入。飄動物件的「彈入」寫法跟 revealInitialChrome() 原本一模一樣
-  // （dvd-reveal 目前沒有任何視覺差異，實際效果是外層 .dvd-bounce 原本的 opacity .3s 淡入）。
+  // 封面大字結束：兩邊大字（還沒各自消失的）瞬間消失＋飄動物件／header 同一刻開始淡入。
+  // 有跳轉序列時由序列器在「最後一下」呼叫（跟最後一次換照片同一個同步區塊）；沒有跳轉計畫
+  // （照片沒準備好而放棄）時，由固定計時器在預定時間呼叫。飄動物件的「彈入」寫法跟
+  // revealInitialChrome() 原本一模一樣（dvd-reveal 目前沒有任何視覺差異，實際效果是外層
+  // .dvd-bounce 原本的 opacity .3s 淡入）。
   function endCoverText(){
-    coverTextTimer = null;
-    // 最後一跳（右邊）：右邊大字跟著這一下瞬間消失，並跟下面「飄動物件與 header 開始淡入」同一個同步區塊、同一影格發生
-    if(coverJumpPlan) coverJumpAt(coverJumpPlan.length - 1);
+    if(coverTextEnded) return; // 只結束一次（序列器最後一下、保底計時器可能都會呼叫到）
+    coverTextEnded = true;
+    clearTimeout(coverTextTimer); coverTextTimer = null;
+    clearTimeout(coverJumpTimer); coverJumpTimer = null;
     document.body.classList.add('cover-text-leaving');
     document.body.classList.remove('dvd-cover-hold');
     if(dvdBounce){
@@ -2734,10 +2802,13 @@
         dvdBounce.classList.remove('dvd-reveal');
       }, 650);
     }
+    warmNextAfterCover();
     setTimeout(() => {
       document.body.classList.remove('cover-text-active', 'cover-text-leaving');
       removeCoverTextEls(); // 用完就從 DOM 拿掉，之後 preview 頁完全回到原本的樣子
       coverJumpKeepAlive.length = 0; // 跳轉用的暫存 Image 物件可以放掉了
+      if(previewLeftImg) previewLeftImg.removeAttribute('decoding');
+      if(previewRightImg) previewRightImg.removeAttribute('decoding');
     }, COVER_TEXT_FADE_MS + 150);
   }
 
@@ -2775,8 +2846,14 @@
     if(showCoverText){
       // 飄動物件的淡入延後到 endCoverText()，這裡不做
       const coverEndMs = COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS;
+      coverRevealAt = performance.now();
+      // 基本保底：沒有跳轉計畫（照片沒準備好而放棄）或來不及跳時，大字照常在這個時間結束。
+      // 有跳轉序列的話，startCoverJumpSequence() 會接手改成由「最後一下」觸發結束。
       coverTextTimer = setTimeout(endCoverText, coverEndMs);
-      scheduleCoverJumps(coverEndMs); // 左右左右快速交錯跳轉，最後一下對齊 endCoverText()
+      // 跳轉期間要求瀏覽器「新照片跟同一影格一起同步解碼呈現」，降低左右兩側一邊先換、一邊晚一拍的機率
+      if(previewLeftImg) previewLeftImg.decoding = 'sync';
+      if(previewRightImg) previewRightImg.decoding = 'sync';
+      startCoverJumpSequence(); // 計畫已經準備好就馬上排程；還沒好的話，由 settleCoverJumps() 晚到時補排
       return;
     }
     // 飄動的 e 首次進站專用的縮放彈入（見上面 CSS .dvd-bounce.dvd-reveal
