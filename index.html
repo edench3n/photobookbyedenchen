@@ -2604,10 +2604,91 @@
       .then(() => { clearTimeout(timer); settleCoverText(true); })
       .catch(() => { clearTimeout(timer); settleCoverText(false); });
   })();
+  // ---------- 封面大字期間：preview 頁左右兩塊照片「左右左右」快速交錯跳轉 ----------
+  // 需求：大字還在的這 2 秒，左右兩塊照片快速交錯各跳兩下（左、右、左、右，共 4 下），最後
+  // 一下要剛好對上飄動物件／header 小文字淡入的那一刻（endCoverText()）。
+  // 跳轉本身直接沿用 preview 頁原本的切換函式 stepPreviewSide()（左側往前遞減、右側往後遞增，
+  // 索引也會跟著推進，之後飄動物件撞牆接手時序列自然接續，不會重複或跳號）。
+  // ★ 「不能出現沒載好的照片」的保證：這 4 下要用到的照片（左側前兩步、右側後兩步）＋起始那兩張，
+  //   一律在放行前先「載入 + decode 完成」才算準備好（prepareCoverJumps()），並且併進
+  //   attemptInitialReveal() 的放行條件（coverGateOpen()）——沒準備好就不放行、繼續等，
+  //   最多等 COVER_JUMP_LOAD_TIMEOUT_MS；逾時或任何一張載入失敗，就整個放棄「跳轉」這部分
+  //   （大字照常顯示 2 秒、飄動物件照常淡入），絕不冒險去顯示沒載好的照片。
+  //   跳轉時用的是 stepPreviewSide(side, true)：照片已經在 readyCache 裡，會同步一次到位換上
+  //   高畫質版本，不會先閃縮圖、也不會有等待。
+  const COVER_JUMP_SEQUENCE = ['left', 'right', 'left', 'right'];
+  const COVER_JUMP_INTERVAL_MS = 400;         // 相鄰兩下的間隔；最後一下對齊 endCoverText()，前面依序往前推
+  const COVER_JUMP_LOAD_TIMEOUT_MS = 3500;    // 這幾張照片最多等這麼久，逾時就放棄跳轉
+  let coverJumpPlan = null;        // 準備好的跳轉計畫：[{side, idx}, ...]；null＝沒有（放棄或還沒好）
+  let coverJumpsSettled = false;   // 跳轉照片的準備流程已經有結果（成功／失敗／逾時）
+  let coverJumpsPreparing = false;
+  const coverJumpKeepAlive = [];   // 抓著已 decode 的 Image 物件，避免跳轉前被瀏覽器回收解碼結果
+  // 放行條件：封面大字圖片已有結果；而且如果要顯示大字，跳轉照片也要有結果
+  function coverGateOpen(){
+    return coverTextSettled && (!coverTextLoaded || coverJumpsSettled);
+  }
+  function settleCoverJumps(plan){
+    if(coverJumpsSettled) return;
+    coverJumpsSettled = true;
+    coverJumpPlan = plan || null;
+    attemptInitialReveal(); // 補問一次：可能剛好只差這個條件
+  }
+  function prepareCoverJumps(startLeftIdx, startRightIdx){
+    if(coverJumpsSettled || coverJumpsPreparing) return;
+    coverJumpsPreparing = true;
+    const nL = previewEvenPhotos.length;
+    const nR = previewOddPhotos.length;
+    if(nL < 3 || nR < 3){ settleCoverJumps(null); return; } // 照片太少，跳轉會重複，直接放棄
+    // 依序推算每一下會落在哪一張（跟 stepPreviewSide() 的遞增／遞減規則完全一致）
+    let li = startLeftIdx, ri = startRightIdx;
+    const steps = COVER_JUMP_SEQUENCE.map((side) => {
+      if(side === 'left'){ li = (li - 1 + nL) % nL; return { side, idx: li }; }
+      ri = (ri + 1) % nR; return { side, idx: ri };
+    });
+    const timer = setTimeout(() => settleCoverJumps(null), COVER_JUMP_LOAD_TIMEOUT_MS);
+    const need = [
+      { side: 'left', idx: startLeftIdx }, { side: 'right', idx: startRightIdx }
+    ].concat(steps);
+    Promise.all(need.map(({ side, idx }) => {
+      const seq = side === 'left' ? previewEvenPhotos : previewOddPhotos;
+      const cache = side === 'left' ? previewResolvedLeft : previewResolvedRight;
+      const readyCache = side === 'left' ? previewReadyLeft : previewReadyRight;
+      return resolvePreviewImage(seq[idx], cache, readyCache, idx).then((url) => {
+        if(!url) throw new Error('preview image failed');
+        const im = new Image();
+        im.src = url; // 已經載入過，走快取；這裡再 decode 一次並抓著，確保解碼結果留在記憶體
+        coverJumpKeepAlive.push(im);
+        return im.decode ? im.decode().catch(() => {}) : undefined;
+      });
+    })).then(() => {
+      clearTimeout(timer);
+      settleCoverJumps(steps);
+    }).catch(() => {
+      clearTimeout(timer);
+      settleCoverJumps(null);
+    });
+  }
+  function coverJump(side){
+    if(!previewActive) return; // 使用者已經離開 preview 頁，不用再跳
+    stepPreviewSide(side, true);
+  }
+  function scheduleCoverJumps(endMs){
+    if(!coverJumpPlan) return;
+    const n = coverJumpPlan.length;
+    // 前 n-1 下用計時器；最後一下由 endCoverText() 自己在放行的同一個同步區塊內執行，
+    // 確保「最後一跳」跟「飄動物件／header 淡入開始」是同一影格。
+    for(let i = 0; i < n - 1; i++){
+      const t = Math.max(0, endMs - (n - 1 - i) * COVER_JUMP_INTERVAL_MS);
+      setTimeout(() => coverJump(coverJumpPlan[i].side), t);
+    }
+  }
+
   // 兩塊大字淡出＋飄動物件同一刻淡入。飄動物件的「彈入」寫法跟 revealInitialChrome() 原本一模一樣
   // （dvd-reveal 目前沒有任何視覺差異，實際效果是外層 .dvd-bounce 原本的 opacity .3s 淡入）。
   function endCoverText(){
     coverTextTimer = null;
+    // 最後一跳：跟下面「大字淡出／飄動物件與 header 淡入」同一個同步區塊，同一影格發生
+    if(coverJumpPlan) coverJump(coverJumpPlan[coverJumpPlan.length - 1].side);
     document.body.classList.add('cover-text-leaving');
     document.body.classList.remove('dvd-cover-hold');
     if(dvdBounce){
@@ -2620,6 +2701,7 @@
     setTimeout(() => {
       document.body.classList.remove('cover-text-active', 'cover-text-leaving');
       removeCoverTextEls(); // 用完就從 DOM 拿掉，之後 preview 頁完全回到原本的樣子
+      coverJumpKeepAlive.length = 0; // 跳轉用的暫存 Image 物件可以放掉了
     }, COVER_TEXT_FADE_MS + 150);
   }
 
@@ -2656,7 +2738,9 @@
     hideInitialLoadOverlay();
     if(showCoverText){
       // 飄動物件的淡入延後到 endCoverText()，這裡不做
-      coverTextTimer = setTimeout(endCoverText, COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS);
+      const coverEndMs = COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS;
+      coverTextTimer = setTimeout(endCoverText, coverEndMs);
+      scheduleCoverJumps(coverEndMs); // 左右左右快速交錯跳轉，最後一下對齊 endCoverText()
       return;
     }
     // 飄動的 e 首次進站專用的縮放彈入（見上面 CSS .dvd-bounce.dvd-reveal
@@ -2723,7 +2807,7 @@
   let initialRevealExtraBufferTimer = null;
   function attemptInitialReveal(){
     if(initialChromeRevealed) return;
-    if(previewReadyForInitialReveal && dvdReadyForInitialReveal && coverTextSettled){
+    if(previewReadyForInitialReveal && dvdReadyForInitialReveal && coverGateOpen()){
       clearTimeout(initialRevealGraceTimer);
       initialRevealGraceTimer = null;
       if(!initialRevealExtraBufferTimer){
@@ -2734,7 +2818,9 @@
       }
       return;
     }
-    if(previewReadyForInitialReveal && !initialRevealGraceTimer){
+    // 這條「緩衝時間到就先放行」只用來限制等飄動物件的時間；封面大字圖片／跳轉照片還沒準備好時
+    // 不套用（它們各自有逾時保底，見 preloadCoverText()／prepareCoverJumps()），避免還沒載好就放行。
+    if(previewReadyForInitialReveal && coverGateOpen() && !initialRevealGraceTimer){
       initialRevealGraceTimer = setTimeout(() => {
         initialRevealGraceTimer = null;
         // 緩衝時間到了，飄動的 e 那邊還沒舉手，就不再等它——直接放行，
@@ -6736,6 +6822,7 @@
       // 物件一下，交給 attemptInitialReveal() 判斷（完整說明見上面該函式
       // 旁的註解、以及 CSS body.initial-reveal-pending 那段）。
       previewReadyForInitialReveal = true;
+      prepareCoverJumps(startLeftIdx, startRightIdx); // 封面大字期間的左右跳轉：先把要用的照片載好＋decode，見該函式說明
       attemptInitialReveal();
 
       // 起始畫面兩側這時已經「同時」亮出來了（不管當下亮出來的是縮圖還是
