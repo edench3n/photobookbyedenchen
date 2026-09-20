@@ -2625,32 +2625,37 @@
   //      就順便發出下一張的高畫質下載請求（跳轉期間不跟自己搶頻寬，結束後才補暖機，見
   //      warmNextAfterCover()）。
   //   ② 單一序列器（startCoverJumpSequence()）取代原本「每一下各一個獨立計時器」：一次只排下
-  //      一下，相鄰兩下至少間隔 COVER_JUMP_MIN_GAP_MS——主執行緒忙的時候計時器再晚到，也不會
-  //      擠在同一影格連續觸發（畫面上看起來左右左右的順序才不會亂）；落後的部分會在後面平均
-  //      追回，最後一下仍盡量對齊 endCoverText()。
+  //      一下，而且用 requestAnimationFrame 在「畫面更新的那一影格」裡換圖（換圖跟大字消失、左右
+  //      兩側都在同一影格畫出來）。每一下都以「上一下實際發生的時間」為基準、隔固定的
+  //      COVER_JUMP_INTERVAL_MS 再跳下一下——不追趕原本的時間表，所以某一下被卡頓拖慢時，後面
+  //      不會變趕，只是整組往後延（節奏永遠均勻）。
   //   ③ 照片準備「盡量多、不全有全無」：原本 10 張裡任何一張失敗或逾時，整段跳轉就被放棄；
   //      現在逾時或個別失敗時，取「從頭開始連續都準備好」的那一段（保持左右交替），至少 2 下
   //      就照樣跳，只是下數變少。
   //   ④ 晚到也補排：4 秒保底逾時（INITIAL_REVEAL_FALLBACK_MS）有可能在跳轉計畫準備好之前就強制放行，
-  //      以前這種情況整段跳轉就直接沒了；現在計畫晚到（settleCoverJumps()）時，會依「剩下的時間
-  //      塞得下幾下」補排，至少 2 下才跳。
-  //   ⑤ 最後一下由序列器自己呼叫 endCoverText()；萬一序列器跑得太慢，超過
-  //      COVER_JUMP_END_TOLERANCE_MS 也一定會被保底計時器強制結束，不會讓大字卡住。
+  //      以前這種情況整段跳轉就直接沒了；現在計畫晚到（settleCoverJumps()）時，從「現在」起照同樣的
+  //      固定節拍補跳（不壓縮間隔），大字會相應多停一會兒，直到跳完或碰到 COVER_JUMP_END_TOLERANCE_MS 上限。
+  //   ⑤ 最後一下由序列器自己呼叫 endCoverText()；萬一序列器跑得太慢（或分頁被切到背景、
+  //      requestAnimationFrame 被暫停），超過預定結束時間 + COVER_JUMP_END_TOLERANCE_MS 也一定會被
+  //      保底計時器強制結束，不會讓大字卡住。
   const COVER_JUMP_SEQUENCE = ['left', 'right', 'left', 'right', 'left', 'right', 'left', 'right']; // 8 下＝左右左右 × 2 輪
   // 第一下跳轉的時間點＝全白遮罩完全淡出（COVER_TEXT_REVEAL_LEAD_MS）之後，再等這一小段緩衝，
   // 讓人看得到起始照片。最後一下固定對齊 endCoverText()，相鄰兩下的間隔由「第一下到最後一下」
   // 的跨度自動平均分配：間隔 = (結束時間 − 第一下時間) ÷ (下數 − 1)。
   // 想要更快開始跳就把這個數字調小（0＝遮罩一淡完立刻跳），想要多停一拍就調大。
   const COVER_JUMP_START_DELAY_MS = 150;
-  const COVER_JUMP_MIN_GAP_MS = 110;          // 相鄰兩下最少間隔（落後時的下限，確保每一下都有機會被看見）
-  const COVER_JUMP_END_TOLERANCE_MS = 1200;   // 序列器最多可以比預定結束時間晚這麼久，超過就強制結束
+  // ★ 固定節拍：每一下跳轉之間的間隔是「一個固定的數字」，不管載入快慢、有沒有卡頓，每一下都隔一樣久。
+  //   數值＝正常情況下「第一下到最後一下」剛好落在預定結束時間的間隔（8 下、(2000−150)÷7 ≈ 264ms）。
+  //   照片晚到、主執行緒卡頓時，只會讓整組跳轉「往後延」，不會壓縮或加速後面的間隔。
+  const COVER_JUMP_INTERVAL_MS = Math.round((COVER_TEXT_SHOW_MS - COVER_JUMP_START_DELAY_MS) / (COVER_JUMP_SEQUENCE.length - 1));
+  const COVER_JUMP_END_TOLERANCE_MS = 1200;   // 整組跳轉最多可以比預定結束時間晚這麼久，超過就強制結束（不讓大字卡住）
   const COVER_JUMP_LOAD_TIMEOUT_MS = 3000;    // 這幾張照片最多等這麼久，逾時就用「已經準備好的那一段」
   let coverJumpPlan = null;        // 準備好的跳轉計畫：[{side, idx}, ...]；null＝沒有（放棄或還沒好）
   let coverJumpActive = null;      // 序列器實際要執行的那一段（計畫可能因為剩餘時間不夠而截短）
   let coverJumpsSettled = false;   // 跳轉照片的準備流程已經有結果（成功／部分成功／失敗／逾時）
   let coverJumpsPreparing = false;
   let coverJumpSeqStarted = false;
-  let coverJumpTimer = null;
+  let coverJumpRAF = null;
   let coverRevealAt = 0;           // 放行（全白遮罩開始淡出）那一刻的 performance.now()；0＝還沒放行
   let coverTextEnded = false;
   const coverJumpKeepAlive = [];   // 抓著已 decode 的 Image 物件，避免跳轉前被瀏覽器回收解碼結果
@@ -2742,31 +2747,34 @@
   // 序列器：一次只排「下一下」。放行時（revealInitialChrome）或計畫晚到時（settleCoverJumps）呼叫。
   function startCoverJumpSequence(){
     if(coverJumpSeqStarted || coverTextEnded || !coverJumpPlan || !coverRevealAt) return;
-    const endMs = COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS;          // 預定結束時間（相對放行）
+    const endMs = COVER_TEXT_REVEAL_LEAD_MS + COVER_TEXT_SHOW_MS;   // 預定結束時間（相對放行）
+    const limitMs = endMs + COVER_JUMP_END_TOLERANCE_MS;            // 最晚結束時間（超過就強制結束）
     const elapsed = performance.now() - coverRevealAt;
-    const firstMs = Math.max(COVER_TEXT_REVEAL_LEAD_MS + COVER_JUMP_START_DELAY_MS, elapsed + 30); // 第一下不早於「現在」
-    const fit = Math.floor((endMs - firstMs) / COVER_JUMP_MIN_GAP_MS) + 1; // 剩下的時間塞得下幾下
-    const n = Math.min(coverJumpPlan.length, fit);
+    // 第一下：正常是遮罩淡完＋一小拍；如果計畫晚到，就從「現在」起跳（不會排在過去）
+    const firstMs = Math.max(COVER_TEXT_REVEAL_LEAD_MS + COVER_JUMP_START_DELAY_MS, elapsed + 30);
+    // 固定節拍下，到最晚結束時間為止塞得下幾下（不壓縮間隔、寧可少跳幾下也不加速）
+    // （每一下實際間隔會被影格對齊多吃幾毫秒，所以算張數時每個間隔多留 6ms，避免最後一下剛好卡在邊界被保底計時器搶先結束）
+    const n = Math.min(coverJumpPlan.length, Math.floor((limitMs - firstMs) / (COVER_JUMP_INTERVAL_MS + 6)) + 1);
     if(n < 2) return; // 來不及了：不跳，大字照常在預定時間結束
     coverJumpSeqStarted = true;
     coverJumpActive = coverJumpPlan.slice(0, n);
-    const interval = (endMs - firstMs) / (n - 1);
     // 結束時機改由序列器在「最後一下」自己觸發；原本的固定計時器改成「最晚不能超過」的保底
     clearTimeout(coverTextTimer);
-    coverTextTimer = setTimeout(endCoverText, Math.max(0, endMs + COVER_JUMP_END_TOLERANCE_MS - elapsed));
+    coverTextTimer = setTimeout(endCoverText, Math.max(0, limitMs + 200 - elapsed)); // 硬性上限（多留 200ms 給影格對齊）
     let i = 0;
-    const runNext = () => {
-      coverJumpTimer = null;
+    let dueAt = coverRevealAt + firstMs; // 下一下的應跳時間（performance.now() 座標）
+    const frame = (ts) => {
+      coverJumpRAF = null;
       if(coverTextEnded) return;
+      if(ts < dueAt - 2){ coverJumpRAF = requestAnimationFrame(frame); return; } // 還沒到時間，等下一個影格
       const isLast = (i === n - 1);
       coverJumpAt(i);
       i++;
       if(isLast){ endCoverText(); return; } // 最後一下：跟大字消失／飄動物件淡入同一個同步區塊
-      const now = performance.now() - coverRevealAt;
-      const delay = Math.max(COVER_JUMP_MIN_GAP_MS, (firstMs + i * interval) - now); // 落後就盡量追回，但相鄰兩下不低於下限
-      coverJumpTimer = setTimeout(runNext, delay);
+      dueAt = ts + COVER_JUMP_INTERVAL_MS;  // 以「這一下實際發生的時間」為基準，固定間隔後再跳下一下（不追趕）
+      coverJumpRAF = requestAnimationFrame(frame);
     };
-    coverJumpTimer = setTimeout(runNext, Math.max(0, firstMs - elapsed));
+    coverJumpRAF = requestAnimationFrame(frame);
   }
   // 封面結束後，順手預先暖機兩側「下一張」（等於原本 stepPreviewSide() 每跳一下都會做的事），
   // 讓飄動物件放行後第一下撞牆換圖也有快取可用。
@@ -2792,7 +2800,7 @@
     if(coverTextEnded) return; // 只結束一次（序列器最後一下、保底計時器可能都會呼叫到）
     coverTextEnded = true;
     clearTimeout(coverTextTimer); coverTextTimer = null;
-    clearTimeout(coverJumpTimer); coverJumpTimer = null;
+    if(coverJumpRAF){ cancelAnimationFrame(coverJumpRAF); coverJumpRAF = null; }
     document.body.classList.add('cover-text-leaving');
     document.body.classList.remove('dvd-cover-hold');
     if(dvdBounce){
