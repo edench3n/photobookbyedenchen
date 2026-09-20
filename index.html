@@ -1246,7 +1246,8 @@
      用 body 的 class 控制狀態，不動任何既有元素的 CSS：
        cover-text-active   兩塊大字顯示中（opacity 1）
        cover-text-leaving  大字淡出中（.25s）
-       dvd-cover-hold      壓住飄動物件（隱形、物理迴圈暫停、不能抓），時間到才放行
+       dvd-cover-hold      壓住飄動物件（隱形、物理迴圈暫停、不能抓）＋上方 header 小文字／時鐘（隱形），
+                           時間到才一起放行
      兩張圖的大小「共用同一個縮放單位 --cover-unit」：寬高各 = 原始 px × --cover-unit，
      所以兩張圖的比例永遠等於實際檔案尺寸的比例（不會有一張被單獨放大縮小）。
        桌機：以設計稿為準——設計稿整張封面 7958×3615px，橫式大字寬度 2269px
@@ -1291,11 +1292,20 @@
     opacity:0;
     transition: opacity .25s ease !important;
   }
-  /* 大字顯示期間壓住飄動物件：完全隱形、不接收互動（見 JS：物理迴圈同時暫停）。
-     規則一拿掉，.dvd-bounce 原本的 opacity .3s ease 就會讓它淡入。 */
-  body.dvd-cover-hold .dvd-bounce{
+  /* 大字顯示期間，除了飄動物件之外，上方那排小文字（.fixed-header：Photobook by edenchen／
+     Preview／Collab at…，各版本 preview 頁都一樣）和當下時間（.page-clock）也一起壓住：
+     全部完全隱形，等大字淡出的同一刻才跟飄動物件一起淡入。飄動物件另外在 JS 暫停物理迴圈、
+     不能被抓（見 JS endCoverText()）。規則一拿掉，各元素原本的 opacity 淡入 transition
+     （飄動物件 .3s ease；header 文字跟原本進站淡入同一套）就會自己生效。
+     header 期間 pointer-events 也關掉，避免使用者點到還看不到的 Preview／首頁標籤。 */
+  body.dvd-cover-hold .dvd-bounce,
+  body.dvd-cover-hold .fixed-header,
+  body.dvd-cover-hold .page-clock{
     opacity:0 !important;
     transition:none !important;
+  }
+  body.dvd-cover-hold .fixed-header{
+    pointer-events:none !important;
   }
   /* 平板（641~1100px）：見上面說明 */
   @media (min-width: 640.02px) and (max-width: 1100px){
