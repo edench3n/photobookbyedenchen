@@ -10811,7 +10811,23 @@
   // 新的一批（或退回 'active'，讓使用者至少能繼續互動），確保「卡死」這
   // 個症狀最壞情況下也只會多等幾秒、絕對不會永久卡住。
   let pfReshuffleWatchdogSince = 0; // 0 代表目前沒有在 reshuffling；否則記錄「進入 reshuffling 那一刻」的時間戳記
-  const PF_RESHUFFLE_WATCHDOG_MS = 12000;
+  // ---------- 修正：「怎麼點都沒反應」等太久才恢復，體感上跟真的當機沒兩樣 ----------
+  // 這道看門狗、跟下面 reshufflePhotoFallBatch() 內部那道保底逾時
+  // （PHOTO_FALL_EXIT_MAX_WAIT_MS * 2，約 3.4 秒），原本設計成「寧可等久
+  // 一點，也不要提早打斷還在正常掉落的動畫」，數字給得很寬鬆。但這兩道都
+  // 只是「時間到了，不管畫面實際狀況如何，直接強制清乾淨、換新一批」的
+  // 保底機制，本來就不影響正常情況（一兩秒內就會自然完成，根本用不到
+  // 這裡），調短不會讓平常的換批動畫變得不自然。
+  // 這裡刻意設得比內部那道保底逾時（約 3.4 秒）再寬裕一點（4.5 秒）：確保
+  // 正常情況下一定是內部那道先觸發（而且內部那道現在也加了診斷 log，見
+  // reshufflePhotoFallBatch() 內 triggerReshuffleFallback() 的完整說明）。
+  // 這樣兩層各自印出的 log 就有診斷意義：如果之後只看到「外部看門狗」這裡
+  // 印出來的警告、卻沒看到內部那道先印過任何東西，代表 reshufflePhotoFallBatch()
+  // 執行到一半就直接拋出例外了（內部那兩個 setTimeout 根本沒被排上去，見
+  // 上面 photoFallState 宣告處的完整說明）——這本身就是很直接的線索，能
+  // 排除「純粹是物理引擎裡某張照片卡住」這個方向，改往「函式本身某一步
+  // 出錯」去查。
+  const PF_RESHUFFLE_WATCHDOG_MS = 4500;
   setInterval(() => {
     if(photoFallState !== 'reshuffling'){ pfReshuffleWatchdogSince = 0; return; }
     if(!pfReshuffleWatchdogSince){ pfReshuffleWatchdogSince = Date.now(); return; }
@@ -10821,6 +10837,7 @@
     // 同一條路，會清乾淨舊照片、換上新一批）；萬一連這個函式本身都拿不到
     // 乾淨的資料（例如 pfEngine 這時已經是 null），退而求其次直接把狀態
     // 扳回 'active'，至少讓使用者接下來的單擊能重新正常運作，不會永久卡死。
+    console.warn('[photoFall] 外部看門狗被觸發——內部保底逾時沒有先接住，代表 reshufflePhotoFallBatch() 執行過程中可能拋出例外', { pfEngine: !!pfEngine, pfDragging });
     pfReshuffleWatchdogSince = 0;
     try{
       if(pfEngine){
@@ -10830,9 +10847,10 @@
         photoFallState = 'active';
       }
     } catch(err){
+      console.warn('[photoFall] 外部看門狗自己收尾也失敗了，直接退回 active', err);
       photoFallState = 'active';
     }
-  }, 1000);
+  }, 300); // 從 1000ms 調快到 300ms：只是檢查頻率，跟上面門檻共同決定最壞情況要等多久才會被接住，調快不影響正常情況的效能負擔（多數時間 photoFallState 根本不是 'reshuffling'，這段檢查一比對就直接跳過）
   // ---------- 修正：「從堆疊頁面按 Preview 之後，飄動的 e 撞邊界永遠不會換照片」----------
   // 成因：cycleDvdEImage() 傳給 setDvdBounceImageSrc() 的 shouldApply（見該處
   // 呼叫點的完整說明）原本寫的是 `() => !photoFallModeActive`——本意只是想擋掉
@@ -11124,6 +11142,45 @@
     pfStuckGrabFrames += 1;
     if(pfStuckGrabFrames >= 3) pfReleaseStuckGrab();
   }
+  // ---------- 偵錯新增：「換批偶爾會卡住」目前只抓到症狀（見
+  // reshufflePhotoFallBatch() 裡的兩層保底逾時），還沒抓到真正成因——
+  // 猜測之一是某張照片的碰撞形狀（去背輪廓切出來的多邊形）剛好算出退化
+  // 結果（例如面積趨近 0 的細長三角形），物理運算過程中數值誤差被放大，
+  // 讓這顆 body 的 position／velocity 變成 NaN 或無限大。NaN 参與比較一律
+  // 回傳 false，`NaN > vh+40` 永遠不成立，checkOldOut() 的 allOut 判斷會
+  // 永遠等不到這張「已經掉出畫面」，只能乾等保底逾時硬解——這能解釋「有時候」
+  // 而不是每次都卡（只有抽到形狀剛好刁鑽的那幾張才會踩到），但目前只是推測，
+  // 還沒有實際數據證實。
+  // 這裡加兩件事：① 每一影格順手檢查 pfItems／pfDvdItem 有沒有出現非
+  // 有限數值，真的出現就印出完整資訊（哪張圖、當下 position/velocity/angle）
+  // 方便之後在瀏覽器 console 直接看到證據，並且順手把這顆 body 安全地丟到
+  // 畫面下方、歸零速度，不讓它繼續當作永遠過不了關的路障；② 這不是「假裝
+  // 修好」——只要出現，console 一定會留下 log，藉此確認這個推測是不是真正
+  // 的成因，之後才知道該往哪個方向根治（例如去回頭檢查遮罩多邊形分解的
+  // 演算法本身）。
+  function pfCheckInvalidBodies(){
+    if(!window.Matter) return;
+    const vh = window.innerHeight;
+    const items = pfDvdItem ? pfItems.concat([pfDvdItem]) : pfItems;
+    for(let i = 0; i < items.length; i++){
+      const { body, el } = items[i];
+      if(!body) continue;
+      const p = body.position, v = body.velocity;
+      const finite = Number.isFinite(p.x) && Number.isFinite(p.y) &&
+        Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(body.angle);
+      if(finite) continue;
+      console.warn('[photoFall] 偵測到非有限數值的 body，已強制歸位', {
+        label: body.label, src: el && el.querySelector && el.querySelector('img') && el.querySelector('img').src,
+        position: { x: p.x, y: p.y }, velocity: { x: v.x, y: v.y }, angle: body.angle,
+        photoFallState, pfDragging, isDragged: pfMouseConstraint && pfMouseConstraint.body === body,
+      });
+      // 如果剛好是正被拖著的那顆，先讓它放手，避免歸位瞬間又被彈簧拉回去
+      if(pfMouseConstraint && pfMouseConstraint.body === body) pfMouseConstraint.body = null;
+      window.Matter.Body.setPosition(body, { x: window.innerWidth / 2, y: vh + 200 }); // 直接放到畫面下方、視同「已經掉出去」，讓 checkOldOut() 這一輪就能判定通過
+      window.Matter.Body.setVelocity(body, { x: 0, y: 0 });
+      window.Matter.Body.setAngularVelocity(body, 0);
+    }
+  }
   (function pfInstallGrabTracking(){
     const onTouch = (e) => {
       pfTouchesNow = e.touches ? e.touches.length : 0;
@@ -11188,6 +11245,7 @@
     let frameMs = now - pfLoopLastTime;
     pfLoopLastTime = now;
     pfCheckStuckGrab(); // 通用保險：Matter 認為按著、瀏覽器卻說沒人按 → 強制放開（完整說明見 pfReleaseStuckGrab 宣告處）
+    pfCheckInvalidBodies(); // 偵錯：抓 NaN／無限大數值的 body，順便留 log 證據（完整說明見宣告處）
     if(frameMs > 250) frameMs = 250; // 分頁切到背景很久才切回來：真實經過時間可能長達數秒甚至數分鐘，夾住上限，避免下面 while 迴圈瞬間跑出天文數字的補步
     pfAccumulatorMs += frameMs;
     let steps = 0;
@@ -14487,20 +14545,41 @@
     // 掉下來」，而且因為 photoFallState 這時停在 'reshuffling'，後續單擊
     // 也會因為狀態不是 'active' 而被直接忽略（見上面 handleDvdSingleClick()
     // 的完整說明），感覺就是「點了完全沒反應」。
-    // 修法：另外記一個絕對期限（比原本的保底逾時再寬裕 6 倍，約 10 秒），
-    // 不管 pfDragging 或 allOut 當下是什麼狀態，一旦超過這個期限就強制呼叫
-    // settleOnce()——finishReshuffleOldBatch() 內部本來就是無條件把 oldItems
-    // 的每一顆 body／DOM 元素直接移除（不看它們實際掉到哪裡），所以就算這時
-    // 候還有照片視覺上卡在畫面中間，強制收尾也只是讓它跟著這批一起被清掉、
-    // 換上新的一批，不會留下殭屍物件或讓物理世界處於不一致狀態；這是「畫面
-    // 上一張照片忽然被跳過」跟「整個堆疊頁面永久卡死」兩者之間，明顯更好的
-    // 那個結果。
-    const reshuffleHardDeadline = Date.now() + PHOTO_FALL_EXIT_MAX_WAIT_MS * 6;
+    // 修法：另外記一個絕對期限，不管 pfDragging 或 allOut 當下是什麼狀態，
+    // 一旦超過這個期限就強制呼叫 settleOnce()——finishReshuffleOldBatch()
+    // 內部本來就是無條件把 oldItems 的每一顆 body／DOM 元素直接移除（不看
+    // 它們實際掉到哪裡），所以就算這時候還有照片視覺上卡在畫面中間，強制
+    // 收尾也只是讓它跟著這批一起被清掉、換上新的一批，不會留下殭屍物件或
+    // 讓物理世界處於不一致狀態；這是「畫面上一張照片忽然被跳過」跟「整個
+    // 堆疊頁面永久卡死」兩者之間，明顯更好的那個結果。
+    // ---------- 修正：原本寬裕 6 倍（約 10 秒）太久，卡住時使用者會誤以為
+    // 當機 ----------
+    // 跟上面 pfReshuffleWatchdogSince 那道外部看門狗同一次修正：這個期限
+    // 本來就只是「時間到了不管三七二十一直接強制收尾」的保底，不影響正常
+    // 換批（通常一兩秒內就會透過 checkOldOut() 自然完成，根本用不到這裡）。
+    // 調短到 2 倍（約 3.4 秒），讓真正卡住的邊角情況也能在幾秒內恢復，而
+    // 不是讓使用者對著沒反應的畫面等上十秒。
+    // ---------- 偵錯新增：真的走到保底逾時這條路（代表換批沒有在正常時間內
+    // 自然完成），把「當下卡在哪」的實際數據印出來，之後才知道該根治什麼，
+    // 而不是繼續猜。ok 為 false 的那幾項，就是還沒被判定「掉出畫面」的照片，
+    // y 座標若明顯不合理（例如還停在畫面中間、甚至是 NaN）就是很直接的線索。
+    const reshuffleHardDeadline = Date.now() + PHOTO_FALL_EXIT_MAX_WAIT_MS * 2;
     const triggerReshuffleFallback = () => {
       const allOut = oldItems.every(({ body, h }) => pfBoxCenter(body).y - h / 2 > vh + 40);
       if((pfDragging || !allOut) && Date.now() < reshuffleHardDeadline){
         pfExitFallbackTimer = setTimeout(triggerReshuffleFallback, PHOTO_FALL_EXIT_MAX_WAIT_MS);
         return;
+      }
+      if(!allOut || pfDragging){
+        console.warn('[photoFall] reshuffle 保底逾時觸發，尚未自然完成', {
+          pfDragging,
+          stuckItems: oldItems.filter(({ body, h }) => !(pfBoxCenter(body).y - h / 2 > vh + 40))
+            .map(({ body, h }) => ({
+              label: body.label, y: pfBoxCenter(body).y, h,
+              velocity: { x: body.velocity.x, y: body.velocity.y },
+              isSleeping: !!body.isSleeping, isStatic: !!body.isStatic,
+            })),
+        });
       }
       settleOnce();
     };
