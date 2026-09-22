@@ -12312,10 +12312,31 @@
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
         if(!pair.isActive) continue;
-        const a = pair.bodyA, b = pair.bodyB;
+        // ---------- 追加修正：pairs.list 給的 bodyA/bodyB 是「實際碰到的
+        // 那一小塊矩形」(part)，不是整張照片的父物體 ----------
+        // 照片是複合物體（一張圖被拆成好幾個小矩形拼起來，見 buildFallItemBody()），
+        // pfEngine.pairs.list 裡每一對的 bodyA/bodyB，給的是 Matter narrow-phase
+        // 真正判斷出「這兩塊小矩形碰到了」的那兩個 part 物件，不是父物體本身；
+        // 而 draggedBody（= pfMouseConstraint.body）永遠是父物體（Matter 內部
+        // 用 Query.point 判斷抓到哪個物件時，回傳的一律是父層，不是被點到的
+        // 那一小塊）。原本這裡直接用 === 比對 pair.bodyA/bodyB 跟 draggedBody，
+        // 只有「剛好是第一塊矩形（parts[0]，正好等於父物體自己）」才會相等；
+        // 拖著的照片只要是用其他任何一塊小矩形去頂到別張照片，這裡永遠判斷
+        // 成不相等、直接 continue 跳過，這次真正發生的撞擊完全沒被這段補丁
+        // 處理到。這正是「明明在拖、明明真的撞到了，卻還是常常直接穿過去」
+        // 的另一個獨立成因，而且照片拆出來的矩形塊數越多（解析度越高），
+        // 中招機率越高——用內建的 matter-js 實際測試過，複合物體確實會有
+        // 這個現象（父物體以外的 part 在 pairs.list 裡是獨立物件，直接比對
+        // 永遠對不上）。
+        // 修法：先把 bodyA/bodyB 換算回各自的父物體（part.parent；如果自己
+        // 就是父物體，parent 會指向自己），所有身份比對、位置/速度的讀寫都
+        // 改成對父物體做——對子矩形單獨呼叫 Body.translate 只會讓複合物體的
+        // 形狀被拆散走位，一定要整顆父物體一起移動才對。
+        const partA = pair.bodyA, partB = pair.bodyB;
+        const parentA = partA.parent || partA, parentB = partB.parent || partB;
         let other;
-        if(a === draggedBody) other = b;
-        else if(b === draggedBody) other = a;
+        if(parentA === draggedBody) other = parentB;
+        else if(parentB === draggedBody) other = parentA;
         else continue;
         if(other.isStatic) continue; // 牆壁／地板已經有上面那段專屬處理，這裡只管別的動態物件（其他照片、飄動的 e）
         const depth = pair.collision.depth;
@@ -12326,7 +12347,7 @@
         const otherShare = other.inverseMass / totalInvMass;
         // collision.normal 的方向定義是「從 bodyA 指向 bodyB」；拖曳中的
         // body 是 bodyA 時要沿法線反方向推出去，是 bodyB 時才沿法線正方向推。
-        const sign = (a === draggedBody) ? -1 : 1;
+        const sign = (parentA === draggedBody) ? -1 : 1;
         const nx = pair.collision.normal.x * sign, ny = pair.collision.normal.y * sign;
         Matter.Body.translate(draggedBody, { x: nx * depth * draggedShare, y: ny * depth * draggedShare });
         Matter.Body.translate(other, { x: -nx * depth * otherShare, y: -ny * depth * otherShare });
@@ -12385,17 +12406,34 @@
     // 要防的「PNG 疊在一起永遠黏住不會彈開」的情況一樣會被抓到、正常喚醒
     // 分開。用引擎本來就會算好的 pairs.list，比原本兩兩 AABB 迴圈更準也
     // 更省——不用自己重新跑一輪比對。
+    // ---------- 追加修正：上面這段喚醒邏輯，對照片幾乎從來沒真正生效過 ----------
+    // 用 matter-js 實際寫小測試驗證過：Matter.js 的睡眠狀態（isSleeping）
+    // 只會更新在「加進世界的那個物件本身」，也就是複合物體的父物體上——
+    // 一張照片被拆成好幾個小矩形拼起來（見 buildFallItemBody()），父物體
+    // 睡著時，pair.bodyA/pair.bodyB 這裡實際拿到的（narrow-phase 真正判斷
+    // 出碰撞的那一小塊矩形，parts[1]、parts[2]……）isSleeping 永遠停在
+    // 初始值 false，不會跟著父物體一起變成 true。也就是說，只要這次卡住的
+    // 接觸點剛好不是發生在「第一塊矩形」（parts[0]，正好等於父物體自己）上，
+    // 下面 `a.isSleeping`／`b.isSleeping` 讀到的就是錯的（永遠 false），
+    // 上面判斷式會誤判成「兩顆都醒著、不用管」而整個跳過，等於這段本來要
+    // 抓「真的卡住疊在一起」的邏輯，對照片幾乎沒有真正生效過——這正是明明
+    // 已經加了這段修正，畫面上卻還是常常看到兩張照片卡著疊在一起、永遠不
+    // 分開的根本原因。
+    // 修法：跟下面拖曳那段用同一招，先把 bodyA/bodyB 換算回各自的父物體
+    // （part.parent；本身就是父物體時 parent 指向自己），isSleeping 的判斷
+    // 跟喚醒都改成對父物體做，才會讀到 Matter.js 真正有在維護的那個狀態。
     const PF_STUCK_OVERLAP_DEPTH = 4; // px，超過這個穿透深度才視為「真的卡住疊在一起」，一般貼合的靜止接觸深度趨近 0，遠低於這個門檻
     Events.on(pfEngine, 'afterUpdate', () => {
       const pairs = pfEngine.pairs.list;
       for(let i = 0; i < pairs.length; i++){
         const pair = pairs[i];
         if(!pair.isActive) continue;
-        const a = pair.bodyA, b = pair.bodyB;
-        if(!a.isSleeping && !b.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理，不需要介入
+        const partA = pair.bodyA, partB = pair.bodyB;
+        const parentA = partA.parent || partA, parentB = partB.parent || partB;
+        if(!parentA.isSleeping && !parentB.isSleeping) continue; // 兩顆都醒著，本來就會被正常解算處理，不需要介入
         if(pair.collision.depth < PF_STUCK_OVERLAP_DEPTH) continue; // 只是貼著的正常靜止接觸，不是真的卡住，不要叫醒
-        if(a.isSleeping) Matter.Sleeping.set(a, false);
-        if(b.isSleeping) Matter.Sleeping.set(b, false);
+        if(parentA.isSleeping) Matter.Sleeping.set(parentA, false);
+        if(parentB.isSleeping) Matter.Sleeping.set(parentB, false);
       }
     });
 
