@@ -8007,6 +8007,14 @@
   // 折衷分寸不變。
   const PF_BODY_GRID_MAX = PF_ALPHA_MASK_MAX_DIM; // 拆解精細度上限（沿長邊的格數），直接等於遮罩本身的解析度——見上方說明，這是目前這套做法所能達到的最高精細度
   const PF_BODY_GRID_CELL_MAJORITY = 0.5; // 跟 PF_ALPHA_MASK_CELL_MAJORITY 同樣的道理：降到粗網格時，這一格要「多數」原始像素都有畫到東西才算整格實心，避免只沾到一點顏色的邊緣格被整格補滿
+  // ---------- 修正「細長／稀疏圖形被撞的照片直接穿透過去」的第②道防線 ----------
+  // 光靠下面 pfLoopTick() 裡對「薄物件」夾速度上限（第①道防線）還不夠：
+  // 如果一個 part 本身薄到只有 1px，就算把速度壓到很低，只要重力持續累加，
+  // 遲早還是會薄到穿透門檻。這裡直接從碰撞體生成端下手，強制每個拆出來的
+  // 小矩形寬／高都不能小於這個安全值，細線、稀疏羽化邊緣也會被「補胖」到
+  // 這個厚度以上再組成複合物體——犧牲一點點視覺貼合精準度，換取碰撞穩定性，
+  // 跟之前修 chamfer/slop 抖動問題的取捨邏輯一致。
+  const PF_BODY_MIN_THICKNESS_PX = 5;
 
   // 把 maskEntry（見 finishMask() 的 {mask,w,h} 格式）降到粗網格、按列合併
   // 出一批矩形，每個矩形都是「以整張圖 w×h 為範圍、原點在中心」的區域座標
@@ -8074,8 +8082,11 @@
           rects.push({
             cx: (runStart + gx) / 2 * cellW - w / 2,
             cy: (gy + 0.5) * cellH - h / 2,
-            w: (gx - runStart) * cellW,
-            h: cellH,
+            // Math.max 補胖到 PF_BODY_MIN_THICKNESS_PX：中心點(cx/cy)不變，
+            // 只把太薄的邊長拉大，避免出現比穿透門檻還薄的碰撞矩形（見上面
+            // PF_BODY_MIN_THICKNESS_PX 宣告處的完整說明）。
+            w: Math.max(PF_BODY_MIN_THICKNESS_PX, (gx - runStart) * cellW),
+            h: Math.max(PF_BODY_MIN_THICKNESS_PX, cellH),
           });
           runStart = -1;
         }
@@ -8169,6 +8180,11 @@
       // 真正該對齊的點（見下面共用的 pfBoxCenter()）。
       body.plugin = body.plugin || {};
       body.plugin.pfCenterOffset = { x: x - body.position.x, y: y - body.position.y };
+      // 記住這顆複合物體裡「最薄的那一塊 part」的厚度，供 pfLoopTick() 裡的
+      // pfClampThinBodyVelocities() 動態算出這顆 body 專屬的掉落速度上限用
+      // （細節見該函式宣告處）。因為上面 rects 已經被 PF_BODY_MIN_THICKNESS_PX
+      // 補胖過，這裡算出來的值不會小於那個下限。
+      body.plugin.pfMinThickness = rects.reduce((m, r) => Math.min(m, r.w, r.h), Infinity);
       if(typeof angle === 'number') Body.setAngle(body, angle);
       return body;
     }
@@ -8194,6 +8210,7 @@
       // 特判「這顆是不是複合物體」。
       body.plugin = body.plugin || {};
       body.plugin.pfCenterOffset = { x: 0, y: 0 };
+      body.plugin.pfMinThickness = Math.min(w, h);
       return body;
     }
     return null;
@@ -11308,6 +11325,36 @@
   let pfLoopLastTime = null;
   let pfAccumulatorMs = 0;
 
+  // ---------- 修正「細長／稀疏圖形被撞的照片直接穿透過去」的第①道防線 ----------
+  // 根本成因：Matter.js 用的是離散碰撞偵測，每一步先把 body 依速度移動到
+  // 新位置、再檢查有沒有碰到東西。如果一個 body 一步移動的距離，比它自己
+  // 最薄的那個 part 還厚（見 buildFallItemBody() 裡存的
+  // body.plugin.pfMinThickness），下一步偵測時兩者可能已經「隔著」重疊
+  // 區域、完全沒被算成碰到，視覺上就是直接穿過去。
+  // 修法：每個物理子步(Engine.update)真正執行之前，逐一檢查目前世界裡的
+  // body，把速度夾在「這一步的位移量 < 自己最薄厚度的一半」以內。只有真的
+  // 很薄、掉很快的物件會被壓速度，一般大照片的碰撞矩形本來就厚很多，完全
+  // 不會被這個上限夾到，掉落手感不受影響。
+  const PF_THIN_BODY_SPEED_FACTOR = 0.5; // 允許每步位移量最多是自身最薄厚度的這個比例，數字越小越保守（更不容易穿透，但薄物件掉得更慢）
+  function pfClampThinBodyVelocities(){
+    if(!window.Matter) return;
+    const items = pfDvdItem ? pfItems.concat([pfDvdItem]) : pfItems;
+    const dtSec = PF_FIXED_STEP_MS / 1000;
+    for(let i = 0; i < items.length; i++){
+      const body = items[i] && items[i].body;
+      if(!body || body.isStatic || !body.plugin) continue;
+      const thickness = body.plugin.pfMinThickness;
+      if(!thickness || !Number.isFinite(thickness)) continue; // 沒記錄厚度資訊的 body（例如舊版殘留、非本函式建立的 body）不動它，維持原行為
+      const maxSpeed = (thickness * PF_THIN_BODY_SPEED_FACTOR) / dtSec;
+      const v = body.velocity;
+      const speed = Math.hypot(v.x, v.y);
+      if(speed > maxSpeed && speed > 0){
+        const scale = maxSpeed / speed;
+        window.Matter.Body.setVelocity(body, { x: v.x * scale, y: v.y * scale });
+      }
+    }
+  }
+
   function pfLoopTick(now){
     pfLoopRafId = requestAnimationFrame(pfLoopTick);
     if(pfLoopLastTime === null){ pfLoopLastTime = now; return; } // 第一幀還沒有「上一幀」可以算真實經過時間，先跳過，下一幀開始正常累加
@@ -11319,6 +11366,7 @@
     pfAccumulatorMs += frameMs;
     let steps = 0;
     while(pfAccumulatorMs >= PF_FIXED_STEP_MS && steps < PF_MAX_SUBSTEPS){
+      pfClampThinBodyVelocities(); // 每個子步真正推進之前先夾速度，見上面宣告處的完整說明
       window.Matter.Engine.update(pfEngine, PF_FIXED_STEP_MS);
       pfAccumulatorMs -= PF_FIXED_STEP_MS;
       steps++;
