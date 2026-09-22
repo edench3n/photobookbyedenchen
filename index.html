@@ -1570,7 +1570,9 @@
     /* ↓使用者要求電腦版（滑鼠/桌機，不含手機、平板——那兩個 breakpoint 各自
        獨立覆寫，完全不受這裡影響，見下面 max-width:640px、hover:none 那兩段）
        再放大 1.5 倍：87.11/20.91/255.52 → 130.67/31.37/383.28 */
-    height: calc(clamp(130.67px, 31.37vw, 383.28px) * var(--dvd-area-scale, 1));
+    /* ↓使用者反應電腦版剛才那次放大後偏大，要求再縮小約 0.7 倍：
+       130.67/31.37/383.28 → 91.47/21.96/268.30 */
+    height: calc(clamp(91.47px, 21.96vw, 268.30px) * var(--dvd-area-scale, 1));
     width:auto;
     -webkit-user-drag:none;
     -webkit-touch-callout:none;
