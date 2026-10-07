@@ -1,22 +1,7 @@
 {
-  "generatedAt": "2026-10-07T20:07:58.575Z",
+  "generatedAt": "2026-10-07T20:32:59.971Z",
   "folderId": "1wQI2MMoORB78XoC8E5GnxKkLLUEZsxPn",
   "photos": [
-    {
-      "id": "1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu",
-      "title": "Kaohsiung, Taiwan",
-      "aspect": 1.3333333333333333,
-      "files": {
-        "grid": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-grid.jpg",
-        "tiny": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-tiny.jpg",
-        "thumb": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-thumb.jpg",
-        "previewMobile": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-previewMobile.jpg",
-        "previewDesktop": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-previewDesktop.jpg",
-        "detailMobile": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-detailMobile.jpg",
-        "detail": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-detail.jpg",
-        "fallback": "photos/1ExmcKmaHuG7h4e4Qy-BR_jamRGZFEvNu-fallback.jpg"
-      }
-    },
     {
       "id": "1GNTd1UPqswODe683IWN0HO6oINXIaQ5p",
       "title": "Daikanyama, Tokyo",
@@ -753,21 +738,6 @@
       }
     },
     {
-      "id": "1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT",
-      "title": "Chiayi, Taiwan",
-      "aspect": 1.5,
-      "files": {
-        "grid": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-grid.jpg",
-        "tiny": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-tiny.jpg",
-        "thumb": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-thumb.jpg",
-        "previewMobile": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-previewMobile.jpg",
-        "previewDesktop": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-previewDesktop.jpg",
-        "detailMobile": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-detailMobile.jpg",
-        "detail": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-detail.jpg",
-        "fallback": "photos/1g0Xg_7e5OsFq7GkKm5VXdIhfCGE6kuCT-fallback.jpg"
-      }
-    },
-    {
       "id": "10Nrtvl12DKlCK8wYtE9o7Q1sdN4SeVfe",
       "title": "Wan Chai, Hong Kong",
       "aspect": 0.6664449617559028,
@@ -945,21 +915,6 @@
         "detailMobile": "photos/1JcuOH5J0tSPuFfx_jpGN0bX_LuJO0TrS-detailMobile.jpg",
         "detail": "photos/1JcuOH5J0tSPuFfx_jpGN0bX_LuJO0TrS-detail.jpg",
         "fallback": "photos/1JcuOH5J0tSPuFfx_jpGN0bX_LuJO0TrS-fallback.jpg"
-      }
-    },
-    {
-      "id": "11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_",
-      "title": "Kevin",
-      "aspect": 0.6611570247933884,
-      "files": {
-        "grid": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-grid.jpg",
-        "tiny": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-tiny.jpg",
-        "thumb": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-thumb.jpg",
-        "previewMobile": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-previewMobile.jpg",
-        "previewDesktop": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-previewDesktop.jpg",
-        "detailMobile": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-detailMobile.jpg",
-        "detail": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-detail.jpg",
-        "fallback": "photos/11Mcsw2wsyOpwYfpRsE6xs6MNJF6zlkv_-fallback.jpg"
       }
     },
     {
@@ -1488,21 +1443,6 @@
       }
     },
     {
-      "id": "1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4",
-      "title": "Shibuya City, Tokyo",
-      "aspect": 1.5002730748225013,
-      "files": {
-        "grid": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-grid.jpg",
-        "tiny": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-tiny.jpg",
-        "thumb": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-thumb.jpg",
-        "previewMobile": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-previewMobile.jpg",
-        "previewDesktop": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-previewDesktop.jpg",
-        "detailMobile": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-detailMobile.jpg",
-        "detail": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-detail.jpg",
-        "fallback": "photos/1r8waZLK8Ah3izRRMx2lcM5tIg5mrgsF4-fallback.jpg"
-      }
-    },
-    {
       "id": "13FwroQjFXO2KC5Rr1woz-KEz4TOvbVM4",
       "title": "kaohsiung, Taiwan",
       "aspect": 0.75,
@@ -1665,21 +1605,6 @@
         "detailMobile": "photos/1zjUMynCxLGL5r5MGYMYmct3me2fka8gQ-detailMobile.jpg",
         "detail": "photos/1zjUMynCxLGL5r5MGYMYmct3me2fka8gQ-detail.jpg",
         "fallback": "photos/1zjUMynCxLGL5r5MGYMYmct3me2fka8gQ-fallback.jpg"
-      }
-    },
-    {
-      "id": "1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2",
-      "title": "Chiayi, Taiwan ",
-      "aspect": 0.75,
-      "files": {
-        "grid": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-grid.jpg",
-        "tiny": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-tiny.jpg",
-        "thumb": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-thumb.jpg",
-        "previewMobile": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-previewMobile.jpg",
-        "previewDesktop": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-previewDesktop.jpg",
-        "detailMobile": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-detailMobile.jpg",
-        "detail": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-detail.jpg",
-        "fallback": "photos/1OfslpI__lVOwoJxYpc8Sm0zC6FpNqtj2-fallback.jpg"
       }
     },
     {
