@@ -42,6 +42,9 @@
  * 可選環境變數：
  *   PHOTOBOOK_FOLDER_ID   （預設沿用網站現在用的那個資料夾 id）
  *   OUTPUT_DIR            （預設是目前工作目錄，也就是 repo 根目錄）
+ *   ALLOW_PARTIAL=1       （預設：只要有任何照片/尺寸下載失敗就 exit 1、不動
+ *                          manifest，避免把缺檔的結果 commit 上去；設成 1 則
+ *                          允許缺檔也照樣寫出 manifest）
  * ------------------------------------------------------------------
  */
 
@@ -102,22 +105,59 @@ function hashStringToInt(str) {
   return h >>> 0;
 }
 
+const ALLOW_PARTIAL = process.env.ALLOW_PARTIAL === '1';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 帶指數退避重試的 fetch：429／5xx／403（Google CDN 限流常回 403）／網路錯誤
+// 都會重試；其他 4xx 重試也沒用，直接放棄。成功回傳 Response，失敗回傳 null。
+async function fetchWithRetry(url, label, attempts = 4) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return res;
+      lastErr = new Error(`${res.status} ${res.statusText}`);
+      const retriable = res.status >= 500 || [403, 408, 429].includes(res.status);
+      if (!retriable) break;
+    } catch (e) {
+      lastErr = e;
+    }
+    if (i < attempts) await sleep(1000 * 2 ** (i - 1));
+  }
+  console.warn(`  ⚠ ${label} 失敗：${lastErr && lastErr.message}`);
+  return null;
+}
+
+// 檢查 bytes 真的是圖片（JPEG / PNG / WebP / GIF）。Drive 被限流時常回 200 +
+// HTML 錯誤頁，單看 HTTP 狀態碼會被騙，存成 .jpg 就變成永遠載不出來的壞檔。
+function looksLikeImage(buf) {
+  if (!buf || buf.length < 512) return false;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+  if (buf[0] === 0x89 && buf.toString('latin1', 1, 4) === 'PNG') return true;
+  if (buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return true;
+  if (buf.toString('latin1', 0, 3) === 'GIF') return true;
+  return false;
+}
+
 async function listDriveFiles() {
   const q = encodeURIComponent(
     `'${PHOTOBOOK_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed = false`
   );
-  // 跟 index.html 的 fetchDriveImages() 要同一組欄位：imageMediaMetadata
-  // 用來算長寬比（給照片物理堆疊模式用），thumbnailLink 用來組出各種尺寸
-  // 的下載網址。
-  const fields = encodeURIComponent('files(id,name,thumbnailLink,imageMediaMetadata(width,height))');
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=name&key=${GOOGLE_API_KEY}`;
-
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Drive files.list 失敗：${res.status} ${res.statusText}`);
-  }
-  const data = await res.json();
-  return data.files || [];
+  // nextPageToken + pageSize=1000：Drive 預設一頁只回 100 筆，原本沒做分頁，
+  // 資料夾超過 100 張時多出來的照片永遠不會出現。
+  const fields = encodeURIComponent('nextPageToken,files(id,name,thumbnailLink,imageMediaMetadata(width,height))');
+  const all = [];
+  let pageToken = '';
+  do {
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&pageSize=1000&orderBy=name&key=${GOOGLE_API_KEY}` +
+      (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+    const res = await fetchWithRetry(url, 'Drive files.list');
+    if (!res) throw new Error('Drive files.list 失敗（重試後仍失敗）');
+    const data = await res.json();
+    all.push(...(data.files || []));
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+  return all;
 }
 
 function extFromContentType(contentType) {
@@ -128,47 +168,70 @@ function extFromContentType(contentType) {
   return 'jpg'; // Drive 的 thumbnailLink 預設多半回 jpeg
 }
 
-async function downloadOneSize(thumbBase, id, sizeKey, sizePx) {
-  const downloadUrl = `${thumbBase}=s${sizePx}`;
-  const res = await fetch(downloadUrl);
-  if (!res.ok) {
-    console.warn(`  ⚠ ${id} 的 ${sizeKey}(${sizePx}px) 下載失敗：${res.status} ${res.statusText}`);
-    return null;
+// 找上一次 run 已經下載好、而且驗證過是真圖片的同尺寸檔案（沒有就回 null）。
+function findExisting(id, sizeKey) {
+  if (!fs.existsSync(IMAGES_DIR)) return null;
+  const prefix = `${id}-${sizeKey}.`;
+  for (const name of fs.readdirSync(IMAGES_DIR)) {
+    if (!name.startsWith(prefix)) continue;
+    try {
+      if (looksLikeImage(fs.readFileSync(path.join(IMAGES_DIR, name)))) return `photos/${name}`;
+    } catch (e) { /* 讀不到就當作沒有 */ }
   }
-  const contentType = res.headers.get('content-type') || '';
-  const ext = extFromContentType(contentType);
-  const buf = Buffer.from(await res.arrayBuffer());
-
-  const fileName = `${id}-${sizeKey}.${ext}`;
-  fs.writeFileSync(path.join(IMAGES_DIR, fileName), buf);
-  return `photos/${fileName}`;
+  return null;
 }
 
-async function downloadOnePhoto(file) {
-  if (!file.thumbnailLink) {
-    console.warn(`  ⚠ ${file.id} 沒有 thumbnailLink，略過（需要人工確認這個檔案）`);
-    return null;
+async function downloadOneSize(thumbBase, id, sizeKey, sizePx) {
+  if (thumbBase) {
+    const res = await fetchWithRetry(`${thumbBase}=s${sizePx}`, `${id} 的 ${sizeKey}(${sizePx}px)`);
+    if (res) {
+      const contentType = res.headers.get('content-type') || '';
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (contentType.startsWith('image/') && looksLikeImage(buf)) {
+        const fileName = `${id}-${sizeKey}.${extFromContentType(contentType)}`;
+        fs.writeFileSync(path.join(IMAGES_DIR, fileName), buf);
+        // 副檔名可能跟上次不同，清掉同尺寸的舊檔避免殘留
+        const prefix = `${id}-${sizeKey}.`;
+        for (const n of fs.readdirSync(IMAGES_DIR)) {
+          if (n.startsWith(prefix) && n !== fileName) fs.unlinkSync(path.join(IMAGES_DIR, n));
+        }
+        return `photos/${fileName}`;
+      }
+      console.warn(`  ⚠ ${id} 的 ${sizeKey} 回傳的不是圖片（content-type=${contentType}，${buf.length} bytes），丟棄`);
+    }
   }
-  const thumbBase = file.thumbnailLink.replace(/=s\d+$/, '');
+  // 這次下載失敗：沿用上次已經驗證過的檔案，不要讓一次暫時性失敗讓照片消失
+  const old = findExisting(id, sizeKey);
+  if (old) {
+    console.warn(`  ↺ ${id} 的 ${sizeKey} 沿用上次的檔案`);
+    return old;
+  }
+  return null;
+}
+
+// 回傳 { entry, missing }：missing 是這張照片這次拿不到的尺寸清單。
+async function downloadOnePhoto(file) {
+  let thumbBase = null;
+  if (file.thumbnailLink) {
+    thumbBase = file.thumbnailLink.replace(/=s\d+$/, '');
+  } else {
+    console.warn(`  ⚠ ${file.id}（${file.name}）沒有 thumbnailLink（Drive 可能還沒產生縮圖，或格式不支援）`);
+  }
   const meta = file.imageMediaMetadata;
   const aspect = (meta && meta.width && meta.height) ? (meta.width / meta.height) : 1;
 
   const files = {};
+  const missing = [];
   for (const [sizeKey, sizePx] of Object.entries(SIZES)) {
     const relPath = await downloadOneSize(thumbBase, file.id, sizeKey, sizePx);
     if (relPath) files[sizeKey] = relPath;
+    else missing.push(sizeKey);
   }
-
-  // 8 種尺寸裡只要有任何一種下載成功，這張照片就算數（跟 build-e-manifest.js
-  // 一樣，單一次請求失敗不代表整個檔案要放棄；前端各欄位本來就有好幾層
-  // fallback，缺一兩種尺寸也不會整個壞掉）。全部都失敗才整張跳過。
-  if (Object.keys(files).length === 0) return null;
+  if (Object.keys(files).length === 0) return { entry: null, missing };
 
   return {
-    id: file.id,
-    title: file.name.replace(/\.[^/.]+$/, ''),
-    aspect,
-    files,
+    entry: { id: file.id, title: file.name.replace(/\.[^/.]+$/, ''), aspect, files },
+    missing,
   };
 }
 
@@ -182,32 +245,54 @@ async function main() {
     return;
   }
 
-  // 跟前端 fetchDriveImages() 同一套固定隨機排序，直接把結果寫進 manifest
-  // 陣列順序，前端不用再自己排一次。
   rawFiles.sort((a, b) => hashStringToInt(a.id + RANDOM_ORDER_SALT) - hashStringToInt(b.id + RANDOM_ORDER_SALT));
 
   fs.mkdirSync(IMAGES_DIR, { recursive: true });
 
   const photos = [];
   const currentIds = new Set();
+  const problems = [];
   for (const file of rawFiles) {
     console.log(`下載 ${file.name} (${file.id}) ...`);
-    const entry = await downloadOnePhoto(file);
+    const { entry, missing } = await downloadOnePhoto(file);
     if (entry) {
       photos.push(entry);
       currentIds.add(entry.id);
+      if (missing.length) problems.push(`${file.name} (${file.id})：缺 ${missing.join(', ')}`);
+    } else {
+      problems.push(`${file.name} (${file.id})：全部尺寸都失敗，整張照片會消失`);
     }
+    await sleep(150); // 稍微放慢，降低被 Google CDN 限流的機率
   }
 
-  // 清掉 Drive 資料夾裡已經刪除、但上次還留在 photos/ 裡的舊檔案，
-  // 避免 repo 越積越多用不到的圖。檔名格式是 <driveId>-<size>.<ext>，
-  // 只清「前綴 id 已經不在這次清單裡」的檔案。
-  const existing = fs.existsSync(IMAGES_DIR) ? fs.readdirSync(IMAGES_DIR) : [];
-  for (const name of existing) {
+  // 有任何缺檔就中止，不覆寫 manifest、不清舊檔，workflow 會顯示紅燈、
+  // 不會 commit，網站維持上一個完整的版本。
+  if (problems.length) {
+    console.error(`\n有 ${problems.length} 張照片下載不完整：`);
+    problems.forEach(p => console.error('  - ' + p));
+    if (!ALLOW_PARTIAL) {
+      console.error('中止，不更新 photos-manifest.json（若要允許缺檔照樣輸出，設 ALLOW_PARTIAL=1）。');
+      process.exit(1);
+    }
+    console.warn('ALLOW_PARTIAL=1：照樣輸出缺檔的 manifest。');
+  }
+
+  // 清掉 Drive 資料夾裡已經刪除、但還留在 photos/ 裡的舊檔案
+  for (const name of fs.readdirSync(IMAGES_DIR)) {
     const id = name.replace(/-[a-zA-Z]+\.[a-z0-9]+$/i, '');
     if (!currentIds.has(id)) {
       console.log(`清除已下架的照片：${name}`);
       fs.unlinkSync(path.join(IMAGES_DIR, name));
+    }
+  }
+
+  // 最後檢查：manifest 裡每個路徑都真的存在
+  for (const p of photos) {
+    for (const rel of Object.values(p.files)) {
+      if (!fs.existsSync(path.join(OUTPUT_DIR, rel))) {
+        console.error(`manifest 指向不存在的檔案：${rel}`);
+        process.exit(1);
+      }
     }
   }
 
